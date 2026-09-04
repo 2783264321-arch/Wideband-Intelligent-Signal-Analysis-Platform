@@ -1,0 +1,20 @@
+{
+  "id": "spacenet_14",
+  "version": 1,
+  "classes": [
+    {"id": 0, "name": "WiFi 20MHz QPSK"},
+    {"id": 1, "name": "WiFi 20MHz 16QAM"},
+    {"id": 2, "name": "WiFi 20MHz 64QAM"},
+    {"id": 3, "name": "WiFi 40MHz QPSK"},
+    {"id": 4, "name": "WiFi 40MHz 16QAM"},
+    {"id": 5, "name": "WiFi 40MHz 64QAM"},
+    {"id": 6, "name": "BLE LE1M"},
+    {"id": 7, "name": "BLE LE2M"},
+    {"id": 8, "name": "Zigbee"},
+    {"id": 9, "name": "LoRa 250kHz"},
+    {"id": 10, "name": "SRRC QPSK"},
+    {"id": 11, "name": "SRRC 16QAM"},
+    {"id": 12, "name": "AM"},
+    {"id": 13, "name": "FM"}
+  ]
+}
