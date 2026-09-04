@@ -4,7 +4,9 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
 from app.core.errors import PlatformError
+from app.db.base import Base, load_domain_models
 from app.db.session import Database
+from app.storage.service import StorageService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -12,6 +14,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Wideband Intelligent Signal Analysis Platform")
     app.state.settings = settings
     app.state.database = Database(settings.database_url)
+    app.state.storage = StorageService(settings.data_root)
+
+    load_domain_models()
+    Base.metadata.create_all(app.state.database.engine)
 
     app.add_middleware(
         CORSMiddleware,
