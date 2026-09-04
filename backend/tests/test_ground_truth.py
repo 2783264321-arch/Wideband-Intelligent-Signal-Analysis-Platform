@@ -1,11 +1,12 @@
 from pathlib import Path
 
-FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_iq_complex64.bin"
+from iq_fixture import write_tiny_iq
+
 GT_FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_ground_truth.json"
 
 
 def _import_recording(client, *, label_space="spacenet_14"):
-    with FIXTURE.open("rb") as handle:
+    with write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")).open("rb") as handle:
         response = client.post(
             "/api/recordings",
             data={

@@ -68,11 +68,12 @@ def test_core_entities_persist_and_reload(client):
 
 from pathlib import Path
 
-FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_iq_complex64.bin"
+from iq_fixture import write_tiny_iq
+
 
 
 def test_import_list_and_detail_complex64_recording(client):
-    with FIXTURE.open("rb") as handle:
+    with write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")).open("rb") as handle:
         response = client.post(
             "/api/recordings",
             data={
@@ -117,7 +118,7 @@ def test_import_rejects_invalid_complex64_byte_length(client):
 
 
 def test_import_rejects_nonpositive_sample_rate(client):
-    with FIXTURE.open("rb") as handle:
+    with write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")).open("rb") as handle:
         response = client.post(
             "/api/recordings",
             data={

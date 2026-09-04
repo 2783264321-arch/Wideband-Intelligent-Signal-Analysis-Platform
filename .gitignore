@@ -19,3 +19,5 @@ data/cache/spectrograms/*
 
 # TypeScript build cache
 *.tsbuildinfo
+
+backend/tests/.tiny_iq.bin

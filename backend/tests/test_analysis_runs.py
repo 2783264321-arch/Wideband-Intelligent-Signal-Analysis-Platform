@@ -1,15 +1,16 @@
 from pathlib import Path
 import time
 
+from iq_fixture import write_tiny_iq
+
 from app.pipelines.base import RecordingInput
 from app.pipelines.dummy import DummyPipeline
 from app.pipelines.registry import PipelineRegistry
 
-FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_iq_complex64.bin"
 
 
 def _import_recording(client, *, label_space="spacenet_14"):
-    with FIXTURE.open("rb") as handle:
+    with write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")).open("rb") as handle:
         response = client.post(
             "/api/recordings",
             data={

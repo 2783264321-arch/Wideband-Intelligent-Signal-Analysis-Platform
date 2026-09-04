@@ -2,11 +2,12 @@ from pathlib import Path
 
 import numpy as np
 
+from iq_fixture import write_tiny_iq
+
 from app.dsp.iq import read_iq
 from app.dsp.stft import compute_stft
 from app.recordings.model import RecordingModel
 
-FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_iq_complex64.bin"
 
 
 def _recording() -> RecordingModel:
@@ -29,7 +30,7 @@ def _recording() -> RecordingModel:
 
 
 def test_compute_stft_returns_physical_frequency_axis_and_expected_peaks():
-    iq = np.fromfile(FIXTURE, dtype="<c8")
+    iq = np.fromfile(write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")), dtype="<c8")
     result = compute_stft(
         iq,
         sample_rate_hz=1_000_000.0,
@@ -53,7 +54,7 @@ def test_compute_stft_returns_physical_frequency_axis_and_expected_peaks():
 
 
 def test_spectrogram_api_returns_cached_preview_and_physical_bounds(client):
-    with FIXTURE.open("rb") as handle:
+    with write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")).open("rb") as handle:
         imported = client.post(
             "/api/recordings",
             data={

@@ -2,14 +2,15 @@ from pathlib import Path
 
 import numpy as np
 
+from iq_fixture import write_tiny_iq
+
 from app.analysis.model import AnalysisRunModel
 from app.detections.model import DetectionResultModel
 
-FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_iq_complex64.bin"
 
 
 def _import_recording(client):
-    with FIXTURE.open("rb") as handle:
+    with write_tiny_iq(Path(__file__).with_name(".tiny_iq.bin")).open("rb") as handle:
         response = client.post(
             "/api/recordings",
             data={
