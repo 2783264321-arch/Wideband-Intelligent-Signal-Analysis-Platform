@@ -1,0 +1,24 @@
+{
+  "detections": [
+    {
+      "id": "det_demo_001",
+      "t_start_s": 0.0005,
+      "t_end_s": 0.0035,
+      "f_low_hz": 2441060000.0,
+      "f_high_hz": 2441100000.0,
+      "class_id": 6,
+      "class_name": "BLE LE1M",
+      "confidence": 0.94
+    },
+    {
+      "id": "det_demo_002",
+      "t_start_s": 0.0008,
+      "t_end_s": 0.0028,
+      "f_low_hz": 2441200000.0,
+      "f_high_hz": 2441300000.0,
+      "class_id": 9,
+      "class_name": "LoRa 250kHz",
+      "confidence": 0.88
+    }
+  ]
+}

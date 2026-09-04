@@ -15,6 +15,8 @@ const meta: SpectrogramMeta = {
 const detections: DetectionResult[] = [
   {
     id: "det_002",
+    runId: "run",
+    recordingId: "rec",
     tStartS: 0.2,
     tEndS: 0.5,
     fLowHz: 2_420_000_000,

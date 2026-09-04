@@ -1,5 +1,7 @@
 export interface DetectionResult {
   id: string;
+  runId: string;
+  recordingId: string;
   tStartS: number;
   tEndS: number;
   fLowHz: number;
@@ -7,6 +9,18 @@ export interface DetectionResult {
   classId: number;
   className: string;
   confidence: number;
+  scores?: Record<string, number> | null;
+}
+
+export interface GroundTruthResult {
+  id: string;
+  recordingId: string;
+  tStartS: number;
+  tEndS: number;
+  fLowHz: number;
+  fHighHz: number;
+  classId: number;
+  className: string;
 }
 
 export interface SpectrogramMeta {
@@ -35,4 +49,15 @@ export interface RecordingDetail extends RecordingSummary {
   numSamples: number;
   datasetSplit: string | null;
   labelSpace: string | null;
+}
+
+export interface WaveformData {
+  timeS: number[];
+  i: number[];
+  q: number[];
+}
+
+export interface FFTData {
+  frequencyHz: number[];
+  magnitudeDb: number[];
 }

@@ -1,12 +1,13 @@
 import { Button, Space } from "antd";
 import { useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, WheelEvent } from "react";
-import type { DetectionResult, SpectrogramMeta } from "../../api/types";
+import type { DetectionResult, GroundTruthResult, SpectrogramMeta } from "../../api/types";
 import { frequencyToPercentFromTop, timeToPercent } from "./coordinates";
 
 interface SpectrogramViewerProps {
   meta: SpectrogramMeta;
   detections: DetectionResult[];
+  groundTruth?: GroundTruthResult[];
   selectedDetectionId?: string;
   onSelectDetection?: (id: string) => void;
 }
@@ -24,9 +25,18 @@ const frameStyle: CSSProperties = {
 
 const clamp = (value: number, low: number, high: number) => Math.min(Math.max(value, low), high);
 
+function boxGeometry(box: { tStartS: number; tEndS: number; fLowHz: number; fHighHz: number }, meta: SpectrogramMeta) {
+  const x = timeToPercent(box.tStartS, meta.tStartS, meta.tEndS);
+  const x2 = timeToPercent(box.tEndS, meta.tStartS, meta.tEndS);
+  const y = frequencyToPercentFromTop(box.fHighHz, meta.fLowHz, meta.fHighHz);
+  const y2 = frequencyToPercentFromTop(box.fLowHz, meta.fLowHz, meta.fHighHz);
+  return { x, y, width: Math.max(x2 - x, 0.4), height: Math.max(y2 - y, 0.8) };
+}
+
 export function SpectrogramViewer({
   meta,
   detections,
+  groundTruth = [],
   selectedDetectionId,
   onSelectDetection,
 }: SpectrogramViewerProps) {
@@ -108,11 +118,24 @@ export function SpectrogramViewer({
             aria-label="Detection overlays"
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
           >
+            {groundTruth.map((item) => {
+              const geometry = boxGeometry(item, meta);
+              return (
+                <rect
+                  key={`gt-${item.id}`}
+                  {...geometry}
+                  fill="transparent"
+                  stroke="currentColor"
+                  strokeWidth={0.45}
+                  strokeDasharray="1.4 1"
+                  opacity={0.8}
+                  vectorEffect="non-scaling-stroke"
+                  aria-label={`Ground truth ${item.id}`}
+                />
+              );
+            })}
             {detections.map((detection) => {
-              const x = timeToPercent(detection.tStartS, meta.tStartS, meta.tEndS);
-              const x2 = timeToPercent(detection.tEndS, meta.tStartS, meta.tEndS);
-              const y = frequencyToPercentFromTop(detection.fHighHz, meta.fLowHz, meta.fHighHz);
-              const y2 = frequencyToPercentFromTop(detection.fLowHz, meta.fLowHz, meta.fHighHz);
+              const geometry = boxGeometry(detection, meta);
               const selected = detection.id === selectedDetectionId;
               return (
                 <g
@@ -130,10 +153,7 @@ export function SpectrogramViewer({
                   style={{ cursor: "pointer" }}
                 >
                   <rect
-                    x={x}
-                    y={y}
-                    width={Math.max(x2 - x, 0.4)}
-                    height={Math.max(y2 - y, 0.8)}
+                    {...geometry}
                     fill="transparent"
                     stroke={selected ? "#ffffff" : "#ffd666"}
                     strokeWidth={selected ? 0.8 : 0.45}

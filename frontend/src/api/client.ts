@@ -1,4 +1,4 @@
-import type { RecordingDetail, SpectrogramMeta } from "./types";
+import type { DetectionResult, FFTData, GroundTruthResult, RecordingDetail, SpectrogramMeta, WaveformData } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -9,6 +9,16 @@ export function apiUrl(path: string): string {
 
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(apiUrl(path));
+  if (!response.ok) throw new Error(`API request failed: ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!response.ok) throw new Error(`API request failed: ${response.status}`);
   return response.json() as Promise<T>;
 }
@@ -38,23 +48,73 @@ interface SpectrogramWire {
   f_high_hz: number;
 }
 
+interface DetectionWire {
+  id: string;
+  run_id: string;
+  recording_id: string;
+  t_start_s: number;
+  t_end_s: number;
+  f_low_hz: number;
+  f_high_hz: number;
+  class_id: number;
+  class_name: string;
+  confidence: number;
+  scores_json?: Record<string, number> | null;
+}
+
+interface GroundTruthWire {
+  id: string;
+  recording_id: string;
+  t_start_s: number;
+  t_end_s: number;
+  f_low_hz: number;
+  f_high_hz: number;
+  class_id: number;
+  class_name: string;
+}
+
+const mapRecording = (item: RecordingWire): RecordingDetail => ({
+  id: item.id,
+  name: item.name,
+  dataFormat: item.data_format,
+  sampleRateHz: item.sample_rate_hz,
+  centerFrequencyHz: item.center_frequency_hz,
+  frequencyLowHz: item.frequency_low_hz,
+  frequencyHighHz: item.frequency_high_hz,
+  numSamples: item.num_samples,
+  durationS: item.duration_s,
+  datasetName: item.dataset_name,
+  datasetSplit: item.dataset_split,
+  labelSpace: item.label_space,
+  hasGroundTruth: item.has_ground_truth,
+});
+
+const mapDetection = (item: DetectionWire): DetectionResult => ({
+  id: item.id,
+  runId: item.run_id,
+  recordingId: item.recording_id,
+  tStartS: item.t_start_s,
+  tEndS: item.t_end_s,
+  fLowHz: item.f_low_hz,
+  fHighHz: item.f_high_hz,
+  classId: item.class_id,
+  className: item.class_name,
+  confidence: item.confidence,
+  scores: item.scores_json,
+});
+
+export async function listRecordings(): Promise<RecordingDetail[]> {
+  return (await apiGet<RecordingWire[]>("/api/recordings")).map(mapRecording);
+}
+
+export async function importRecording(form: FormData): Promise<RecordingDetail> {
+  const response = await fetch(apiUrl("/api/recordings"), { method: "POST", body: form });
+  if (!response.ok) throw new Error(`API request failed: ${response.status}`);
+  return mapRecording(await response.json() as RecordingWire);
+}
+
 export async function getRecording(recordingId: string): Promise<RecordingDetail> {
-  const item = await apiGet<RecordingWire>(`/api/recordings/${recordingId}`);
-  return {
-    id: item.id,
-    name: item.name,
-    dataFormat: item.data_format,
-    sampleRateHz: item.sample_rate_hz,
-    centerFrequencyHz: item.center_frequency_hz,
-    frequencyLowHz: item.frequency_low_hz,
-    frequencyHighHz: item.frequency_high_hz,
-    numSamples: item.num_samples,
-    durationS: item.duration_s,
-    datasetName: item.dataset_name,
-    datasetSplit: item.dataset_split,
-    labelSpace: item.label_space,
-    hasGroundTruth: item.has_ground_truth,
-  };
+  return mapRecording(await apiGet<RecordingWire>(`/api/recordings/${recordingId}`));
 }
 
 export async function getSpectrogram(recordingId: string): Promise<SpectrogramMeta> {
@@ -67,4 +127,37 @@ export async function getSpectrogram(recordingId: string): Promise<SpectrogramMe
     fLowHz: item.f_low_hz,
     fHighHz: item.f_high_hz,
   };
+}
+
+export async function getDetections(runId: string): Promise<DetectionResult[]> {
+  return (await apiGet<DetectionWire[]>(`/api/analysis-runs/${runId}/detections`)).map(mapDetection);
+}
+
+export async function getDetection(detectionId: string): Promise<DetectionResult> {
+  return mapDetection(await apiGet<DetectionWire>(`/api/detections/${detectionId}`));
+}
+
+export async function getGroundTruth(recordingId: string): Promise<GroundTruthResult[]> {
+  const items = await apiGet<GroundTruthWire[]>(`/api/recordings/${recordingId}/ground-truth`);
+  return items.map((item) => ({
+    id: item.id,
+    recordingId: item.recording_id,
+    tStartS: item.t_start_s,
+    tEndS: item.t_end_s,
+    fLowHz: item.f_low_hz,
+    fHighHz: item.f_high_hz,
+    classId: item.class_id,
+    className: item.class_name,
+  }));
+}
+
+export async function getWaveform(recordingId: string, tStartS: number, tEndS: number, maxPoints = 4000): Promise<WaveformData> {
+  const query = new URLSearchParams({ t_start_s: String(tStartS), t_end_s: String(tEndS), max_points: String(maxPoints) });
+  const item = await apiGet<{ time_s: number[]; i: number[]; q: number[] }>(`/api/recordings/${recordingId}/waveform?${query}`);
+  return { timeS: item.time_s, i: item.i, q: item.q };
+}
+
+export async function getFFT(detectionId: string, maxPoints = 2048): Promise<FFTData> {
+  const item = await apiGet<{ frequency_hz: number[]; magnitude_db: number[] }>(`/api/detections/${detectionId}/fft?max_points=${maxPoints}`);
+  return { frequencyHz: item.frequency_hz, magnitudeDb: item.magnitude_db };
 }

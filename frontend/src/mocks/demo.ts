@@ -22,6 +22,8 @@ export const demoSpectrogram: SpectrogramMeta = {
 export const demoDetections: DetectionResult[] = [
   {
     id: "det_001",
+    runId: "mock-run",
+    recordingId: "rec_demo",
     tStartS: 0.015,
     tEndS: 0.078,
     fLowHz: 2_407_000_000,
@@ -32,6 +34,8 @@ export const demoDetections: DetectionResult[] = [
   },
   {
     id: "det_002",
+    runId: "mock-run",
+    recordingId: "rec_demo",
     tStartS: 0.032,
     tEndS: 0.08,
     fLowHz: 2_417_973_850,
@@ -42,6 +46,8 @@ export const demoDetections: DetectionResult[] = [
   },
   {
     id: "det_003",
+    runId: "mock-run",
+    recordingId: "rec_demo",
     tStartS: 0.005,
     tEndS: 0.045,
     fLowHz: 2_451_000_000,
