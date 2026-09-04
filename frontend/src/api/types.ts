@@ -27,3 +27,12 @@ export interface RecordingSummary {
   durationS: number;
   hasGroundTruth: boolean;
 }
+
+export interface RecordingDetail extends RecordingSummary {
+  dataFormat: string;
+  frequencyLowHz: number;
+  frequencyHighHz: number;
+  numSamples: number;
+  datasetSplit: string | null;
+  labelSpace: string | null;
+}

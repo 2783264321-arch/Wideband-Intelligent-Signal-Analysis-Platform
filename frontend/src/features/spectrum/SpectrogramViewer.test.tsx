@@ -38,3 +38,35 @@ test("selects a detection from its physical-coordinate overlay", () => {
   fireEvent.click(screen.getByLabelText("Select det_002"));
   expect(onSelectDetection).toHaveBeenCalledWith("det_002");
 });
+
+test("reports physical time and frequency under the pointer", () => {
+  render(<SpectrogramViewer meta={meta} detections={[]} />);
+  const viewer = screen.getByTestId("spectrogram-viewer");
+  vi.spyOn(viewer, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 1000,
+    bottom: 500,
+    width: 1000,
+    height: 500,
+    toJSON: () => ({}),
+  });
+
+  fireEvent.mouseMove(viewer, { clientX: 250, clientY: 125 });
+  expect(screen.getByTestId("cursor-readout")).toHaveTextContent("0.250000 s");
+  expect(screen.getByTestId("cursor-readout")).toHaveTextContent("2460.000 MHz");
+});
+
+test("supports zoom and reset without changing physical overlays", () => {
+  render(<SpectrogramViewer meta={meta} detections={detections} />);
+  const viewer = screen.getByTestId("spectrogram-viewer");
+
+  fireEvent.wheel(viewer, { deltaY: -100 });
+  expect(screen.getByTestId("zoom-readout")).not.toHaveTextContent("1.00×");
+
+  fireEvent.click(screen.getByRole("button", { name: "Reset View" }));
+  expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
+  expect(screen.getByLabelText("Select det_002")).toBeInTheDocument();
+});

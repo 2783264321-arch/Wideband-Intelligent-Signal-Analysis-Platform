@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import Settings
 from app.core.errors import PlatformError
@@ -8,6 +9,7 @@ from app.db.base import Base, load_domain_models
 from app.db.session import Database
 from app.storage.service import StorageService
 from app.recordings.router import router as recordings_router
+from app.dsp.router import router as dsp_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,6 +38,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     app.include_router(recordings_router)
+    app.include_router(dsp_router)
+
+    spectrogram_cache = settings.data_root / "cache" / "spectrograms"
+    spectrogram_cache.mkdir(parents=True, exist_ok=True)
+    app.mount("/media/spectrograms", StaticFiles(directory=spectrogram_cache), name="spectrograms")
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
