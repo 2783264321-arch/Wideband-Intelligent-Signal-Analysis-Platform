@@ -12,6 +12,9 @@ from app.recordings.router import router as recordings_router
 from app.dsp.router import router as dsp_router
 from app.ground_truth.router import router as ground_truth_router
 from app.detections.router import router as detections_router
+from app.analysis.job_manager import LocalJobManager
+from app.analysis.router import router as analysis_router
+from app.pipelines.registry import create_pipeline_registry
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -20,6 +23,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.database = Database(settings.database_url)
     app.state.storage = StorageService(settings.data_root)
+    app.state.pipeline_registry = create_pipeline_registry()
+    app.state.job_manager = LocalJobManager(settings)
 
     load_domain_models()
     Base.metadata.create_all(app.state.database.engine)
@@ -43,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(dsp_router)
     app.include_router(ground_truth_router)
     app.include_router(detections_router)
+    app.include_router(analysis_router)
 
     spectrogram_cache = settings.data_root / "cache" / "spectrograms"
     spectrogram_cache.mkdir(parents=True, exist_ok=True)

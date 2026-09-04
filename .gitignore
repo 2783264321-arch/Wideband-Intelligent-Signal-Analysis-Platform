@@ -16,3 +16,6 @@ data/cache/*
 !data/cache/spectrograms/
 data/cache/spectrograms/*
 !data/cache/spectrograms/.gitkeep
+
+# TypeScript build cache
+*.tsbuildinfo

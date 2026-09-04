@@ -161,3 +161,75 @@ export async function getFFT(detectionId: string, maxPoints = 2048): Promise<FFT
   const item = await apiGet<{ frequency_hz: number[]; magnitude_db: number[] }>(`/api/detections/${detectionId}/fft?max_points=${maxPoints}`);
   return { frequencyHz: item.frequency_hz, magnitudeDb: item.magnitude_db };
 }
+
+interface PipelineDefinitionWire {
+  id: string;
+  name: string;
+  version: string;
+  label_space: string;
+  recommended_device: string;
+  cpu_supported: boolean;
+  stages: string[];
+  inspectable_stages: string[];
+}
+
+interface AnalysisRunWire {
+  id: string;
+  recording_id: string;
+  pipeline_id: string;
+  pipeline_version: string;
+  executor: string;
+  status: import("./types").AnalysisRunStatus;
+  parameters_json: Record<string, unknown>;
+  hardware_info_json?: Record<string, unknown> | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_type?: string | null;
+  error_message?: string | null;
+  worker_pid?: number | null;
+}
+
+function mapAnalysisRun(item: AnalysisRunWire): import("./types").AnalysisRun {
+  return {
+    id: item.id,
+    recordingId: item.recording_id,
+    pipelineId: item.pipeline_id,
+    pipelineVersion: item.pipeline_version,
+    executor: item.executor,
+    status: item.status,
+    parameters: item.parameters_json,
+    hardwareInfo: item.hardware_info_json,
+    startedAt: item.started_at,
+    finishedAt: item.finished_at,
+    errorType: item.error_type,
+    errorMessage: item.error_message,
+    workerPid: item.worker_pid,
+  };
+}
+
+export async function listPipelines(): Promise<import("./types").PipelineDefinition[]> {
+  const items = await apiGet<PipelineDefinitionWire[]>("/api/pipelines");
+  return items.map((item) => ({
+    id: item.id,
+    name: item.name,
+    version: item.version,
+    labelSpace: item.label_space,
+    recommendedDevice: item.recommended_device,
+    cpuSupported: item.cpu_supported,
+    stages: item.stages,
+    inspectableStages: item.inspectable_stages,
+  }));
+}
+
+export async function createAnalysisRun(recordingId: string, pipelineId: string): Promise<import("./types").AnalysisRun> {
+  return mapAnalysisRun(await apiPostJson<AnalysisRunWire>("/api/analysis-runs", {
+    recording_id: recordingId,
+    pipeline_id: pipelineId,
+    executor: "local_cpu",
+    parameters: {},
+  }));
+}
+
+export async function getAnalysisRun(runId: string): Promise<import("./types").AnalysisRun> {
+  return mapAnalysisRun(await apiGet<AnalysisRunWire>(`/api/analysis-runs/${runId}`));
+}

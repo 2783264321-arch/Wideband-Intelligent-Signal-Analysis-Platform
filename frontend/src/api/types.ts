@@ -61,3 +61,32 @@ export interface FFTData {
   frequencyHz: number[];
   magnitudeDb: number[];
 }
+
+export interface PipelineDefinition {
+  id: string;
+  name: string;
+  version: string;
+  labelSpace: string;
+  recommendedDevice: string;
+  cpuSupported: boolean;
+  stages: string[];
+  inspectableStages: string[];
+}
+
+export type AnalysisRunStatus = "pending" | "running" | "completed" | "failed" | "interrupted";
+
+export interface AnalysisRun {
+  id: string;
+  recordingId: string;
+  pipelineId: string;
+  pipelineVersion: string;
+  executor: string;
+  status: AnalysisRunStatus;
+  parameters: Record<string, unknown>;
+  hardwareInfo?: Record<string, unknown> | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  errorType?: string | null;
+  errorMessage?: string | null;
+  workerPid?: number | null;
+}
