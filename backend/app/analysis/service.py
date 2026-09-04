@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from uuid import uuid4
 
@@ -8,6 +11,22 @@ from app.analysis.model import AnalysisRunModel
 from app.core.errors import PlatformError
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
+
+
+def mark_stale_running_runs_interrupted(session: Session) -> int:
+    statement = (
+        update(AnalysisRunModel)
+        .where(AnalysisRunModel.status == "running")
+        .values(
+            status="interrupted",
+            error_type="ANALYSIS_INTERRUPTED",
+            error_message="Previous local analysis process ended before platform restart.",
+            finished_at=datetime.now(timezone.utc),
+        )
+    )
+    result = session.execute(statement)
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 class AnalysisService:

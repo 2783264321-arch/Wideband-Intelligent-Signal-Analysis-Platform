@@ -96,3 +96,66 @@ def test_analysis_run_rejects_unknown_pipeline_as_business_error(client):
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "PIPELINE_INCOMPATIBLE"
+
+
+def test_app_startup_marks_stale_running_run_interrupted(settings):
+    from fastapi.testclient import TestClient
+
+    from app.analysis.model import AnalysisRunModel
+    from app.db.base import Base, load_domain_models
+    from app.db.session import Database
+    from app.main import create_app
+    from app.recordings.model import RecordingModel
+
+    database = Database(settings.database_url)
+    load_domain_models()
+    Base.metadata.create_all(database.engine)
+    with database.session_factory() as session:
+        recording = RecordingModel(
+            id="rec_stale",
+            name="stale-recording",
+            data_path="recordings/rec_stale/raw.iq",
+            data_format="complex64_le",
+            sample_rate_hz=1_000_000.0,
+            center_frequency_hz=2_441_000_000.0,
+            frequency_low_hz=2_440_500_000.0,
+            frequency_high_hz=2_441_500_000.0,
+            num_samples=4096,
+            duration_s=0.004096,
+            dataset_name=None,
+            dataset_split=None,
+            label_space="spacenet_14",
+            has_ground_truth=False,
+        )
+        run = AnalysisRunModel(
+            id="run_stale",
+            recording_id=recording.id,
+            pipeline_id="dummy",
+            pipeline_version="1.0",
+            executor="local_cpu",
+            status="running",
+            parameters_json={},
+            worker_pid=999999,
+        )
+        session.add_all([recording, run])
+        session.commit()
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/analysis-runs/run_stale")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "interrupted"
+        assert payload["error_type"] == "ANALYSIS_INTERRUPTED"
+        assert "previous local analysis" in payload["error_message"].lower()
+
+
+def test_business_error_response_has_stable_shape(client):
+    response = client.get("/api/detections/does-not-exist")
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "DETECTION_NOT_FOUND",
+            "message": "Detection result was not found.",
+            "details": {},
+        }
+    }

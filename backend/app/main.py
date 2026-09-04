@@ -14,6 +14,7 @@ from app.ground_truth.router import router as ground_truth_router
 from app.detections.router import router as detections_router
 from app.analysis.job_manager import LocalJobManager
 from app.analysis.router import router as analysis_router
+from app.analysis.service import mark_stale_running_runs_interrupted
 from app.pipelines.registry import create_pipeline_registry
 
 
@@ -28,6 +29,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     load_domain_models()
     Base.metadata.create_all(app.state.database.engine)
+    with app.state.database.session_factory() as recovery_session:
+        mark_stale_running_runs_interrupted(recovery_session)
 
     app.add_middleware(
         CORSMiddleware,
