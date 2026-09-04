@@ -5,6 +5,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { getDetections } from "../api/client";
 import type { DetectionResult } from "../api/types";
 import { bandwidthHz, centerFrequencyHz, durationS } from "../features/signals/derived";
+import { spectrumPathForRun } from "../features/signals/spectrumNavigation";
 
 export function SignalsPage() {
   const navigate = useNavigate();
@@ -46,7 +47,7 @@ export function SignalsPage() {
           <Typography.Title level={2} style={{ marginBottom: 0 }}>Signals</Typography.Title>
           <Typography.Text type="secondary">Persisted DetectionResults for {runId}</Typography.Text>
         </div>
-        <Button disabled={!recordingId} onClick={() => recordingId && navigate(`/spectrum/${recordingId}`)}>Show in Spectrum</Button>
+        <Button disabled={!recordingId} onClick={() => recordingId && navigate(spectrumPathForRun(recordingId, runId))}>Show in Spectrum</Button>
       </div>
       <Table rowKey="id" dataSource={detections} columns={columns} pagination={false} />
     </>

@@ -5,11 +5,12 @@ import { getDetection, getFFT, getGroundTruth, getSpectrogram, getWaveform } fro
 import type { DetectionResult, FFTData, GroundTruthResult, SpectrogramMeta, WaveformData } from "../api/types";
 import { LineSeriesChart } from "../features/signal-detail/LineSeriesChart";
 import { SignalSummary } from "../features/signals/SignalSummary";
+import { spectrumPathForRun } from "../features/signals/spectrumNavigation";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
 
 export function SignalDetailPage() {
   const navigate = useNavigate();
-  const { detectionId = "" } = useParams();
+  const { runId = "", detectionId = "" } = useParams();
   const [detection, setDetection] = useState<DetectionResult | null>(null);
   const [spectrogram, setSpectrogram] = useState<SpectrogramMeta | null>(null);
   const [groundTruth, setGroundTruth] = useState<GroundTruthResult[]>([]);
@@ -46,7 +47,7 @@ export function SignalDetailPage() {
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <Typography.Title level={2} style={{ margin: 0 }}>Signal Detail · {detection.id}</Typography.Title>
-        <Button onClick={() => navigate(`/spectrum/${detection.recordingId}?selected=${detection.id}`)}>Show in Spectrum</Button>
+        <Button onClick={() => navigate(spectrumPathForRun(detection.recordingId, runId, detection.id))}>Show in Spectrum</Button>
       </div>
       <SignalSummary detection={detection} />
       <Row gutter={16}>

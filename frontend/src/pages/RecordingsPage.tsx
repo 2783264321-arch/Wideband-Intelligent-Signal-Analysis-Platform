@@ -82,7 +82,7 @@ export function RecordingsPage() {
           title={recording.name}
           extra={recording.datasetName ? <Tag>{recording.datasetName}</Tag> : <Tag>Custom IQ</Tag>}
           actions={[
-            <Button key="open" type="link" onClick={() => navigate(`/spectrum/${recording.id}`)}>Start Analysis</Button>,
+            <Button key="open" type="link" onClick={() => navigate(`/spectrum/${recording.id}`)}>Open Spectrum</Button>,
           ]}
         >
           <Space wrap>

@@ -19,7 +19,7 @@ export function MainLayout() {
           mode="inline"
           selectedKeys={[selected]}
           onClick={({ key }) => {
-            const paths: Record<string, string> = { recordings: "/recordings", spectrum: "/spectrum/rec_demo", signals: "/signals/mock-run", algorithm: "/algorithm-lab", settings: "/settings" };
+            const paths: Record<string, string> = { recordings: "/recordings", spectrum: "/recordings", signals: "/recordings", algorithm: "/algorithm-lab", settings: "/settings" };
             navigate(paths[key]);
           }}
           items={[
