@@ -65,3 +65,68 @@ def test_core_entities_persist_and_reload(client):
         assert stored.analysis_runs[0].status == "completed"
         assert stored.ground_truth[0].class_name == "LoRa 250kHz"
         assert stored.analysis_runs[0].detections[0].confidence == 0.92
+
+from pathlib import Path
+
+FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "tiny_iq_complex64.bin"
+
+
+def test_import_list_and_detail_complex64_recording(client):
+    with FIXTURE.open("rb") as handle:
+        response = client.post(
+            "/api/recordings",
+            data={
+                "name": "tiny-demo",
+                "sample_rate_hz": "1000000",
+                "center_frequency_hz": "2441000000",
+                "data_format": "complex64_le",
+            },
+            files={"file": ("tiny.bin", handle, "application/octet-stream")},
+        )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["num_samples"] == 4096
+    assert payload["duration_s"] == 0.004096
+    assert payload["frequency_low_hz"] == 2440500000.0
+    assert payload["frequency_high_hz"] == 2441500000.0
+
+    listing = client.get("/api/recordings")
+    assert listing.status_code == 200
+    assert [item["id"] for item in listing.json()] == [payload["id"]]
+
+    detail = client.get(f"/api/recordings/{payload['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["name"] == "tiny-demo"
+
+
+def test_import_rejects_invalid_complex64_byte_length(client):
+    response = client.post(
+        "/api/recordings",
+        data={
+            "name": "broken",
+            "sample_rate_hz": "1000000",
+            "center_frequency_hz": "2441000000",
+            "data_format": "complex64_le",
+        },
+        files={"file": ("broken.bin", b"12345", "application/octet-stream")},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_RECORDING"
+    assert list((client.app.state.settings.data_root / "imports").glob("*")) == []
+
+
+def test_import_rejects_nonpositive_sample_rate(client):
+    with FIXTURE.open("rb") as handle:
+        response = client.post(
+            "/api/recordings",
+            data={
+                "name": "bad-fs",
+                "sample_rate_hz": "0",
+                "center_frequency_hz": "2441000000",
+                "data_format": "complex64_le",
+            },
+            files={"file": ("tiny.bin", handle, "application/octet-stream")},
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_RECORDING"

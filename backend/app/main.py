@@ -7,6 +7,7 @@ from app.core.errors import PlatformError
 from app.db.base import Base, load_domain_models
 from app.db.session import Database
 from app.storage.service import StorageService
+from app.recordings.router import router as recordings_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -33,6 +34,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
         )
+
+    app.include_router(recordings_router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
