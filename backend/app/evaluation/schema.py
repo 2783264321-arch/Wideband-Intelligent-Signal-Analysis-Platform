@@ -39,8 +39,10 @@ class RunMatchStateRead(BaseModel):
     matched: bool
     detection_id: str | None = None
     iou: float | None = None
+    class_id: int | None = None
     class_name: str | None = None
     confidence: float | None = None
+    class_correct: bool | None = None
     bbox: PhysicalBoxRead | None = None
 
 
@@ -54,11 +56,40 @@ class CaseRead(BaseModel):
     run_b: RunMatchStateRead
 
 
+class ClassificationConfusionRead(BaseModel):
+    gt_class_id: int
+    gt_class_name: str
+    pred_class_id: int
+    pred_class_name: str
+    count: int
+
+
+class ClassificationMetricsRead(BaseModel):
+    matched_count: int
+    class_correct: int
+    class_wrong: int
+    matched_accuracy: float | None
+    confusions: list[ClassificationConfusionRead]
+
+
+class ClassAwareMetricsRead(BaseModel):
+    tp: int
+    fp: int
+    fn: int
+    precision: float
+    recall: float
+    f1: float
+
+
 class RunComparisonRead(BaseModel):
     run_id: str
     pipeline_id: str
     pipeline_name: str
     metrics: DetectionMetricsRead
+    classification_applicable: bool
+    classification_reason: str | None = None
+    classification: ClassificationMetricsRead | None = None
+    class_aware: ClassAwareMetricsRead | None = None
 
 
 class AlgorithmLabCompareResponse(BaseModel):

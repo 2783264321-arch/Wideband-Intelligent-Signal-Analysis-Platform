@@ -24,13 +24,13 @@ def _add_recording(session, *, rec_id="rec_cmp", has_gt=True, label_space="space
     return recording
 
 
-def _add_run(session, *, run_id, rec_id, status="completed", pipeline_id="stft_energy_detector", pipeline_version="1.0"):
+def _add_run(session, *, run_id, rec_id, status="completed", pipeline_id="stft_energy_detector", pipeline_version="1.0", executor="local_cpu"):
     run = AnalysisRunModel(
         id=run_id,
         recording_id=rec_id,
         pipeline_id=pipeline_id,
         pipeline_version=pipeline_version,
-        executor="local_cpu",
+        executor=executor,
         status=status,
         parameters_json={},
     )
@@ -199,3 +199,104 @@ def test_run_list_filters_by_recording_and_completed_status(client):
     assert response.status_code == 200
     run_ids = [item["id"] for item in response.json()]
     assert run_ids == ["run_a"]
+
+def test_stft_detector_classification_not_applicable(client):
+    database = client.app.state.database
+    with database.session_factory() as session:
+        _add_recording(session)
+        _add_run(session, run_id="run_a", rec_id="rec_cmp", pipeline_id="stft_energy_detector")
+        _add_run(session, run_id="run_b", rec_id="rec_cmp", pipeline_id="dummy")
+        _add_gt(session, gt_id="gt0", rec_id="rec_cmp", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_detection(session, det_id="det_a0", run_id="run_a", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=0, class_name="Signal")
+        session.commit()
+    response = _compare(client, run_a="run_a", run_b="run_b")
+    assert response.status_code == 200, response.text
+    run_a = response.json()["run_a"]
+    assert run_a["classification_applicable"] is False
+    assert run_a["classification_reason"] == "detection_only_pipeline"
+    assert run_a["classification"] is None
+    assert run_a["class_aware"] is None
+    # localization metrics still present
+    assert run_a["metrics"]["tp"] == 1
+
+
+def test_classification_capable_run_returns_metrics(client):
+    database = client.app.state.database
+    with database.session_factory() as session:
+        _add_recording(session)
+        _add_run(session, run_id="run_a", rec_id="rec_cmp", pipeline_id="dummy")
+        _add_run(session, run_id="run_b", rec_id="rec_cmp", pipeline_id="stft_energy_detector")
+        _add_gt(session, gt_id="gt0", rec_id="rec_cmp", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_gt(session, gt_id="gt1", rec_id="rec_cmp", t0=0.02, t1=0.04, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_detection(session, det_id="det_a0", run_id="run_a", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9, class_name="LoRa 250kHz")
+        _add_detection(session, det_id="det_a1", run_id="run_a", t0=0.02, t1=0.04, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=13, class_name="FM")
+        session.commit()
+    response = _compare(client, run_a="run_a", run_b="run_b")
+    assert response.status_code == 200, response.text
+    run_a = response.json()["run_a"]
+    assert run_a["classification_applicable"] is True
+    classification = run_a["classification"]
+    assert classification["matched_count"] == 2
+    assert classification["class_correct"] == 1
+    assert classification["class_wrong"] == 1
+    assert classification["matched_accuracy"] == 0.5
+    assert len(classification["confusions"]) == 1
+    assert classification["confusions"][0]["gt_class_id"] == 9
+    assert classification["confusions"][0]["pred_class_id"] == 13
+    aware = run_a["class_aware"]
+    assert aware["tp"] == 1
+    assert aware["fp"] == 1
+    assert aware["fn"] == 1
+    assert aware["precision"] == 0.5
+    assert aware["recall"] == 0.5
+
+
+def test_imported_run_classification_applicable(client):
+    database = client.app.state.database
+    with database.session_factory() as session:
+        _add_recording(session)
+        _add_run(session, run_id="run_a", rec_id="rec_cmp", pipeline_id="zoomspec_yolo26n", executor="imported")
+        _add_run(session, run_id="run_b", rec_id="rec_cmp", pipeline_id="stft_energy_detector")
+        _add_gt(session, gt_id="gt0", rec_id="rec_cmp", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_detection(session, det_id="det_a0", run_id="run_a", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9, class_name="LoRa 250kHz")
+        session.commit()
+    response = _compare(client, run_a="run_a", run_b="run_b")
+    assert response.status_code == 200, response.text
+    run_a = response.json()["run_a"]
+    assert run_a["classification_applicable"] is True
+    assert run_a["classification_reason"] is None
+    assert run_a["classification"]["matched_count"] == 1
+    assert run_a["classification"]["matched_accuracy"] == 1.0
+    assert run_a["class_aware"]["tp"] == 1
+
+
+def test_cases_include_class_fields_and_correctness(client):
+    database = client.app.state.database
+    with database.session_factory() as session:
+        _add_recording(session)
+        _add_run(session, run_id="run_a", rec_id="rec_cmp", pipeline_id="dummy")
+        _add_run(session, run_id="run_b", rec_id="rec_cmp", pipeline_id="stft_energy_detector")
+        _add_gt(session, gt_id="gt0", rec_id="rec_cmp", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_detection(session, det_id="det_a0", run_id="run_a", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9, class_name="LoRa 250kHz")
+        _add_detection(session, det_id="det_b0", run_id="run_b", t0=0.0, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=0, class_name="Signal")
+        session.commit()
+    response = _compare(client, run_a="run_a", run_b="run_b")
+    assert response.status_code == 200, response.text
+    case = response.json()["cases"][0]
+    assert case["run_a"]["matched"] is True
+    assert case["run_a"]["class_id"] == 9
+    assert case["run_a"]["class_name"] == "LoRa 250kHz"
+    assert case["run_a"]["class_correct"] is True
+    # detection-only run: class fields shown, class_correct null
+    assert case["run_b"]["matched"] is True
+    assert case["run_b"]["class_id"] == 0
+    assert case["run_b"]["class_name"] == "Signal"
+    assert case["run_b"]["class_correct"] is None
+    # unmatched case: class_correct null
+    with database.session_factory() as session:
+        _add_gt(session, gt_id="gt1", rec_id="rec_cmp", t0=0.05, t1=0.07, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        session.commit()
+    response2 = _compare(client, run_a="run_a", run_b="run_b")
+    missed = next(c for c in response2.json()["cases"] if c["ground_truth_id"] == "gt1")
+    assert missed["run_a"]["matched"] is False
+    assert missed["run_a"]["class_correct"] is None
