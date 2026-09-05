@@ -29,6 +29,11 @@ class DatasetSelection(BaseModel):
     label_space: str = Field(min_length=1)
 
 
+class RunResolutionRequest(DatasetSelection):
+    pipeline_id: str = Field(min_length=1)
+    pipeline_version: str = Field(min_length=1)
+
+
 class FrozenRunItemInput(BaseModel):
     recording_id: str
     analysis_run_id: str | None

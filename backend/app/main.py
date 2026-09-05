@@ -18,6 +18,9 @@ from app.detections.router import router as detections_router
 from app.analysis.job_manager import LocalJobManager
 from app.analysis.router import router as analysis_router
 from app.analysis.service import mark_stale_running_runs_interrupted
+from app.benchmarks.job_manager import LocalBenchmarkJobManager
+from app.benchmarks.router import router as benchmarks_router
+from app.benchmarks.service import mark_stale_running_evaluations_interrupted
 from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 
@@ -30,12 +33,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.storage = StorageService(settings.data_root)
     app.state.pipeline_registry = create_pipeline_registry()
     app.state.job_manager = LocalJobManager(settings)
+    app.state.benchmark_job_manager = LocalBenchmarkJobManager(settings)
 
     load_domain_models()
     Base.metadata.create_all(app.state.database.engine)
     run_additive_migrations(app.state.database.engine)
     with app.state.database.session_factory() as recovery_session:
         mark_stale_running_runs_interrupted(recovery_session)
+        mark_stale_running_evaluations_interrupted(recovery_session)
 
     app.add_middleware(
         CORSMiddleware,
@@ -60,6 +65,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(analysis_router)
     app.include_router(imported_runs_router)
     app.include_router(evaluation_router)
+    app.include_router(benchmarks_router)
 
     spectrogram_cache = settings.data_root / "cache" / "spectrograms"
     spectrogram_cache.mkdir(parents=True, exist_ok=True)
