@@ -310,13 +310,24 @@ class DatasetBenchmarkService:
             raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
         if evaluation.status != "pending":
             raise PlatformError("INVALID_BENCHMARK_TRANSITION", "Only pending evaluations can be started.", 409)
-        evaluation.worker_pid = job_manager.start(evaluation.id)
-        evaluation.status = "running"
+        try:
+            worker_pid = job_manager.start(evaluation.id)
+        except Exception as exc:
+            evaluation.status = "failed"
+            evaluation.error_type = "BENCHMARK_FAILED"
+            evaluation.error_message = str(exc)[:1000]
+            evaluation.completed_at = datetime.now(timezone.utc)
+            self.session.commit()
+            raise PlatformError("BENCHMARK_FAILED", "Unable to start local benchmark worker.") from exc
+        # Parent only records the worker PID. The running transition is owned by
+        # the worker subprocess so a fast worker that completes before this commit
+        # is never overwritten back to running.
+        evaluation.worker_pid = worker_pid
         self.session.commit()
         self.session.refresh(evaluation)
         return evaluation
-    
-    
+        
+        
     def retry_evaluation(self, evaluation_id: str) -> DatasetEvaluationModel:
         evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
         if evaluation is None:

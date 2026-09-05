@@ -174,3 +174,44 @@ def test_completed_evaluation_cannot_rerun(client, settings):
         svc = DatasetBenchmarkService(session)
         with pytest.raises(Exception):
             svc.start_evaluation(evaluation_id)
+def test_parent_start_does_not_override_fast_worker_completed(client, settings):
+    _build_tiny_dataset(client)
+    evaluation_id = _create_evaluation(client, settings)
+
+    class FakeFastJobManager:
+        def start(self, evaluation_id):
+            with client.app.state.database.session_factory() as session:
+                evaluation = session.get(DatasetEvaluationModel, evaluation_id)
+                evaluation.status = "completed"
+                evaluation.aggregate_metrics_json = {"localization": {"ap50": 1.0}}
+                session.commit()
+            return 424242
+
+    with client.app.state.database.session_factory() as session:
+        svc = DatasetBenchmarkService(session)
+        svc.start_evaluation(evaluation_id, FakeFastJobManager())
+
+    evaluation = _get(client, evaluation_id)
+    assert evaluation.status == "completed"  # must not be overwritten back to running
+    assert evaluation.worker_pid == 424242
+
+
+def test_spawn_failure_marks_failed(client, settings):
+    _build_tiny_dataset(client)
+    evaluation_id = _create_evaluation(client, settings)
+
+    class FailingJobManager:
+        def start(self, evaluation_id):
+            raise OSError("cannot spawn worker")
+
+    from app.core.errors import PlatformError
+    with client.app.state.database.session_factory() as session:
+        svc = DatasetBenchmarkService(session)
+        with pytest.raises(PlatformError) as exc:
+            svc.start_evaluation(evaluation_id, FailingJobManager())
+        assert exc.value.code == "BENCHMARK_FAILED"
+
+    evaluation = _get(client, evaluation_id)
+    assert evaluation.status == "failed"
+    assert evaluation.error_type == "BENCHMARK_FAILED"
+    assert "cannot spawn worker" in (evaluation.error_message or "")
