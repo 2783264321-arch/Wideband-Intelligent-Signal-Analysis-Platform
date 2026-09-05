@@ -171,3 +171,14 @@ def test_class_aware_summary_macro_mean():
     summary = class_aware_ap_summary(gts, preds)
     assert summary.map50 == pytest.approx(1.0)
     assert len(summary.per_class) == 2
+def test_gt_tie_break_is_order_independent():
+    gt_a = _gt("r1", 0, 0.0, 1.0, 100.0, 200.0, 9)
+    gt_b = _gt("r1", 0, 1.0, 2.0, 100.0, 200.0, 9)
+    predictions = [
+        _pred("r1", 0, 0.0, 2.0, 100.0, 200.0, 9, 0.9),   # IoU 0.5 to both A and B
+        _pred("r1", 0, 0.0, 1.0, 100.0, 200.0, 9, 0.8),   # exact match to A
+    ]
+    ab = average_precision_at_iou([gt_a, gt_b], predictions, iou_threshold=0.5, class_id=None)
+    ba = average_precision_at_iou([gt_b, gt_a], predictions, iou_threshold=0.5, class_id=None)
+    assert ab.ap == pytest.approx(ba.ap)
+    assert ab.gt_count == ba.gt_count

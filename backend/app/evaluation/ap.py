@@ -80,6 +80,18 @@ def prediction_sort_key(pred: EvaluationPrediction):
     )
 
 
+def _gt_sort_key(gt: EvaluationGroundTruth):
+    return (
+        gt.manifest_order,
+        gt.t_start_s,
+        gt.f_low_hz,
+        gt.t_end_s,
+        gt.f_high_hz,
+        gt.class_id,
+        gt.class_name,
+    )
+
+
 def _as_box(obj) -> dict:
     return {
         "t_start_s": obj.t_start_s,
@@ -102,6 +114,11 @@ def average_precision_at_iou(
     else:
         eligible_gt = [gt for gt in ground_truths if gt.class_id == class_id]
         eligible_pred = [pred for pred in predictions if pred.class_id == class_id]
+
+    # Canonical GT ordering makes greedy assignment independent of DB row
+    # insertion order, so the same semantic dataset yields the same AP across
+    # machines. Local IDs / UUIDs / row order never participate.
+    eligible_gt.sort(key=_gt_sort_key)
 
     if not eligible_gt:
         return AveragePrecisionResult(ap=None, gt_count=0, prediction_count=len(eligible_pred))
