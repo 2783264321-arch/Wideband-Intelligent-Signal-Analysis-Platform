@@ -20,5 +20,8 @@ data/cache/spectrograms/*
 # TypeScript build cache
 *.tsbuildinfo
 
+# Python package build artifacts (editable install)
+*.egg-info/
+
 backend/tests/.tiny_iq.bin
 backend/tests/.burst_iq.bin
