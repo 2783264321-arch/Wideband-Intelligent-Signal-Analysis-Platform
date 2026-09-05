@@ -84,3 +84,48 @@ def test_manifest_carries_dataset_identity_and_gt():
     assert manifest.label_space == "spacenet_14"
     assert len(manifest.entries[0].ground_truth) == 1
     assert manifest.entries[0].ground_truth[0].class_name == "LoRa 250kHz"
+def test_manifest_hash_regression_is_frozen():
+    a = ManifestRecording(
+        recording_id="rec_a",
+        name="a",
+        data_format="float16_interleaved_le",
+        sample_rate_hz=50_000_000.0,
+        center_frequency_hz=2_455_000_000.0,
+        frequency_low_hz=2_430_000_000.0,
+        frequency_high_hz=2_480_000_000.0,
+        num_samples=7_500_000,
+        duration_s=0.15,
+        ground_truth=(
+            ManifestGroundTruth(
+                t_start_s=0.032,
+                t_end_s=0.08,
+                f_low_hz=2_447_973_850.0,
+                f_high_hz=2_448_026_150.0,
+                class_id=9,
+                class_name="LoRa 250kHz",
+            ),
+        ),
+    )
+    b = ManifestRecording(
+        recording_id="rec_b",
+        name="b",
+        data_format="float16_interleaved_le",
+        sample_rate_hz=50_000_000.0,
+        center_frequency_hz=2_455_000_000.0,
+        frequency_low_hz=2_430_000_000.0,
+        frequency_high_hz=2_480_000_000.0,
+        num_samples=7_500_000,
+        duration_s=0.15,
+        ground_truth=(
+            ManifestGroundTruth(
+                t_start_s=0.01,
+                t_end_s=0.02,
+                f_low_hz=2_440_600_000.0,
+                f_high_hz=2_440_700_000.0,
+                class_id=8,
+                class_name="Zigbee",
+            ),
+        ),
+    )
+    frozen = build_recording_manifest("SpaceNet", "test", "spacenet_14", [b, a])
+    assert frozen.sha256 == "e7fdb9b4f05656679881b72b335a004b9dbb1e8d7dd8ee7795d8dddfd82d375f"

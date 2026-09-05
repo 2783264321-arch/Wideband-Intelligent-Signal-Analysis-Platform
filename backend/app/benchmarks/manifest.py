@@ -38,7 +38,7 @@ class FrozenRecordingManifest:
     sha256: str
 
 
-def _number(value: float) -> str:
+def canonical_number(value: float) -> str:
     value = float(value)
     if value == 0.0:
         return "0"
@@ -47,6 +47,38 @@ def _number(value: float) -> str:
 
 def _gt_sort_key(gt: ManifestGroundTruth):
     return (gt.t_start_s, gt.t_end_s, gt.f_low_hz, gt.f_high_hz, gt.class_id, gt.class_name)
+
+
+def canonical_ground_truth_payload(ground_truth: tuple[ManifestGroundTruth, ...]) -> list[dict[str, object]]:
+    return [
+        {
+            "t_start_s": canonical_number(gt.t_start_s),
+            "t_end_s": canonical_number(gt.t_end_s),
+            "f_low_hz": canonical_number(gt.f_low_hz),
+            "f_high_hz": canonical_number(gt.f_high_hz),
+            "class_id": gt.class_id,
+            "class_name": gt.class_name,
+        }
+        for gt in sorted(ground_truth, key=_gt_sort_key)
+    ]
+
+
+def canonical_recording_payload(recording: ManifestRecording) -> dict[str, object]:
+    return {
+        "name": recording.name,
+        "data_format": recording.data_format,
+        "sample_rate_hz": canonical_number(recording.sample_rate_hz),
+        "center_frequency_hz": canonical_number(recording.center_frequency_hz),
+        "frequency_low_hz": canonical_number(recording.frequency_low_hz),
+        "frequency_high_hz": canonical_number(recording.frequency_high_hz),
+        "num_samples": recording.num_samples,
+        "duration_s": canonical_number(recording.duration_s),
+        "ground_truth": canonical_ground_truth_payload(recording.ground_truth),
+    }
+
+
+def canonical_json_bytes(payload: object) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def build_recording_manifest(
@@ -66,32 +98,9 @@ def build_recording_manifest(
         "dataset_name": dataset_name,
         "dataset_split": dataset_split,
         "label_space": label_space,
-        "recordings": [
-            {
-                "name": r.name,
-                "data_format": r.data_format,
-                "sample_rate_hz": _number(r.sample_rate_hz),
-                "center_frequency_hz": _number(r.center_frequency_hz),
-                "frequency_low_hz": _number(r.frequency_low_hz),
-                "frequency_high_hz": _number(r.frequency_high_hz),
-                "num_samples": r.num_samples,
-                "duration_s": _number(r.duration_s),
-                "ground_truth": [
-                    {
-                        "t_start_s": _number(gt.t_start_s),
-                        "t_end_s": _number(gt.t_end_s),
-                        "f_low_hz": _number(gt.f_low_hz),
-                        "f_high_hz": _number(gt.f_high_hz),
-                        "class_id": gt.class_id,
-                        "class_name": gt.class_name,
-                    }
-                    for gt in sorted(r.ground_truth, key=_gt_sort_key)
-                ],
-            }
-            for r in ordered
-        ],
+        "recordings": [canonical_recording_payload(r) for r in ordered],
     }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    serialized = canonical_json_bytes(payload)
     return FrozenRecordingManifest(
         dataset_name=dataset_name,
         dataset_split=dataset_split,
