@@ -170,3 +170,46 @@ def test_compare_non_comparable_reports_reasons(client):
     payload = response.json()
     assert payload["comparable"] is False
     assert "evaluation_a_incomplete" in payload["reasons"]
+def test_tiny_end_to_end_benchmark_through_subprocess(client):
+    _populate(client)
+    preview = _prepare(client)
+    created = _create(client, preview["recording_manifest_hash"], [
+        {"recording_id": "rec_a", "analysis_run_id": "run_a"},
+        {"recording_id": "rec_b", "analysis_run_id": "run_b"},
+    ])
+    run_response = client.post(f"/api/dataset-benchmarks/{created['id']}/run")
+    assert run_response.status_code == 202, run_response.text
+
+    deadline = time.time() + 40
+    detail = run_response.json()
+    while time.time() < deadline:
+        detail = client.get(f"/api/dataset-benchmarks/{created['id']}").json()
+        if detail["status"] in {"completed", "failed", "interrupted"}:
+            break
+        time.sleep(0.2)
+    assert detail["status"] == "completed", detail
+    assert detail["expected_recordings"] == 2
+    assert detail["evaluated_recordings"] == 2
+    assert detail["missing_recordings"] == 0
+    assert detail["coverage"] == 1.0
+    assert detail["comparable"] is True
+    assert detail["evaluation_protocol"] == "physical_tf_detection_ap_v1"
+    aggregate = detail["aggregate_metrics_json"]
+    assert aggregate["localization"]["ap50"] == 1.0
+    assert aggregate["classification_applicable"] is True
+    assert aggregate["class_aware"]["map50"] == 1.0
+    assert aggregate["class_aware"]["map50_95"] == 1.0
+
+    items = client.get(f"/api/dataset-benchmarks/{created['id']}/items").json()
+    assert [item["analysis_run_id"] for item in items] == ["run_a", "run_b"]
+
+    # Create a newer run and re-fetch; membership must remain frozen to the original run.
+    with client.app.state.database.session_factory() as session:
+        import datetime
+        add_run(session, run_id="run_a_new", recording_id="rec_a", pipeline_id="pipeline_x",
+                pipeline_version="1.0", executor="imported", created_at=datetime.datetime(2026, 3, 1))
+        session.commit()
+    refreshed = client.get(f"/api/dataset-benchmarks/{created['id']}").json()
+    assert refreshed["status"] == "completed"
+    refreshed_items = client.get(f"/api/dataset-benchmarks/{created['id']}/items").json()
+    assert [item["analysis_run_id"] for item in refreshed_items] == ["run_a", "run_b"]
