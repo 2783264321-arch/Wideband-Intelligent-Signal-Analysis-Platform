@@ -77,6 +77,18 @@ The V1 custom importer accepts little-endian complex64 samples (`<c8`): one comp
 
 Raw IQ stays under `data/recordings/` and is never exposed as a generic static Web directory.
 
+## Register a SpaceNet dataset without copying IQ data
+
+SpaceNet samples (`.bin` float16 interleaved I/Q + `.json` labels) can be registered as platform Recordings by metadata only. Raw files stay at their external dataset path; the platform never copies or converts the ~30 GB corpus.
+
+On the Recordings page use `Register SpaceNet Dataset` and enter the server-local split directory, e.g.:
+
+```text
+D:\LGFiles\Wideband Signal Analysis Platform\SpaceNet\test
+```
+
+Registration scans only `.json` metadata and `stat()`s the paired `.bin` files; it does not read sample contents. It persists one Recording per sample plus normalized Ground Truth (ms -> seconds, MHz -> Hz, `spacenet_14` classes). Re-running registration is idempotent (created/skipped/invalid summary). IQ reads stay lazy: DSP and pipelines read only requested segments through the unified `RecordingReader` (`complex64_le` and `float16_interleaved_le`).
+
 ## Local runtime state
 
 The following are local runtime state and are intentionally gitignored:

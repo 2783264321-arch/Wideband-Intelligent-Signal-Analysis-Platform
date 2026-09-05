@@ -1,7 +1,8 @@
-import { Alert, Button, Card, Empty, Form, Input, InputNumber, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Form, Input, InputNumber, Modal, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { importRecording, listRecordings } from "../api/client";
+import { importRecording, listRecordings, registerSpaceNetDataset } from "../api/client";
+import type { SpaceNetRegistrationSummary } from "../api/client";
 import type { RecordingDetail } from "../api/types";
 import { ImportRunModal } from "../features/imports/ImportRunModal";
 
@@ -12,13 +13,21 @@ interface ImportFormValues {
   labelSpace?: string;
 }
 
+const PAGE_SIZE = 50;
+
 export function RecordingsPage() {
   const navigate = useNavigate();
   const [recordings, setRecordings] = useState<RecordingDetail[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [importRunOpen, setImportRunOpen] = useState(false);
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const [datasetPath, setDatasetPath] = useState("");
+  const [registering, setRegistering] = useState(false);
+  const [registrationSummary, setRegistrationSummary] = useState<SpaceNetRegistrationSummary | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm<ImportFormValues>();
@@ -27,7 +36,9 @@ export function RecordingsPage() {
     setLoading(true);
     setError(null);
     try {
-      setRecordings(await listRecordings());
+      const page = await listRecordings(PAGE_SIZE, 0);
+      setRecordings(page.items);
+      setTotal(page.total);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to load recordings.");
     } finally {
@@ -36,6 +47,20 @@ export function RecordingsPage() {
   };
 
   useEffect(() => { void refresh(); }, []);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const page = await listRecordings(PAGE_SIZE, recordings.length);
+      setRecordings((items) => [...items, ...page.items]);
+      setTotal(page.total);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to load more recordings.");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const submitImport = async () => {
     const values = await form.validateFields();
@@ -66,26 +91,51 @@ export function RecordingsPage() {
     }
   };
 
+  const submitRegistration = async () => {
+    if (!datasetPath.trim()) return;
+    setRegistering(true);
+    setError(null);
+    try {
+      const summary = await registerSpaceNetDataset(datasetPath.trim());
+      setRegistrationSummary(summary);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to register dataset.");
+    } finally {
+      setRegistering(false);
+    }
+  };
+
+  const closeRegistration = () => {
+    setRegisterOpen(false);
+    setDatasetPath("");
+    setRegistrationSummary(null);
+  };
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
         <div>
           <Typography.Title level={2} style={{ marginBottom: 4 }}>Recording Library</Typography.Title>
-          <Typography.Text type="secondary">Open an offline IQ recording or import your own data.</Typography.Text>
+          <Typography.Text type="secondary">
+            {total > 0 ? `${total} recording${total === 1 ? "" : "s"} · ` : ""}Open an offline IQ recording or import your own data.
+          </Typography.Text>
         </div>
         <Space>
+          <Button onClick={() => setRegisterOpen(true)}>Register SpaceNet Dataset</Button>
           <Button onClick={() => setImportRunOpen(true)}>Import Existing Run</Button>
           <Button type="primary" onClick={() => setModalOpen(true)}>Import Recording</Button>
         </Space>
       </div>
 
       {error ? <Alert type="error" showIcon message={error} /> : null}
+      {loading ? <Spin tip="Loading recordings..." /> : null}
       {!loading && recordings.length === 0 ? <Empty description="No recordings imported yet" /> : null}
       {recordings.map((recording) => (
         <Card
           key={recording.id}
           title={recording.name}
-          extra={recording.datasetName ? <Tag>{recording.datasetName}</Tag> : <Tag>Custom IQ</Tag>}
+          extra={recording.datasetName ? <Tag color="geekblue">{recording.datasetName}</Tag> : <Tag>Custom IQ</Tag>}
           actions={[
             <Button key="open" type="link" onClick={() => navigate(`/spectrum/${recording.id}`)}>Open Spectrum</Button>,
           ]}
@@ -99,6 +149,13 @@ export function RecordingsPage() {
           </Space>
         </Card>
       ))}
+      {!loading && recordings.length < total ? (
+        <div style={{ textAlign: "center" }}>
+          <Button onClick={() => void loadMore()} loading={loadingMore}>
+            Load More ({total - recordings.length} remaining)
+          </Button>
+        </div>
+      ) : null}
 
       <Modal
         title="Import complex64 IQ Recording"
@@ -126,6 +183,35 @@ export function RecordingsPage() {
           </Form.Item>
           <Typography.Text type="secondary">V1 custom import expects little-endian complex64 interleaved I/Q.</Typography.Text>
         </Form>
+      </Modal>
+
+      <Modal
+        title="Register SpaceNet Dataset"
+        open={registerOpen}
+        confirmLoading={registering}
+        onOk={() => void submitRegistration()}
+        onCancel={closeRegistration}
+        okText="Register"
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          {registrationSummary ? (
+            <Alert
+              type="success"
+              showIcon
+              message="Registration complete"
+              description={`Created ${registrationSummary.created} · Skipped ${registrationSummary.skipped} · Invalid ${registrationSummary.invalid}`}
+            />
+          ) : null}
+          <Input
+            placeholder="D:\LGFiles\Wideband Signal Analysis Platform\SpaceNet\test"
+            value={datasetPath}
+            onChange={(event) => setDatasetPath(event.target.value)}
+            aria-label="SpaceNet dataset path"
+          />
+          <Typography.Text type="secondary">
+            Registers metadata and Ground Truth from the server-local dataset. IQ files stay on disk and are never uploaded or copied.
+          </Typography.Text>
+        </Space>
       </Modal>
 
       <ImportRunModal open={importRunOpen} recordings={recordings} onClose={() => setImportRunOpen(false)} />

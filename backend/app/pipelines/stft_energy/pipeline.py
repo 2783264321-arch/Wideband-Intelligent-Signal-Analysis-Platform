@@ -2,7 +2,8 @@ from pathlib import Path
 from typing import Any
 
 from app.pipelines.base import DetectionPayload, Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
-from app.pipelines.stft_energy.detector import detect_stft_energy, read_complex64_le
+from app.pipelines.stft_energy.detector import detect_stft_energy
+from app.recordings.reader import read_segment_from_path
 
 
 class STFTEnergyDetectorPipeline(Pipeline):
@@ -22,9 +23,7 @@ class STFTEnergyDetectorPipeline(Pipeline):
 
     def run(self, recording: RecordingInput, parameters: dict[str, Any], workspace: Path) -> PipelineOutput:
         workspace.mkdir(parents=True, exist_ok=True)
-        if recording.data_format != "complex64_le":
-            raise ValueError(f"stft_energy_detector only supports complex64_le, got {recording.data_format}")
-        iq = read_complex64_le(recording.data_path)
+        iq = read_segment_from_path(recording.data_path, recording.data_format)
         regions = detect_stft_energy(
             iq,
             sample_rate_hz=recording.sample_rate_hz,

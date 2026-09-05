@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import PlatformError
@@ -19,8 +19,16 @@ class RecordingService:
         self.storage = storage
         self.data_root = data_root.resolve()
 
-    def list(self) -> list[RecordingModel]:
-        return list(self.session.scalars(select(RecordingModel).order_by(RecordingModel.created_at)).all())
+    def list(self, limit: int = 100, offset: int = 0) -> tuple[list[RecordingModel], int]:
+        if limit <= 0 or offset < 0:
+            raise PlatformError("INVALID_LISTING", "limit must be positive and offset non-negative.")
+        total = int(self.session.scalar(select(func.count()).select_from(RecordingModel)) or 0)
+        items = list(
+            self.session.scalars(
+                select(RecordingModel).order_by(RecordingModel.created_at, RecordingModel.id).offset(offset).limit(limit)
+            ).all()
+        )
+        return items, total
 
     def get(self, recording_id: str) -> RecordingModel:
         recording = self.session.get(RecordingModel, recording_id)

@@ -94,7 +94,8 @@ def test_import_list_and_detail_complex64_recording(client):
 
     listing = client.get("/api/recordings")
     assert listing.status_code == 200
-    assert [item["id"] for item in listing.json()] == [payload["id"]]
+    assert [item["id"] for item in listing.json()["items"]] == [payload["id"]]
+    assert listing.json()["total"] == 1
 
     detail = client.get(f"/api/recordings/{payload['id']}")
     assert detail.status_code == 200
@@ -131,3 +132,38 @@ def test_import_rejects_nonpositive_sample_rate(client):
         )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_RECORDING"
+
+
+def test_recording_listing_is_bounded_and_paginated(client, settings):
+    from sqlalchemy import func, select
+
+    database = client.app.state.database
+    with database.session_factory() as session:
+        for index in range(120):
+            recording = RecordingModel(
+                id=f"rec_page_{index:03d}",
+                name=f"page-{index:03d}",
+                data_path=f"recordings/rec_page_{index:03d}/raw.iq",
+                data_format="complex64_le",
+                sample_rate_hz=1_000_000.0,
+                center_frequency_hz=2_441_000_000.0,
+                frequency_low_hz=2_440_500_000.0,
+                frequency_high_hz=2_441_500_000.0,
+                num_samples=4096,
+                duration_s=0.004096,
+                label_space="spacenet_14",
+                has_ground_truth=False,
+            )
+            session.add(recording)
+        session.commit()
+
+    page_one = client.get("/api/recordings?limit=50&offset=0").json()
+    assert page_one["total"] == 120
+    assert len(page_one["items"]) == 50
+    assert page_one["items"][0]["id"] == "rec_page_000"
+
+    page_three = client.get("/api/recordings?limit=50&offset=100").json()
+    assert len(page_three["items"]) == 20
+
+    invalid = client.get("/api/recordings?limit=0&offset=0")
+    assert invalid.status_code == 422

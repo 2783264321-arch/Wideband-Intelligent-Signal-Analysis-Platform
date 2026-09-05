@@ -27,6 +27,8 @@ interface RecordingWire {
   id: string;
   name: string;
   data_format: string;
+  source: string;
+  external_path: string | null;
   sample_rate_hz: number;
   center_frequency_hz: number;
   frequency_low_hz: number;
@@ -77,6 +79,8 @@ const mapRecording = (item: RecordingWire): RecordingDetail => ({
   id: item.id,
   name: item.name,
   dataFormat: item.data_format,
+  source: item.source,
+  externalPath: item.external_path,
   sampleRateHz: item.sample_rate_hz,
   centerFrequencyHz: item.center_frequency_hz,
   frequencyLowHz: item.frequency_low_hz,
@@ -103,8 +107,30 @@ const mapDetection = (item: DetectionWire): DetectionResult => ({
   scores: item.scores_json,
 });
 
-export async function listRecordings(): Promise<RecordingDetail[]> {
-  return (await apiGet<RecordingWire[]>("/api/recordings")).map(mapRecording);
+export interface RecordingPage {
+  items: RecordingDetail[];
+  total: number;
+}
+
+export async function listRecordings(limit = 100, offset = 0): Promise<RecordingPage> {
+  const payload = await apiGet<{ items: RecordingWire[]; total: number }>(
+    `/api/recordings?limit=${limit}&offset=${offset}`,
+  );
+  return { items: payload.items.map(mapRecording), total: payload.total };
+}
+
+export interface SpaceNetRegistrationSummary {
+  created: number;
+  skipped: number;
+  invalid: number;
+  total: number;
+}
+
+export async function registerSpaceNetDataset(datasetPath: string, split = "test"): Promise<SpaceNetRegistrationSummary> {
+  return apiPostJson<SpaceNetRegistrationSummary>("/api/datasets/spacenet/register", {
+    dataset_path: datasetPath,
+    split,
+  });
 }
 
 export async function importRecording(form: FormData): Promise<RecordingDetail> {

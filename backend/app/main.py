@@ -6,8 +6,10 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import Settings
 from app.core.errors import PlatformError
 from app.db.base import Base, load_domain_models
+from app.db.migrations import run_additive_migrations
 from app.db.session import Database
 from app.storage.service import StorageService
+from app.datasets.router import router as datasets_router
 from app.recordings.router import router as recordings_router
 from app.dsp.router import router as dsp_router
 from app.ground_truth.router import router as ground_truth_router
@@ -30,6 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     load_domain_models()
     Base.metadata.create_all(app.state.database.engine)
+    run_additive_migrations(app.state.database.engine)
     with app.state.database.session_factory() as recovery_session:
         mark_stale_running_runs_interrupted(recovery_session)
 
@@ -49,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     app.include_router(recordings_router)
+    app.include_router(datasets_router)
     app.include_router(dsp_router)
     app.include_router(ground_truth_router)
     app.include_router(detections_router)

@@ -6,6 +6,8 @@ const recording = {
   id: "rec_local",
   name: "Local IQ",
   data_format: "complex64_le",
+  source: "custom",
+  external_path: null,
   sample_rate_hz: 1000000,
   center_frequency_hz: 2441000000,
   frequency_low_hz: 2440500000,
@@ -25,7 +27,9 @@ function Destination() {
 
 function setup(reject = false) {
   vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
-    if (url.endsWith("/api/recordings")) return new Response(JSON.stringify([recording]));
+    if (url.includes("/api/recordings?limit=")) {
+      return new Response(JSON.stringify({ items: [recording], total: 1 }));
+    }
     if (url.endsWith("/api/imported-runs") && options?.method === "POST") {
       const form = options.body as FormData;
       if (form.get("recording_id") !== "rec_local" || !(form.get("file") instanceof File)) {

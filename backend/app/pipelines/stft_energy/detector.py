@@ -6,7 +6,6 @@ output semantic label is the single generic ``signal_presence_v1`` class.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import binary_closing, find_objects, label
@@ -21,14 +20,6 @@ class EnergyRegion:
     f_high_hz: float
     confidence: float
     energy_margin_db: float
-
-
-def read_complex64_le(path: Path) -> np.ndarray:
-    path = Path(path)
-    if not path.is_file():
-        raise ValueError(f"IQ file is missing: {path}")
-    data = np.memmap(path, dtype="<c8", mode="r")
-    return np.asarray(data, dtype=np.complex64).copy()
 
 
 def detect_stft_energy(

@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.core.errors import PlatformError
 from app.core.signal_validation import validate_label, validate_physical_box
 from app.db.base import Base, load_domain_models
+from app.db.migrations import run_additive_migrations
 from app.db.session import Database
 from app.detections.model import DetectionResultModel
 from app.labels.service import LabelSpaceService
@@ -28,9 +29,13 @@ logger = logging.getLogger(__name__)
 
 
 def _recording_input(recording: RecordingModel, data_root: Path) -> RecordingInput:
+    if recording.external_path:
+        data_path = Path(recording.external_path).resolve()
+    else:
+        data_path = (data_root / recording.data_path).resolve()
     return RecordingInput(
         id=recording.id,
-        data_path=(data_root / recording.data_path).resolve(),
+        data_path=data_path,
         data_format=recording.data_format,
         sample_rate_hz=recording.sample_rate_hz,
         center_frequency_hz=recording.center_frequency_hz,
@@ -46,6 +51,7 @@ def execute_run(run_id: str, settings: Settings | None = None) -> None:
     database = Database(settings.database_url)
     load_domain_models()
     Base.metadata.create_all(database.engine)
+    run_additive_migrations(database.engine)
     registry = create_pipeline_registry()
     label_service = LabelSpaceService(settings.label_space_root)
     storage = StorageService(settings.data_root)

@@ -44,6 +44,8 @@ export interface RecordingSummary {
 
 export interface RecordingDetail extends RecordingSummary {
   dataFormat: string;
+  source: string;
+  externalPath: string | null;
   frequencyLowHz: number;
   frequencyHighHz: number;
   numSamples: number;

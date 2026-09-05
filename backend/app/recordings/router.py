@@ -1,6 +1,6 @@
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 
-from app.recordings.schema import RecordingRead
+from app.recordings.schema import RecordingListRead, RecordingRead
 from app.recordings.service import RecordingService
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -35,10 +35,11 @@ def import_recording(
         )
 
 
-@router.get("", response_model=list[RecordingRead])
-def list_recordings(request: Request):
+@router.get("", response_model=RecordingListRead)
+def list_recordings(request: Request, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
     with request.app.state.database.session_factory() as session:
-        return _service(request, session).list()
+        items, total = _service(request, session).list(limit=limit, offset=offset)
+        return RecordingListRead(items=items, total=total)
 
 
 @router.get("/{recording_id}", response_model=RecordingRead)

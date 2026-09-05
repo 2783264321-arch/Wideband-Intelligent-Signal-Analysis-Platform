@@ -18,6 +18,8 @@ class RecordingModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     data_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     data_format: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="custom", nullable=False)
+    external_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     sample_rate_hz: Mapped[float] = mapped_column(Float, nullable=False)
     center_frequency_hz: Mapped[float] = mapped_column(Float, nullable=False)
     frequency_low_hz: Mapped[float] = mapped_column(Float, nullable=False)
