@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.analysis.model import AnalysisRunModel
@@ -28,6 +28,22 @@ class ManifestPreview:
     recording_manifest_hash: str
     expected_recordings: int
     entries: tuple[dict, ...]
+
+
+def mark_stale_running_evaluations_interrupted(session: Session) -> int:
+    statement = (
+        update(DatasetEvaluationModel)
+        .where(DatasetEvaluationModel.status == "running")
+        .values(
+            status="interrupted",
+            error_type="BENCHMARK_INTERRUPTED",
+            error_message="Previous local benchmark process ended before platform restart.",
+            completed_at=datetime.now(timezone.utc),
+        )
+    )
+    result = session.execute(statement)
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 @dataclass(frozen=True)
@@ -288,3 +304,114 @@ class DatasetBenchmarkService:
         self.session.commit()
         self.session.refresh(evaluation)
         return evaluation
+    def start_evaluation(self, evaluation_id: str, job_manager) -> DatasetEvaluationModel:
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        if evaluation.status != "pending":
+            raise PlatformError("INVALID_BENCHMARK_TRANSITION", "Only pending evaluations can be started.", 409)
+        evaluation.worker_pid = job_manager.start(evaluation.id)
+        evaluation.status = "running"
+        self.session.commit()
+        self.session.refresh(evaluation)
+        return evaluation
+    
+    
+    def retry_evaluation(self, evaluation_id: str) -> DatasetEvaluationModel:
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        if evaluation.status not in {"failed", "interrupted"}:
+            raise PlatformError("INVALID_BENCHMARK_TRANSITION", "Only failed/interrupted evaluations can be retried.", 409)
+        evaluation.status = "pending"
+        evaluation.error_type = None
+        evaluation.error_message = None
+        evaluation.aggregate_metrics_json = None
+        evaluation.per_class_metrics_json = None
+        evaluation.confusion_json = None
+        evaluation.progress_stage = None
+        evaluation.worker_pid = None
+        self.session.commit()
+        self.session.refresh(evaluation)
+        return evaluation
+    
+    
+    def get_evaluation(self, evaluation_id: str) -> DatasetEvaluationModel:
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        return evaluation
+    
+    
+    def list_evaluations(self) -> list[DatasetEvaluationModel]:
+        return list(
+            self.session.scalars(select(DatasetEvaluationModel).order_by(DatasetEvaluationModel.created_at.desc())).all()
+        )
+    
+    
+    def list_items(self, evaluation_id: str) -> list[DatasetEvaluationItemModel]:
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        return list(
+            self.session.scalars(
+                select(DatasetEvaluationItemModel)
+                .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
+                .order_by(DatasetEvaluationItemModel.manifest_order)
+            ).all()
+        )
+    
+    
+    def compare_evaluations(self, evaluation_a_id: str, evaluation_b_id: str) -> dict:
+        a = self.get_evaluation(evaluation_a_id)
+        b = self.get_evaluation(evaluation_b_id)
+        reasons: list[str] = []
+        if a.status != "completed":
+            reasons.append("evaluation_a_not_completed")
+        if b.status != "completed":
+            reasons.append("evaluation_b_not_completed")
+        if a.coverage != 1.0:
+            reasons.append("evaluation_a_incomplete")
+        if b.coverage != 1.0:
+            reasons.append("evaluation_b_incomplete")
+        if a.dataset_name != b.dataset_name:
+            reasons.append("dataset_name_mismatch")
+        if a.dataset_split != b.dataset_split:
+            reasons.append("dataset_split_mismatch")
+        if a.label_space != b.label_space:
+            reasons.append("label_space_mismatch")
+        if a.recording_manifest_hash != b.recording_manifest_hash:
+            reasons.append("recording_manifest_hash_mismatch")
+        if a.evaluation_protocol != b.evaluation_protocol:
+            reasons.append("evaluation_protocol_mismatch")
+        if a.protocol_config_json != b.protocol_config_json:
+            reasons.append("protocol_config_mismatch")
+    
+        comparable = not reasons
+        deltas: dict[str, float | None] = {}
+        if comparable:
+            agg_a = a.aggregate_metrics_json or {}
+            agg_b = b.aggregate_metrics_json or {}
+            pairs = {
+                "localization_ap50": ("localization", "ap50"),
+                "localization_ap50_95": ("localization", "ap50_95"),
+                "class_aware_map50": ("class_aware", "map50"),
+                "class_aware_map50_95": ("class_aware", "map50_95"),
+                "matched_accuracy": ("classification_on_matched", "matched_accuracy"),
+            }
+            for key, (section, field) in pairs.items():
+                val_a = (agg_a.get(section) or {}).get(field)
+                val_b = (agg_b.get(section) or {}).get(field)
+                if isinstance(val_a, (int, float)) and isinstance(val_b, (int, float)):
+                    deltas[key] = val_b - val_a
+                else:
+                    deltas[key] = None
+        return {
+            "comparable": comparable,
+            "reasons": reasons,
+            "evaluation_a_id": a.id,
+            "evaluation_b_id": b.id,
+            "aggregate_a": a.aggregate_metrics_json,
+            "aggregate_b": b.aggregate_metrics_json,
+            "deltas": deltas,
+        }
