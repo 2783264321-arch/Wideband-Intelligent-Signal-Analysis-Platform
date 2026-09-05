@@ -29,3 +29,17 @@ def client(settings: Settings):
     app = create_app(settings)
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def session(settings: Settings):
+    from app.db.base import Base, load_domain_models
+    from app.db.migrations import run_additive_migrations
+    from app.db.session import Database
+
+    database = Database(settings.database_url)
+    load_domain_models()
+    Base.metadata.create_all(database.engine)
+    run_additive_migrations(database.engine)
+    with database.session_factory() as db_session:
+        yield db_session
