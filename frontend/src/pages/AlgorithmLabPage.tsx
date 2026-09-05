@@ -87,6 +87,8 @@ export function AlgorithmLabPage() {
             aria-label="Recording"
             placeholder="Select a Recording"
             style={{ width: 240 }}
+            showSearch
+            optionFilterProp="label"
             value={recordingId}
             onChange={(id: string) => void onRecordingChange(id)}
             options={recordings.map((item) => ({ value: item.id, label: item.name }))}
