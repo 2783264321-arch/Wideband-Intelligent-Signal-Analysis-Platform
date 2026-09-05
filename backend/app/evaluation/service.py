@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.analysis.model import AnalysisRunModel
 from app.core.errors import PlatformError
 from app.detections.model import DetectionResultModel
+from app.evaluation.capability import classification_applicability
 from app.evaluation.matching import match_predictions
 from app.evaluation.metrics import (
     calculate_class_aware_metrics,
@@ -53,25 +54,8 @@ class AlgorithmLabComparisonService:
         return str(package.get("pipeline_name") or run.pipeline_id)
 
     def _classification_applicability(self, run: AnalysisRunModel, recording: RecordingModel) -> tuple[bool, str | None]:
-        if self.registry is not None:
-            try:
-                pipeline: Pipeline = self.registry.get(run.pipeline_id)
-            except PlatformError:
-                pipeline = None
-            if pipeline is not None:
-                definition = pipeline.definition
-                if definition.task_capability == "detection_localization":
-                    return False, "detection_only_pipeline"
-                if recording.label_space is not None and definition.label_space != recording.label_space:
-                    return False, "label_space_mismatch"
-                return True, None
-        # Imported runs: the M6 importer enforces package.label_space == recording.label_space.
-        if run.executor == "imported":
-            if recording.label_space is None:
-                return False, "unknown_classification_semantics"
-            return True, None
-        # Neither a registry pipeline nor an imported run: label-space semantics unknown.
-        return False, "unknown_classification_semantics"
+        result = classification_applicability(run, recording, self.registry)
+        return result.applicable, result.reason
 
     def _classification_result(self, run, recording, detections, match_result):
         applicable, reason = self._classification_applicability(run, recording)

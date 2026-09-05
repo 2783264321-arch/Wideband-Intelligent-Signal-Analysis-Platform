@@ -220,3 +220,64 @@ def test_create_evaluation_requires_at_least_one_included_run(client):
             allow_incomplete=True,
         )
     assert exc.value.code == "INVALID_BENCHMARK_MEMBERSHIP"
+
+def _stub_pipeline(task_capability="classification", label_space="spacenet_14"):
+    return type("_Pipeline", (), {"definition": type("_Definition", (), {
+        "task_capability": task_capability, "label_space": label_space,
+    })()})()
+
+
+class _Registry:
+    def __init__(self, mapping):
+        self._mapping = mapping
+    def get(self, pipeline_id):
+        from app.core.errors import PlatformError
+        pipeline = self._mapping.get(pipeline_id)
+        if pipeline is None:
+            raise PlatformError("PIPELINE_INCOMPATIBLE", "missing")
+        return pipeline
+
+
+def _run(pipeline_id="stft_energy_detector", executor="local_cpu"):
+    return type("_Run", (), {"pipeline_id": pipeline_id, "executor": executor})()
+
+
+def _recording(label_space="spacenet_14"):
+    return type("_Recording", (), {"label_space": label_space})()
+
+
+def test_capability_detection_only_pipeline(client):
+    from app.evaluation.capability import classification_applicability
+    registry = _Registry({"stft_energy_detector": _stub_pipeline(task_capability="detection_localization", label_space="signal_presence_v1")})
+    result = classification_applicability(_run("stft_energy_detector"), _recording(), registry)
+    assert result.applicable is False
+    assert result.reason == "detection_only_pipeline"
+
+def test_capability_classification_pipeline_matching_label_space(client):
+    from app.evaluation.capability import classification_applicability
+    registry = _Registry({"dummy": _stub_pipeline(task_capability="classification", label_space="spacenet_14")})
+    result = classification_applicability(_run("dummy"), _recording(), registry)
+    assert result.applicable is True
+    assert result.reason is None
+
+
+def test_capability_classification_pipeline_mismatched_label_space(client):
+    from app.evaluation.capability import classification_applicability
+    registry = _Registry({"dummy": _stub_pipeline(task_capability="classification", label_space="other")})
+    result = classification_applicability(_run("dummy"), _recording("spacenet_14"), registry)
+    assert result.applicable is False
+    assert result.reason == "label_space_mismatch"
+
+
+def test_capability_imported_run_with_recording_label_space(client):
+    from app.evaluation.capability import classification_applicability
+    result = classification_applicability(_run("zoomspec", executor="imported"), _recording("spacenet_14"), None)
+    assert result.applicable is True
+    assert result.reason is None
+
+
+def test_capability_unknown_nonimported_run(client):
+    from app.evaluation.capability import classification_applicability
+    result = classification_applicability(_run("mystery", executor="local_cpu"), _recording("spacenet_14"), None)
+    assert result.applicable is False
+    assert result.reason == "unknown_classification_semantics"
