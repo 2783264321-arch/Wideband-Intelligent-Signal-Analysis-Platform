@@ -112,7 +112,7 @@ def test_worker_exception_sets_failed_and_no_formal_json(client, settings, monke
     def _boom(*args, **kwargs):
         raise RuntimeError("injected compute failure")
 
-    monkeypatch.setattr(worker_module, "_compute_results", _boom)
+    monkeypatch.setattr(worker_module, "_build_result_jsons", _boom)
     with pytest.raises(RuntimeError):
         execute_benchmark(evaluation_id, settings)
     evaluation = _get(client, evaluation_id)
@@ -215,3 +215,70 @@ def test_spawn_failure_marks_failed(client, settings):
     assert evaluation.status == "failed"
     assert evaluation.error_type == "BENCHMARK_FAILED"
     assert "cannot spawn worker" in (evaluation.error_message or "")
+
+def test_progress_stages_are_truthful_for_classification_capable(client, settings, monkeypatch):
+    import app.benchmarks.worker as worker_module
+
+    _build_tiny_dataset(client)
+    evaluation_id = _create_evaluation(client, settings)
+    session_factory = client.app.state.database.session_factory
+    observed = []
+
+    def instrument(original):
+        def wrapper(*args, **kwargs):
+            with session_factory() as session:
+                observed.append(session.get(DatasetEvaluationModel, evaluation_id).progress_stage)
+            return original(*args, **kwargs)
+        return wrapper
+
+    monkeypatch.setattr(worker_module, "compute_dataset_diagnostics",
+                        instrument(worker_module.compute_dataset_diagnostics))
+    monkeypatch.setattr(worker_module, "localization_ap_summary",
+                        instrument(worker_module.localization_ap_summary))
+    monkeypatch.setattr(worker_module, "class_aware_ap_summary",
+                        instrument(worker_module.class_aware_ap_summary))
+
+    execute_benchmark(evaluation_id, settings)
+    assert observed[0] == "diagnostics"       # compute_dataset_diagnostics observed stage
+    assert observed[1] == "localization_ap"   # localization_ap_summary observed stage
+    assert observed[2] == "class_aware_ap"    # class_aware_ap_summary observed stage
+    evaluation = _get(client, evaluation_id)
+    assert evaluation.progress_stage == "completed"
+
+
+def test_progress_stages_skip_class_aware_for_detection_only(client, settings, monkeypatch):
+    import app.benchmarks.worker as worker_module
+
+    database = client.app.state.database
+    with database.session_factory() as session:
+        add_recording(session, recording_id="rec_a", name="a")
+        add_ground_truth(session, gt_id="gt_a", recording_id="rec_a", class_id=9, class_name="LoRa 250kHz",
+                         t0=0.01, t1=0.02, f0=2_440_600_000.0, f1=2_440_700_000.0)
+        add_run(session, run_id="run_a", recording_id="rec_a", pipeline_id="stft_energy_detector",
+                pipeline_version="1.0", executor="local_cpu")
+        add_detection(session, detection_id="det_a", run_id="run_a", class_id=0, class_name="Signal", confidence=0.9,
+                      t0=0.01, t1=0.02, f0=2_440_600_000.0, f1=2_440_700_000.0)
+        session.commit()
+    with database.session_factory() as session:
+        svc = DatasetBenchmarkService(session)
+        preview = svc.prepare_manifest("SpaceNet", "test", "spacenet_14")
+        evaluation_id = svc.create_evaluation(
+            name="tiny", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+            recording_manifest_hash=preview.recording_manifest_hash,
+            items=[{"recording_id": "rec_a", "analysis_run_id": "run_a"}],
+        ).id
+
+    class_aware_called = {"called": False}
+
+    def instrument_class_aware(original):
+        def wrapper(*args, **kwargs):
+            class_aware_called["called"] = True
+            return original(*args, **kwargs)
+        return wrapper
+
+    monkeypatch.setattr(worker_module, "class_aware_ap_summary",
+                        instrument_class_aware(worker_module.class_aware_ap_summary))
+    execute_benchmark(evaluation_id, settings)
+    assert class_aware_called["called"] is False  # detection-only never enters class_aware_ap stage
+    evaluation = _get(client, evaluation_id)
+    assert evaluation.progress_stage == "completed"

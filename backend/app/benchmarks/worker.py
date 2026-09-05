@@ -22,11 +22,13 @@ from app.pipelines.registry import create_pipeline_registry
 logger = logging.getLogger(__name__)
 
 
-def _compute_results(loaded: LoadedBenchmark, applicable: bool, reason: str | None):
-    diagnostics = compute_dataset_diagnostics(list(loaded.samples), classification_applicable=applicable)
-    localization_ap = localization_ap_summary(list(loaded.ground_truths), list(loaded.predictions))
-    class_aware_ap = class_aware_ap_summary(list(loaded.ground_truths), list(loaded.predictions)) if applicable else None
-
+def _build_result_jsons(
+    diagnostics,
+    localization_ap,
+    class_aware_ap,
+    applicable: bool,
+    reason: str | None,
+):
     aggregate = {
         "classification_applicable": applicable,
         "classification_reason": reason,
@@ -145,7 +147,22 @@ def execute_benchmark(evaluation_id: str, settings: Settings | None = None) -> N
                 applicable = False
                 reason = "unknown_classification_semantics"
 
-            aggregate, per_class, confusion = _compute_results(loaded, applicable, reason)
+            evaluation.progress_stage = "diagnostics"
+            session.commit()
+            diagnostics = compute_dataset_diagnostics(list(loaded.samples), classification_applicable=applicable)
+
+            evaluation.progress_stage = "localization_ap"
+            session.commit()
+            localization_ap = localization_ap_summary(list(loaded.ground_truths), list(loaded.predictions))
+
+            class_aware_ap = None
+            if applicable:
+                evaluation.progress_stage = "class_aware_ap"
+                session.commit()
+                class_aware_ap = class_aware_ap_summary(list(loaded.ground_truths), list(loaded.predictions))
+
+            aggregate, per_class, confusion = _build_result_jsons(
+                diagnostics, localization_ap, class_aware_ap, applicable, reason)
             evaluation.progress_stage = "finalizing"
             session.commit()
 
