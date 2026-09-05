@@ -93,3 +93,56 @@ export interface AnalysisRun {
   errorMessage?: string | null;
   workerPid?: number | null;
 }
+
+export interface DetectionMetrics {
+  tp: number;
+  fp: number;
+  fn: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  meanMatchedIou: number | null;
+}
+
+export interface PhysicalBox {
+  tStartS: number;
+  tEndS: number;
+  fLowHz: number;
+  fHighHz: number;
+}
+
+export interface RunMatchState {
+  matched: boolean;
+  detectionId: string | null;
+  iou: number | null;
+  className: string | null;
+  confidence: number | null;
+  bbox: PhysicalBox | null;
+}
+
+export type ComparisonState = "both_detected" | "a_only" | "b_only" | "both_missed";
+
+export interface AlgorithmLabCase {
+  groundTruthId: string;
+  classId: number;
+  className: string;
+  bbox: PhysicalBox;
+  comparison: ComparisonState;
+  runA: RunMatchState;
+  runB: RunMatchState;
+}
+
+export interface RunComparison {
+  runId: string;
+  pipelineId: string;
+  pipelineName: string;
+  metrics: DetectionMetrics;
+}
+
+export interface AlgorithmLabCompareResponse {
+  recordingId: string;
+  iouThreshold: number;
+  runA: RunComparison;
+  runB: RunComparison;
+  cases: AlgorithmLabCase[];
+}

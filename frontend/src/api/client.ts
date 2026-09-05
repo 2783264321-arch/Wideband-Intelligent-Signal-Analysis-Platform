@@ -262,6 +262,133 @@ export async function getAnalysisRun(runId: string): Promise<import("./types").A
   return mapAnalysisRun(await apiGet<AnalysisRunWire>(`/api/analysis-runs/${runId}`));
 }
 
+export async function listAnalysisRuns(recordingId: string): Promise<import("./types").AnalysisRun[]> {
+  const items = await apiGet<AnalysisRunWire[]>(
+    `/api/analysis-runs?recording_id=${encodeURIComponent(recordingId)}&status=completed`,
+  );
+  return items.map(mapAnalysisRun);
+}
+
+interface CompareWire {
+  recording_id: string;
+  iou_threshold: number;
+  run_a: RunComparisonWire;
+  run_b: RunComparisonWire;
+  cases: CaseWire[];
+}
+
+interface RunComparisonWire {
+  run_id: string;
+  pipeline_id: string;
+  pipeline_name: string;
+  metrics: {
+    tp: number;
+    fp: number;
+    fn: number;
+    precision: number;
+    recall: number;
+    f1: number;
+    mean_matched_iou: number | null;
+  };
+}
+
+interface CaseWire {
+  ground_truth_id: string;
+  class_id: number;
+  class_name: string;
+  bbox: { t_start_s: number; t_end_s: number; f_low_hz: number; f_high_hz: number };
+  comparison: import("./types").ComparisonState;
+  run_a: RunMatchWire;
+  run_b: RunMatchWire;
+}
+
+interface RunMatchWire {
+  matched: boolean;
+  detection_id: string | null;
+  iou: number | null;
+  class_name: string | null;
+  confidence: number | null;
+  bbox: { t_start_s: number; t_end_s: number; f_low_hz: number; f_high_hz: number } | null;
+}
+
+function mapCompare(wire: CompareWire): import("./types").AlgorithmLabCompareResponse {
+  const mapMatch = (item: RunMatchWire): import("./types").RunMatchState => ({
+    matched: item.matched,
+    detectionId: item.detection_id,
+    iou: item.iou,
+    className: item.class_name,
+    confidence: item.confidence,
+    bbox: item.bbox ? {
+      tStartS: item.bbox.t_start_s,
+      tEndS: item.bbox.t_end_s,
+      fLowHz: item.bbox.f_low_hz,
+      fHighHz: item.bbox.f_high_hz,
+    } : null,
+  });
+  const mapRun = (item: RunComparisonWire): import("./types").RunComparison => ({
+    runId: item.run_id,
+    pipelineId: item.pipeline_id,
+    pipelineName: item.pipeline_name,
+    metrics: {
+      tp: item.metrics.tp,
+      fp: item.metrics.fp,
+      fn: item.metrics.fn,
+      precision: item.metrics.precision,
+      recall: item.metrics.recall,
+      f1: item.metrics.f1,
+      meanMatchedIou: item.metrics.mean_matched_iou,
+    },
+  });
+  return {
+    recordingId: wire.recording_id,
+    iouThreshold: wire.iou_threshold,
+    runA: mapRun(wire.run_a),
+    runB: mapRun(wire.run_b),
+    cases: wire.cases.map((item) => ({
+      groundTruthId: item.ground_truth_id,
+      classId: item.class_id,
+      className: item.class_name,
+      bbox: {
+        tStartS: item.bbox.t_start_s,
+        tEndS: item.bbox.t_end_s,
+        fLowHz: item.bbox.f_low_hz,
+        fHighHz: item.bbox.f_high_hz,
+      },
+      comparison: item.comparison,
+      runA: mapMatch(item.run_a),
+      runB: mapMatch(item.run_b),
+    })),
+  };
+}
+
+export async function compareAnalysisRuns(payload: {
+  recordingId: string;
+  runAId: string;
+  runBId: string;
+}): Promise<import("./types").AlgorithmLabCompareResponse> {
+  const response = await fetch(apiUrl("/api/algorithm-lab/compare"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      recording_id: payload.recordingId,
+      run_a_id: payload.runAId,
+      run_b_id: payload.runBId,
+      iou_threshold: 0.5,
+    }),
+  });
+  if (!response.ok) {
+    let message = `API request failed: ${response.status}`;
+    try {
+      const payloadError = await response.json() as { error?: { message?: string } };
+      if (payloadError.error?.message) message = payloadError.error.message;
+    } catch {
+      // Non-JSON error body; keep the generic message.
+    }
+    throw new Error(message);
+  }
+  return mapCompare(await response.json() as CompareWire);
+}
+
 export async function importAnalysisPackage(recordingId: string, file: File): Promise<import("./types").AnalysisRun> {
   const body = new FormData();
   body.append("recording_id", recordingId);

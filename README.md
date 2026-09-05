@@ -16,6 +16,7 @@ The core V1 deliberately separates the Web platform from heavy GPU research work
 - Display-sized I/Q waveform and FFT endpoints.
 - Pipeline contract and deterministic CPU-only DummyPipeline.
 - CPU STFT energy detector pipeline (`stft_energy_detector`) for detection/localization only; it is not a 14-class recognizer.
+- Algorithm Lab: single-Recording comparison of two existing completed AnalysisRuns against Ground Truth (physical time-frequency IoU = 0.5, one-to-one matching, TP/FP/FN/Precision/Recall/F1/Mean IoU, side-by-side overlays, GT-centered cases).
 - AnalysisRun lifecycle with a separate Python subprocess and REST polling.
 - Startup recovery that marks stale `running` jobs as `interrupted`.
 
