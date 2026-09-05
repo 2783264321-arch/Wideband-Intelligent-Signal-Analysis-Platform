@@ -65,12 +65,26 @@ const compareResponse = {
     pipeline_id: "stft_energy_detector",
     pipeline_name: "STFT Energy Detector",
     metrics: { tp: 6, fp: 166, fn: 0, precision: 0.0349, recall: 1.0, f1: 0.0674, mean_matched_iou: 0.62 },
+    classification_applicable: false,
+    classification_reason: "detection_only_pipeline",
+    classification: null,
+    class_aware: null,
   },
   run_b: {
     run_id: "run_b",
     pipeline_id: "zoomspec",
     pipeline_name: "ZoomSpec",
     metrics: { tp: 5, fp: 2, fn: 1, precision: 0.7143, recall: 0.8333, f1: 0.7692, mean_matched_iou: null },
+    classification_applicable: true,
+    classification_reason: null,
+    classification: {
+      matched_count: 5,
+      class_correct: 5,
+      class_wrong: 0,
+      matched_accuracy: 1.0,
+      confusions: [],
+    },
+    class_aware: { tp: 5, fp: 2, fn: 1, precision: 0.7143, recall: 0.8333, f1: 0.7692 },
   },
   cases: [
     {
@@ -79,8 +93,8 @@ const compareResponse = {
       class_name: "LoRa 250kHz",
       bbox: { t_start_s: 0.032, t_end_s: 0.08, f_low_hz: 2417973850, f_high_hz: 2418026150 },
       comparison: "both_detected",
-      run_a: { matched: true, detection_id: "det1", iou: 0.68, class_name: "Signal", confidence: 0.91, bbox: { t_start_s: 0.031, t_end_s: 0.081, f_low_hz: 2417960000, f_high_hz: 2418040000 } },
-      run_b: { matched: true, detection_id: "det2", iou: 0.71, class_name: "LoRa 250kHz", confidence: 0.8, bbox: { t_start_s: 0.032, t_end_s: 0.08, f_low_hz: 2417973850, f_high_hz: 2418026150 } },
+      run_a: { matched: true, detection_id: "det1", iou: 0.68, class_id: 0, class_name: "Signal", confidence: 0.91, class_correct: null, bbox: { t_start_s: 0.031, t_end_s: 0.081, f_low_hz: 2417960000, f_high_hz: 2418040000 } },
+      run_b: { matched: true, detection_id: "det2", iou: 0.71, class_id: 9, class_name: "LoRa 250kHz", confidence: 0.8, class_correct: true, bbox: { t_start_s: 0.032, t_end_s: 0.08, f_low_hz: 2417973850, f_high_hz: 2418026150 } },
     },
     {
       ground_truth_id: "gt1",
@@ -88,8 +102,8 @@ const compareResponse = {
       class_name: "WiFi 20MHz 16QAM",
       bbox: { t_start_s: 0.08, t_end_s: 0.1, f_low_hz: 2437000000, f_high_hz: 2477000000 },
       comparison: "a_only",
-      run_a: { matched: true, detection_id: "det3", iou: 0.55, class_name: "Signal", confidence: 0.7, bbox: { t_start_s: 0.081, t_end_s: 0.1, f_low_hz: 2437100000, f_high_hz: 2476900000 } },
-      run_b: { matched: false, detection_id: null, iou: null, class_name: null, confidence: null, bbox: null },
+      run_a: { matched: true, detection_id: "det3", iou: 0.55, class_id: 0, class_name: "Signal", confidence: 0.7, class_correct: null, bbox: { t_start_s: 0.081, t_end_s: 0.1, f_low_hz: 2437100000, f_high_hz: 2476900000 } },
+      run_b: { matched: false, detection_id: null, iou: null, class_id: null, class_name: null, confidence: null, class_correct: null, bbox: null },
     },
     {
       ground_truth_id: "gt2",
@@ -97,8 +111,8 @@ const compareResponse = {
       class_name: "BLE LE1M",
       bbox: { t_start_s: 0.1, t_end_s: 0.12, f_low_hz: 2446000000, f_high_hz: 2448000000 },
       comparison: "b_only",
-      run_a: { matched: false, detection_id: null, iou: null, class_name: null, confidence: null, bbox: null },
-      run_b: { matched: true, detection_id: "det4", iou: 0.6, class_name: "BLE LE1M", confidence: 0.85, bbox: { t_start_s: 0.1, t_end_s: 0.12, f_low_hz: 2446100000, f_high_hz: 2447900000 } },
+      run_a: { matched: false, detection_id: null, iou: null, class_id: null, class_name: null, confidence: null, class_correct: null, bbox: null },
+      run_b: { matched: true, detection_id: "det4", iou: 0.6, class_id: 6, class_name: "BLE LE1M", confidence: 0.85, class_correct: true, bbox: { t_start_s: 0.1, t_end_s: 0.12, f_low_hz: 2446100000, f_high_hz: 2447900000 } },
     },
     {
       ground_truth_id: "gt3",
@@ -106,8 +120,8 @@ const compareResponse = {
       class_name: "FM",
       bbox: { t_start_s: 0.12, t_end_s: 0.14, f_low_hz: 2456000000, f_high_hz: 2459000000 },
       comparison: "both_missed",
-      run_a: { matched: false, detection_id: null, iou: null, class_name: null, confidence: null, bbox: null },
-      run_b: { matched: false, detection_id: null, iou: null, class_name: null, confidence: null, bbox: null },
+      run_a: { matched: false, detection_id: null, iou: null, class_id: null, class_name: null, confidence: null, class_correct: null, bbox: null },
+      run_b: { matched: false, detection_id: null, iou: null, class_id: null, class_name: null, confidence: null, class_correct: null, bbox: null },
     },
   ],
 };
@@ -182,9 +196,17 @@ test("selects a recording, exposes only completed runs, and compares", async () 
   expect(await screen.findByText("both_detected")).toBeInTheDocument();
   expect(screen.getAllByText(/STFT Energy Detector/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/ZoomSpec/).length).toBeGreaterThan(0);
-  expect(screen.getAllByText(/Precision/).length).toBeGreaterThan(0);
-  expect(screen.getAllByText(/Recall/).length).toBeGreaterThan(0);
-  expect(screen.getAllByText(/F1/).length).toBeGreaterThan(0);
+  // Localization
+  expect(screen.getAllByText("Precision").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Recall").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("F1").length).toBeGreaterThan(0);
+  // Classification / detection-only N/A (Run A)
+  expect(screen.getAllByText(/Not applicable/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/detection_only_pipeline/).length).toBeGreaterThan(0);
+  // Classification-on-matched (Run B)
+  expect(screen.getByText("Matched Accuracy")).toBeInTheDocument();
+  // End-to-End (Run B)
+  expect(screen.getByText("Class-aware F1")).toBeInTheDocument();
   expect(screen.getByText("a_only")).toBeInTheDocument();
   expect(screen.getByText("b_only")).toBeInTheDocument();
   expect(screen.getByText("both_missed")).toBeInTheDocument();
