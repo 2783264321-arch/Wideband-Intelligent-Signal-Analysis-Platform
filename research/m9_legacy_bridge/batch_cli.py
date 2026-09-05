@@ -7,9 +7,11 @@ writes a deterministic batch archive.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 from app.benchmarks.manifest import (
@@ -68,6 +70,23 @@ def _sha256(path: Path) -> str:
 def _gate(name: str, actual: str, expected: str | None) -> None:
     if expected is not None and expected.lower() != actual:
         raise BatchExportError(f"{name} SHA256 mismatch: expected {expected}, got {actual}")
+
+
+def _get_platform_repo_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _parse_test_ids(test_manifest_path: Path) -> list[str]:
@@ -142,8 +161,10 @@ def main(argv: list[str] | None = None) -> int:
         _gate("frn", frn_sha, args.expected_frn_sha256)
         _gate("config", config_sha, args.expected_config_sha256)
 
-        split = dataset_dir.name if dataset_dir.name in ("train", "test") else DATASET_SPLIT
-        root = dataset_dir.parent if dataset_dir.name in ("train", "test") else dataset_dir
+        if dataset_dir.name != "test":
+            raise BatchExportError("historical batch exporter requires the SpaceNet test split")
+        split = DATASET_SPLIT
+        root = dataset_dir.parent
         adapter = SpaceNetAdapter(root, label_space_path.parent, LABEL_SPACE)
         label_classes = load_label_space(label_space_path)
 
@@ -280,8 +301,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
             transport_provenance=TransportProvenance(
                 exporter_version="batch_analysis_package_v1",
-                platform_repo_commit=None,
-                export_timestamp=None,
+                platform_repo_commit=_get_platform_repo_commit(),
+                export_timestamp=_utc_now_iso(),
             ),
             recording_manifest_hash=dataset_manifest_hash,
             historical_reference=_load_metrics(metrics_path),
