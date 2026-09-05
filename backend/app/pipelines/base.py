@@ -16,6 +16,7 @@ class PipelineDefinition:
     cpu_supported: bool
     stages: tuple[str, ...]
     inspectable_stages: tuple[str, ...]
+    task_capability: str = "classification"
 
 
 @dataclass(frozen=True)

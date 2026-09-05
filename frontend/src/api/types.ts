@@ -71,6 +71,7 @@ export interface PipelineDefinition {
   cpuSupported: boolean;
   stages: string[];
   inspectableStages: string[];
+  taskCapability: string;
 }
 
 export type AnalysisRunStatus = "pending" | "running" | "completed" | "failed" | "interrupted";

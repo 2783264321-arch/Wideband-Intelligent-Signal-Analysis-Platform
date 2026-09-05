@@ -59,7 +59,7 @@ class AnalysisService:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Only the local_cpu executor is available in the core slice.")
         if not definition.cpu_supported:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Selected pipeline does not support local CPU execution.")
-        if recording.label_space != definition.label_space:
+        if recording.label_space != definition.label_space and definition.task_capability != "detection_localization":
             raise PlatformError("PIPELINE_INCOMPATIBLE", "Selected pipeline cannot run for this recording label space.")
 
         run = AnalysisRunModel(

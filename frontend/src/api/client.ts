@@ -171,6 +171,7 @@ interface PipelineDefinitionWire {
   cpu_supported: boolean;
   stages: string[];
   inspectable_stages: string[];
+  task_capability: string;
 }
 
 interface AnalysisRunWire {
@@ -218,6 +219,7 @@ export async function listPipelines(): Promise<import("./types").PipelineDefinit
     cpuSupported: item.cpu_supported,
     stages: item.stages,
     inspectableStages: item.inspectable_stages,
+    taskCapability: item.task_capability,
   }));
 }
 

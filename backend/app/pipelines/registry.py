@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from app.core.errors import PlatformError
 from app.pipelines.base import Pipeline, PipelineDefinition
 from app.pipelines.dummy import DummyPipeline
+from app.pipelines.stft_energy.pipeline import STFTEnergyDetectorPipeline
 
 
 class PipelineRegistry:
@@ -20,4 +21,4 @@ class PipelineRegistry:
 
 
 def create_pipeline_registry() -> PipelineRegistry:
-    return PipelineRegistry([DummyPipeline()])
+    return PipelineRegistry([DummyPipeline(), STFTEnergyDetectorPipeline()])

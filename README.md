@@ -15,6 +15,7 @@ The core V1 deliberately separates the Web platform from heavy GPU research work
 - Ground Truth and DetectionResult data in seconds + Hz.
 - Display-sized I/Q waveform and FFT endpoints.
 - Pipeline contract and deterministic CPU-only DummyPipeline.
+- CPU STFT energy detector pipeline (`stft_energy_detector`) for detection/localization only; it is not a 14-class recognizer.
 - AnalysisRun lifecycle with a separate Python subprocess and REST polling.
 - Startup recovery that marks stale `running` jobs as `interrupted`.
 

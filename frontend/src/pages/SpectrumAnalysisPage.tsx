@@ -8,6 +8,14 @@ import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
 
 const activeStatuses = new Set(["pending", "running"]);
 
+function pipelineOptionLabel(item: PipelineDefinition): string {
+  const base = `${item.name} · ${item.recommendedDevice}`;
+  if (item.taskCapability === "detection_localization") {
+    return `${base} · Detection & localization only`;
+  }
+  return base;
+}
+
 export function SpectrumAnalysisPage() {
   const navigate = useNavigate();
   const { recordingId = "" } = useParams();
@@ -110,9 +118,9 @@ export function SpectrumAnalysisPage() {
           <Select value="stft" style={{ width: 130 }} options={[{ value: "stft", label: "STFT" }]} />
           <Select
             value={pipelineId}
-            style={{ width: 210 }}
+            style={{ width: 360 }}
             onChange={setPipelineId}
-            options={pipelines.map((item) => ({ value: item.id, label: `${item.name} · ${item.recommendedDevice}` }))}
+            options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item) }))}
           />
           <Button type="primary" loading={runActive} disabled={!selectedPipeline?.cpuSupported || runActive} onClick={() => void runAnalysis()}>
             {runActive ? "Analyzing..." : "Run Analysis"}

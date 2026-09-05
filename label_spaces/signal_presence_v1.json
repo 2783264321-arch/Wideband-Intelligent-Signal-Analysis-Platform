@@ -1,0 +1,7 @@
+{
+  "id": "signal_presence_v1",
+  "version": 1,
+  "classes": [
+    {"id": 0, "name": "Signal"}
+  ]
+}

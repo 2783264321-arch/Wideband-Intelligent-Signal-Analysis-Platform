@@ -39,3 +39,4 @@ class PipelineDefinitionRead(BaseModel):
     cpu_supported: bool
     stages: list[str]
     inspectable_stages: list[str]
+    task_capability: str

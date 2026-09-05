@@ -21,3 +21,4 @@ data/cache/spectrograms/*
 *.tsbuildinfo
 
 backend/tests/.tiny_iq.bin
+backend/tests/.burst_iq.bin
