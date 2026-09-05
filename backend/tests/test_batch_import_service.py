@@ -64,12 +64,25 @@ def test_happy_path_import_creates_standard_runs(client, tmp_path, settings):
     run = session.query(AnalysisRunModel).first()
     assert run.executor == "imported"
     assert run.status == "completed"
-    assert run.parameters_json["batch_import"]["schema_version"] == 1
-    assert run.parameters_json["batch_import"]["batch_id"]
-    assert run.parameters_json["batch_import"]["item_key"]
-    assert run.parameters_json["batch_import"]["import_fingerprint"]
-    assert run.parameters_json["batch_import"]["recording_fingerprint"]
-    assert run.parameters_json["batch_import"]["archive_sha256"]
+    batch_import = run.parameters_json["batch_import"]
+    assert batch_import["schema_version"] == 1
+    assert batch_import["batch_id"]
+    assert batch_import["item_key"]
+    assert batch_import["import_fingerprint"]
+    assert batch_import["recording_fingerprint"]
+    assert batch_import["archive_sha256"]
+    assert batch_import["result_provenance"] == {
+        "code_commit": None,
+        "config_sha256": "a" * 64,
+        "split_manifest_sha256": None,
+        "source_predictions_sha256": None,
+        "artifact_sha256": {},
+    }
+    assert batch_import["transport_provenance"] == {
+        "exporter_version": "batch_analysis_package_v1",
+        "platform_repo_commit": None,
+        "export_timestamp": None,
+    }
 
 
 def test_one_invalid_child_leaves_zero_rows(client, tmp_path, settings):
@@ -176,3 +189,33 @@ def test_partial_prior_state_raises_inconsistent(client, tmp_path, settings):
     # no new rows and no repair of the deleted run
     session = _session(client)
     assert session.query(AnalysisRunModel).count() == 1
+
+
+def test_prior_semantic_state_with_wrong_recording_mapping_is_inconsistent(client, tmp_path, settings):
+    service = BatchPackageImportService(_session(client), client.app.state.storage,
+                                        LabelSpaceService(settings.label_space_root))
+    zip_bytes = _build_zip(client, tmp_path)
+    service.import_batch(zip_bytes)
+    # Swap the batch_import.item_key between the two existing runs while keeping
+    # the same import_fingerprint, creating a wrong item-key/Recording mapping.
+    session = _session(client)
+    runs = session.query(AnalysisRunModel).all()
+    assert len(runs) == 2
+    run_a, run_b = runs
+    key_a = run_a.parameters_json["batch_import"]["item_key"]
+    key_b = run_b.parameters_json["batch_import"]["item_key"]
+    params_a = dict(run_a.parameters_json)
+    params_a["batch_import"] = dict(params_a["batch_import"])
+    params_a["batch_import"]["item_key"] = key_b
+    run_a.parameters_json = params_a
+    params_b = dict(run_b.parameters_json)
+    params_b["batch_import"] = dict(params_b["batch_import"])
+    params_b["batch_import"]["item_key"] = key_a
+    run_b.parameters_json = params_b
+    session.commit()
+    with pytest.raises(PlatformError) as exc:
+        service.import_batch(zip_bytes)
+    assert exc.value.code == "BATCH_IMPORT_STATE_INCONSISTENT"
+    # no automatic repair
+    session = _session(client)
+    assert session.query(AnalysisRunModel).count() == 2

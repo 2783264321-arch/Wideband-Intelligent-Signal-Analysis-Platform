@@ -64,6 +64,14 @@ class BatchPackageImportService:
                     "Partial or conflicting prior semantic import state exists.",
                     409,
                 )
+            for resolved in items:
+                prior = existing[resolved.item.key]
+                if prior["recording_id"] != resolved.recording.id:
+                    raise PlatformError(
+                        "BATCH_IMPORT_STATE_INCONSISTENT",
+                        "Prior semantic import maps an item key to a different Recording.",
+                        409,
+                    )
             # Complete idempotent re-import: return existing mapping, create nothing.
             mapping = [
                 BatchRunMapping(
@@ -115,6 +123,8 @@ class BatchPackageImportService:
                     "import_fingerprint": validated.import_fingerprint,
                     "recording_fingerprint": resolved.recording_fingerprint.sha256,
                     "archive_sha256": archive_sha256,
+                    "result_provenance": manifest.result_provenance.model_dump(),
+                    "transport_provenance": manifest.transport_provenance.model_dump(),
                 },
             )
             runs.append(built.run)
@@ -183,5 +193,5 @@ class BatchPackageImportService:
                     "Duplicate item-key mapping in prior semantic import state.",
                     409,
                 )
-            by_key[item_key] = {"run_id": run.id}
+            by_key[item_key] = {"run_id": run.id, "recording_id": run.recording_id}
         return by_key
