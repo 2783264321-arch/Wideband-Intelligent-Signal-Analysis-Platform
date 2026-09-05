@@ -11,5 +11,13 @@ def upgrade_recording_external(engine) -> None:
             connection.execute(text("ALTER TABLE recordings ADD COLUMN external_path VARCHAR(1024)"))
 
 
+def upgrade_dataset_benchmarks(engine) -> None:
+    from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
+
+    DatasetEvaluationModel.__table__.create(engine, checkfirst=True)
+    DatasetEvaluationItemModel.__table__.create(engine, checkfirst=True)
+
+
 def run_additive_migrations(engine) -> None:
     upgrade_recording_external(engine)
+    upgrade_dataset_benchmarks(engine)
