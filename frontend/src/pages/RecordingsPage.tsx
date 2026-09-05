@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { importRecording, listRecordings } from "../api/client";
 import type { RecordingDetail } from "../api/types";
+import { ImportRunModal } from "../features/imports/ImportRunModal";
 
 interface ImportFormValues {
   name: string;
@@ -17,6 +18,7 @@ export function RecordingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [importRunOpen, setImportRunOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm<ImportFormValues>();
@@ -71,7 +73,10 @@ export function RecordingsPage() {
           <Typography.Title level={2} style={{ marginBottom: 4 }}>Recording Library</Typography.Title>
           <Typography.Text type="secondary">Open an offline IQ recording or import your own data.</Typography.Text>
         </div>
-        <Button type="primary" onClick={() => setModalOpen(true)}>Import Recording</Button>
+        <Space>
+          <Button onClick={() => setImportRunOpen(true)}>Import Existing Run</Button>
+          <Button type="primary" onClick={() => setModalOpen(true)}>Import Recording</Button>
+        </Space>
       </div>
 
       {error ? <Alert type="error" showIcon message={error} /> : null}
@@ -122,6 +127,8 @@ export function RecordingsPage() {
           <Typography.Text type="secondary">V1 custom import expects little-endian complex64 interleaved I/Q.</Typography.Text>
         </Form>
       </Modal>
+
+      <ImportRunModal open={importRunOpen} recordings={recordings} onClose={() => setImportRunOpen(false)} />
     </Space>
   );
 }

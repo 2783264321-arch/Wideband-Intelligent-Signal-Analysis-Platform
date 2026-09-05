@@ -15,6 +15,7 @@ from app.detections.router import router as detections_router
 from app.analysis.job_manager import LocalJobManager
 from app.analysis.router import router as analysis_router
 from app.analysis.service import mark_stale_running_runs_interrupted
+from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 
 
@@ -52,6 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ground_truth_router)
     app.include_router(detections_router)
     app.include_router(analysis_router)
+    app.include_router(imported_runs_router)
 
     spectrogram_cache = settings.data_root / "cache" / "spectrograms"
     spectrogram_cache.mkdir(parents=True, exist_ok=True)

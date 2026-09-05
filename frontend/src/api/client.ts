@@ -233,3 +233,21 @@ export async function createAnalysisRun(recordingId: string, pipelineId: string)
 export async function getAnalysisRun(runId: string): Promise<import("./types").AnalysisRun> {
   return mapAnalysisRun(await apiGet<AnalysisRunWire>(`/api/analysis-runs/${runId}`));
 }
+
+export async function importAnalysisPackage(recordingId: string, file: File): Promise<import("./types").AnalysisRun> {
+  const body = new FormData();
+  body.append("recording_id", recordingId);
+  body.append("file", file);
+  const response = await fetch(apiUrl("/api/imported-runs"), { method: "POST", body });
+  if (!response.ok) {
+    let message = `API request failed: ${response.status}`;
+    try {
+      const payload = await response.json() as { error?: { message?: string } };
+      if (payload.error?.message) message = payload.error.message;
+    } catch {
+      // Non-JSON error body; keep the generic message.
+    }
+    throw new Error(message);
+  }
+  return mapAnalysisRun(await response.json() as AnalysisRunWire);
+}
