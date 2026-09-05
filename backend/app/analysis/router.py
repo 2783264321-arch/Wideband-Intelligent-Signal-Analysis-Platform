@@ -1,6 +1,6 @@
 from dataclasses import asdict
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from app.analysis.schema import AnalysisRunCreate, AnalysisRunRead, PipelineDefinitionRead
 from app.analysis.service import AnalysisService
@@ -26,6 +26,16 @@ def create_analysis_run(payload: AnalysisRunCreate, request: Request):
             executor=payload.executor,
             parameters=payload.parameters,
         )
+
+
+@router.get("/api/analysis-runs", response_model=list[AnalysisRunRead])
+def list_analysis_runs(
+    request: Request,
+    recording_id: str | None = Query(None),
+    status: str | None = Query(None, pattern=r"^(pending|running|completed|failed|interrupted)$"),
+):
+    with request.app.state.database.session_factory() as session:
+        return _service(request, session).list(recording_id=recording_id, status=status)
 
 
 @router.get("/api/analysis-runs/{run_id}", response_model=AnalysisRunRead)

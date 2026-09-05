@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from uuid import uuid4
 
@@ -40,6 +40,14 @@ class AnalysisService:
         if run is None:
             raise PlatformError("ANALYSIS_RUN_NOT_FOUND", "Analysis run was not found.", 404)
         return run
+
+    def list(self, *, recording_id: str | None = None, status: str | None = None) -> list[AnalysisRunModel]:
+        statement = select(AnalysisRunModel)
+        if recording_id is not None:
+            statement = statement.where(AnalysisRunModel.recording_id == recording_id)
+        if status is not None:
+            statement = statement.where(AnalysisRunModel.status == status)
+        return list(self.session.scalars(statement.order_by(AnalysisRunModel.created_at, AnalysisRunModel.id)).all())
 
     def create_run(
         self,

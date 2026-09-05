@@ -10,6 +10,7 @@ from app.db.migrations import run_additive_migrations
 from app.db.session import Database
 from app.storage.service import StorageService
 from app.datasets.router import router as datasets_router
+from app.evaluation.router import router as evaluation_router
 from app.recordings.router import router as recordings_router
 from app.dsp.router import router as dsp_router
 from app.ground_truth.router import router as ground_truth_router
@@ -58,6 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(detections_router)
     app.include_router(analysis_router)
     app.include_router(imported_runs_router)
+    app.include_router(evaluation_router)
 
     spectrogram_cache = settings.data_root / "cache" / "spectrograms"
     spectrogram_cache.mkdir(parents=True, exist_ok=True)
