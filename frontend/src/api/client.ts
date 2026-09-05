@@ -290,6 +290,29 @@ interface RunComparisonWire {
     f1: number;
     mean_matched_iou: number | null;
   };
+  classification_applicable: boolean;
+  classification_reason: string | null;
+  classification: {
+    matched_count: number;
+    class_correct: number;
+    class_wrong: number;
+    matched_accuracy: number | null;
+    confusions: {
+      gt_class_id: number;
+      gt_class_name: string;
+      pred_class_id: number;
+      pred_class_name: string;
+      count: number;
+    }[];
+  } | null;
+  class_aware: {
+    tp: number;
+    fp: number;
+    fn: number;
+    precision: number;
+    recall: number;
+    f1: number;
+  } | null;
 }
 
 interface CaseWire {
@@ -306,8 +329,10 @@ interface RunMatchWire {
   matched: boolean;
   detection_id: string | null;
   iou: number | null;
+  class_id: number | null;
   class_name: string | null;
   confidence: number | null;
+  class_correct: boolean | null;
   bbox: { t_start_s: number; t_end_s: number; f_low_hz: number; f_high_hz: number } | null;
 }
 
@@ -316,8 +341,10 @@ function mapCompare(wire: CompareWire): import("./types").AlgorithmLabCompareRes
     matched: item.matched,
     detectionId: item.detection_id,
     iou: item.iou,
+    classId: item.class_id,
     className: item.class_name,
     confidence: item.confidence,
+    classCorrect: item.class_correct,
     bbox: item.bbox ? {
       tStartS: item.bbox.t_start_s,
       tEndS: item.bbox.t_end_s,
@@ -338,6 +365,29 @@ function mapCompare(wire: CompareWire): import("./types").AlgorithmLabCompareRes
       f1: item.metrics.f1,
       meanMatchedIou: item.metrics.mean_matched_iou,
     },
+    classificationApplicable: item.classification_applicable,
+    classificationReason: item.classification_reason,
+    classification: item.classification ? {
+      matchedCount: item.classification.matched_count,
+      classCorrect: item.classification.class_correct,
+      classWrong: item.classification.class_wrong,
+      matchedAccuracy: item.classification.matched_accuracy,
+      confusions: item.classification.confusions.map((c) => ({
+        gtClassId: c.gt_class_id,
+        gtClassName: c.gt_class_name,
+        predClassId: c.pred_class_id,
+        predClassName: c.pred_class_name,
+        count: c.count,
+      })),
+    } : null,
+    classAware: item.class_aware ? {
+      tp: item.class_aware.tp,
+      fp: item.class_aware.fp,
+      fn: item.class_aware.fn,
+      precision: item.class_aware.precision,
+      recall: item.class_aware.recall,
+      f1: item.class_aware.f1,
+    } : null,
   });
   return {
     recordingId: wire.recording_id,

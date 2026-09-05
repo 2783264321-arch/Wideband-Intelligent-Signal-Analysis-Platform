@@ -1,15 +1,22 @@
 import { Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import type { AlgorithmLabCase } from "../../api/types";
+import type { AlgorithmLabCase, RunMatchState } from "../../api/types";
 
 const comparisonTag = (state: string) => {
   const color = state === "both_detected" ? "green" : state === "both_missed" ? "red" : "orange";
   return <Tag color={color}>{state}</Tag>;
 };
 
-const matchCell = (matched: boolean, iou: number | null) => {
-  if (!matched) return <Tag color="red">Missed</Tag>;
-  return <span>{iou === null ? "—" : iou.toFixed(3)}</span>;
+const matchCell = (state: RunMatchState) => {
+  if (!state.matched) return <Tag color="red">Missed</Tag>;
+  const iouText = state.iou === null ? "—" : state.iou.toFixed(3);
+  return (
+    <span>
+      {iouText}<br />
+      <span>{state.className ?? "?"}</span>{" "}
+      {state.classCorrect === null ? <Tag>Class N/A</Tag> : state.classCorrect ? <Tag color="green">✓</Tag> : <Tag color="red">✗</Tag>}
+    </span>
+  );
 };
 
 const columns: ColumnsType<AlgorithmLabCase> = [
@@ -21,16 +28,16 @@ const columns: ColumnsType<AlgorithmLabCase> = [
     ),
   },
   {
-    title: "Run A (Matched / IoU)",
+    title: "Run A (IoU / class)",
     dataIndex: "runA",
     key: "runA",
-    render: (_, record) => matchCell(record.runA.matched, record.runA.iou),
+    render: (_, record) => matchCell(record.runA),
   },
   {
-    title: "Run B (Matched / IoU)",
+    title: "Run B (IoU / class)",
     dataIndex: "runB",
     key: "runB",
-    render: (_, record) => matchCell(record.runB.matched, record.runB.iou),
+    render: (_, record) => matchCell(record.runB),
   },
   {
     title: "Comparison",

@@ -78,7 +78,7 @@ export function AlgorithmLabPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div>
         <Typography.Title level={2} style={{ marginBottom: 4 }}>Algorithm Lab</Typography.Title>
-        <Typography.Text type="secondary">Compare two completed analysis runs on one recording against Ground Truth (IoU = 0.5).</Typography.Text>
+        <Typography.Text type="secondary">Compare localization, matched classification, and class-aware end-to-end performance for two completed runs on one Recording (localization matching IoU = 0.5).</Typography.Text>
       </div>
 
       <Card title="Experiment Setup">

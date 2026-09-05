@@ -115,8 +115,10 @@ export interface RunMatchState {
   matched: boolean;
   detectionId: string | null;
   iou: number | null;
+  classId: number | null;
   className: string | null;
   confidence: number | null;
+  classCorrect: boolean | null;
   bbox: PhysicalBox | null;
 }
 
@@ -132,11 +134,40 @@ export interface AlgorithmLabCase {
   runB: RunMatchState;
 }
 
+export interface ClassificationConfusion {
+  gtClassId: number;
+  gtClassName: string;
+  predClassId: number;
+  predClassName: string;
+  count: number;
+}
+
+export interface ClassificationMetrics {
+  matchedCount: number;
+  classCorrect: number;
+  classWrong: number;
+  matchedAccuracy: number | null;
+  confusions: ClassificationConfusion[];
+}
+
+export interface ClassAwareMetrics {
+  tp: number;
+  fp: number;
+  fn: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
 export interface RunComparison {
   runId: string;
   pipelineId: string;
   pipelineName: string;
   metrics: DetectionMetrics;
+  classificationApplicable: boolean;
+  classificationReason: string | null;
+  classification: ClassificationMetrics | null;
+  classAware: ClassAwareMetrics | null;
 }
 
 export interface AlgorithmLabCompareResponse {
