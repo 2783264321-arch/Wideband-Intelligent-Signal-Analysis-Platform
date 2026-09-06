@@ -363,17 +363,61 @@ RemoteExecutionBatchV1
   schema_version
   batch_id
   required_remote_runtime_commit
-  request_sha256
   pipeline identity
-  N items
+  items
+  request_sha256
 ```
 
-`request_sha256` is the canonical deterministic payload hash of the batch request (the exact serialized request bytes). It is the stable identity used for idempotent submission.
+### 8.2 Canonical request payload (no self-reference)
 
-Submission semantics:
+`request_sha256` must never hash the full wire bytes that include `request_sha256` itself.
+
+Define an explicit `canonical_request_payload`:
+
+- it contains all semantic fields of `RemoteExecutionBatchV1`;
+- it **excludes** the `request_sha256` field.
+
+Then:
+
+```text
+canonical_request_bytes =
+  canonical deterministic JSON encoding of canonical_request_payload
+
+request_sha256 =
+  SHA256(canonical_request_bytes)
+```
+
+Canonical JSON rules:
+
+- UTF-8 encoding;
+- object keys sorted deterministically;
+- compact separators (no insignificant whitespace);
+- strict finite numeric values (no NaN / Infinity);
+- stable numeric canonicalization where numeric values occur;
+- no duplicate JSON keys.
+
+Prefer reusing the platform's existing canonical JSON / canonical-number primitives rather than inventing a behaviorally different serializer.
+
+Server create-or-attach flow:
+
+1. parse the strict request;
+2. remove/exclude `request_sha256` from the hash payload;
+3. independently rebuild `canonical_request_payload`;
+4. recompute `request_sha256`;
+5. require equality with the supplied `request_sha256`.
+
+Otherwise:
+
+```text
+REMOTE_REQUEST_INVALID
+```
+
+Then apply:
 
 - same `batch_id` + same `request_sha256` -> idempotent create-or-attach; return/status the existing remote job; **must not** start a duplicate worker;
 - same `batch_id` + different `request_sha256` -> `REMOTE_REQUEST_CONFLICT`, fatal.
+
+The phrase "request_sha256 = hash of exact serialized full request bytes" is not used, because it would be self-referential and ambiguous under JSON serialization.
 
 This handles the case where the server accepted a job but the SSH connection died before the local side received the ACK. The local side reconciles the same `batch_id` first and must not immediately create a second remote job.
 
@@ -537,6 +581,40 @@ Local flow:
 4. then safe-extract and validate the internal schema.
 
 If another exact layout is chosen, it must preserve the same non-self-referential integrity rule.
+
+### 11.2 Terminal remote result is write-once
+
+For a fixed `(batch_id, item_key)`, once a terminal result has been atomically published:
+
+```text
+envelope.json
+analysis_result.zip
+```
+
+it is **immutable / write-once**.
+
+- create-or-attach
+- status polling
+- reconciliation
+- platform restart
+
+may only re-read / re-download the same terminal artifact. A terminal-completed item is never re-executed and its result artifact is never re-packaged or overwritten.
+
+Reason: `payload_sha256` hashes the exact bytes of `analysis_result.zip`. Regenerating the ZIP for the same scientific result, even with identical detection semantics, can change ZIP metadata/timestamps and produce a different `payload_sha256`, causing a false `REMOTE_RESULT_CONFLICT`.
+
+Rule:
+
+- same terminal item -> same immutable result bytes -> same `payload_sha256`.
+
+If the server finds a terminal item already exists but its result artifact is missing/corrupted, it must not regenerate/overwrite it. Mark it as infrastructure corruption / explicit error requiring human audit, or create a new `AnalysisRun`/batch to re-execute.
+
+Suggested error code:
+
+```text
+REMOTE_RESULT_CORRUPTED
+```
+
+(added to the Error Contract).
 
 The detection wire schema continues to be the existing standard:
 
@@ -979,11 +1057,13 @@ Define at least these explicit error codes:
 REMOTE_EXECUTOR_UNAVAILABLE
 REMOTE_RECORDING_UNAVAILABLE
 REMOTE_SUBMIT_FAILED
+REMOTE_REQUEST_INVALID
 REMOTE_REQUEST_CONFLICT
 REMOTE_STATUS_UNAVAILABLE
 REMOTE_DOWNLOAD_FAILED
 REMOTE_RESULT_INVALID
 REMOTE_RESULT_CONFLICT
+REMOTE_RESULT_CORRUPTED
 REMOTE_JOB_INTERRUPTED
 RECORDING_FINGERPRINT_MISMATCH
 SOURCE_DATA_HASH_MISMATCH
@@ -1174,6 +1254,8 @@ This is a DESIGN SPEC only. No implementation plan file is created in this task.
 23. The remote executor never mutates/checks out the remote repository state automatically.
 24. `live_validated` is derived from an exact validation certificate tuple; otherwise the run is `live_candidate`.
 25. The parity protocol is frozen before Gate 2; tolerances are never loosened after seeing results.
+26. `request_sha256` is computed from a canonical request payload that excludes the `request_sha256` field itself.
+27. A terminal remote item result is immutable/write-once; reconciliation never regenerates or overwrites it.
 
 ## 25. Design Alternatives / Rejected Approaches
 
