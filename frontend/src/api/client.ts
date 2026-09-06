@@ -1,4 +1,16 @@
 import type { DetectionResult, FFTData, GroundTruthResult, RecordingDetail, SpectrogramMeta, WaveformData } from "./types";
+import type {
+  DatasetBenchmarkAggregateMetrics,
+  DatasetBenchmarkCompareResult,
+  DatasetBenchmarkConfusion,
+  DatasetBenchmarkPerClassMetric,
+  DatasetEvaluation,
+  DatasetEvaluationItem,
+  DatasetEvaluationStatus,
+  ImportedBatchResolution,
+  ImportedBenchmarkBatch,
+  OperatingMetrics,
+} from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -455,4 +467,349 @@ export async function importAnalysisPackage(recordingId: string, file: File): Pr
     throw new Error(message);
   }
   return mapAnalysisRun(await response.json() as AnalysisRunWire);
+}
+
+// ---------------------------------------------------------------------------
+// Dataset Benchmark API boundary (typed snake_case wire -> camelCase domain)
+// ---------------------------------------------------------------------------
+
+interface OperatingMetricsWire {
+  tp: number;
+  fp: number;
+  fn: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+interface DatasetBenchmarkAggregateWire {
+  ground_truth?: {
+    raw_count: number;
+    canonical_count: number;
+    duplicates_removed: number;
+    duplicate_policy: string;
+  };
+  classification_applicable: boolean;
+  classification_reason: string | null;
+  localization: { ap50: number | null; ap50_95: number | null; operating: OperatingMetricsWire };
+  classification_on_matched: {
+    matched_count: number;
+    class_correct: number;
+    class_wrong: number;
+    matched_accuracy: number | null;
+  } | null;
+  class_aware: { map50: number | null; map50_95: number | null; operating: OperatingMetricsWire } | null;
+}
+
+interface DatasetBenchmarkPerClassWire {
+  class_id: number;
+  class_name: string;
+  gt_count: number;
+  prediction_count: number;
+  ap50: number | null;
+  ap50_95: number | null;
+  operating: OperatingMetricsWire;
+}
+
+interface DatasetBenchmarkConfusionWire {
+  gt_class_id: number;
+  gt_class_name: string;
+  pred_class_id: number;
+  pred_class_name: string;
+  count: number;
+}
+
+interface DatasetEvaluationWire {
+  id: string;
+  name: string;
+  dataset_name: string;
+  dataset_split: string;
+  label_space: string;
+  pipeline_id: string;
+  pipeline_version: string;
+  status: DatasetEvaluationStatus;
+  expected_recordings: number;
+  evaluated_recordings: number;
+  missing_recordings: number;
+  coverage: number;
+  comparable: boolean;
+  recording_manifest_hash: string;
+  evaluation_protocol: string;
+  protocol_config_json: Record<string, unknown>;
+  aggregate_metrics_json: DatasetBenchmarkAggregateWire | null;
+  per_class_metrics_json: DatasetBenchmarkPerClassWire[] | null;
+  confusion_json: DatasetBenchmarkConfusionWire[] | null;
+  progress_stage: string | null;
+  progress_current: number | null;
+  progress_total: number | null;
+  error_type: string | null;
+  error_message: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+interface DatasetEvaluationItemWire {
+  id: string;
+  evaluation_id: string;
+  manifest_order: number;
+  recording_id: string;
+  recording_name: string;
+  analysis_run_id: string | null;
+  status: string;
+  gt_count: number;
+  prediction_count: number;
+  error_reason: string | null;
+}
+
+interface ImportedBenchmarkBatchWire {
+  import_fingerprint: string;
+  pipeline_id: string | null;
+  pipeline_version: string | null;
+  dataset_name: string | null;
+  dataset_split: string | null;
+  label_space: string | null;
+  run_count: number;
+  detection_count: number;
+  archive_sha256: string | null;
+  result_provenance: Record<string, unknown>;
+  transport_provenance: Record<string, unknown>;
+  ready: boolean;
+  inconsistency_reasons: string[];
+}
+
+interface ImportedBatchResolutionWire {
+  import_fingerprint: string;
+  dataset_name: string;
+  dataset_split: string;
+  label_space: string;
+  pipeline_id: string;
+  pipeline_version: string;
+  recording_manifest_hash: string;
+  expected_recordings: number;
+  resolved_recordings: number;
+  missing_recordings: number;
+  conflict_count: number;
+  entries: Array<{
+    manifest_order: number;
+    recording_id: string;
+    recording_name: string;
+    analysis_run_id: string;
+    item_key: string;
+  }>;
+}
+
+interface DatasetBenchmarkCompareWire {
+  comparable: boolean;
+  reasons: string[];
+  evaluation_a_id: string;
+  evaluation_b_id: string;
+  aggregate_a: DatasetBenchmarkAggregateWire | null;
+  aggregate_b: DatasetBenchmarkAggregateWire | null;
+  deltas: Record<string, number | null>;
+}
+
+function mapOperating(item: OperatingMetricsWire): OperatingMetrics {
+  return { tp: item.tp, fp: item.fp, fn: item.fn, precision: item.precision, recall: item.recall, f1: item.f1 };
+}
+
+function mapAggregate(item: DatasetBenchmarkAggregateWire | null): DatasetBenchmarkAggregateMetrics | null {
+  if (!item) return null;
+  return {
+    groundTruth: item.ground_truth ? {
+      rawCount: item.ground_truth.raw_count,
+      canonicalCount: item.ground_truth.canonical_count,
+      duplicatesRemoved: item.ground_truth.duplicates_removed,
+      duplicatePolicy: item.ground_truth.duplicate_policy,
+    } : undefined,
+    classificationApplicable: item.classification_applicable,
+    classificationReason: item.classification_reason,
+    localization: {
+      ap50: item.localization.ap50,
+      ap50_95: item.localization.ap50_95,
+      operating: mapOperating(item.localization.operating),
+    },
+    classificationOnMatched: item.classification_on_matched ? {
+      matchedCount: item.classification_on_matched.matched_count,
+      classCorrect: item.classification_on_matched.class_correct,
+      classWrong: item.classification_on_matched.class_wrong,
+      matchedAccuracy: item.classification_on_matched.matched_accuracy,
+    } : null,
+    classAware: item.class_aware ? {
+      map50: item.class_aware.map50,
+      map50_95: item.class_aware.map50_95,
+      operating: mapOperating(item.class_aware.operating),
+    } : null,
+  };
+}
+
+function mapPerClass(item: DatasetBenchmarkPerClassWire): DatasetBenchmarkPerClassMetric {
+  return {
+    classId: item.class_id,
+    className: item.class_name,
+    gtCount: item.gt_count,
+    predictionCount: item.prediction_count,
+    ap50: item.ap50,
+    ap50_95: item.ap50_95,
+    operating: mapOperating(item.operating),
+  };
+}
+
+function mapConfusion(item: DatasetBenchmarkConfusionWire): DatasetBenchmarkConfusion {
+  return {
+    gtClassId: item.gt_class_id,
+    gtClassName: item.gt_class_name,
+    predClassId: item.pred_class_id,
+    predClassName: item.pred_class_name,
+    count: item.count,
+  };
+}
+
+function mapDatasetEvaluation(item: DatasetEvaluationWire): DatasetEvaluation {
+  return {
+    id: item.id,
+    name: item.name,
+    datasetName: item.dataset_name,
+    datasetSplit: item.dataset_split,
+    labelSpace: item.label_space,
+    pipelineId: item.pipeline_id,
+    pipelineVersion: item.pipeline_version,
+    status: item.status,
+    expectedRecordings: item.expected_recordings,
+    evaluatedRecordings: item.evaluated_recordings,
+    missingRecordings: item.missing_recordings,
+    coverage: item.coverage,
+    comparable: item.comparable,
+    recordingManifestHash: item.recording_manifest_hash,
+    evaluationProtocol: item.evaluation_protocol,
+    protocolConfig: item.protocol_config_json,
+    aggregateMetrics: mapAggregate(item.aggregate_metrics_json),
+    perClassMetrics: item.per_class_metrics_json?.map(mapPerClass) ?? null,
+    confusion: item.confusion_json?.map(mapConfusion) ?? null,
+    progressStage: item.progress_stage,
+    progressCurrent: item.progress_current,
+    progressTotal: item.progress_total,
+    errorType: item.error_type,
+    errorMessage: item.error_message,
+    createdAt: item.created_at ?? null,
+    completedAt: item.completed_at ?? null,
+  };
+}
+
+const mapDatasetEvaluationItem = (item: DatasetEvaluationItemWire): DatasetEvaluationItem => ({
+  id: item.id,
+  evaluationId: item.evaluation_id,
+  manifestOrder: item.manifest_order,
+  recordingId: item.recording_id,
+  recordingName: item.recording_name,
+  analysisRunId: item.analysis_run_id,
+  status: item.status,
+  gtCount: item.gt_count,
+  predictionCount: item.prediction_count,
+  errorReason: item.error_reason,
+});
+
+const mapImportedBatch = (item: ImportedBenchmarkBatchWire): ImportedBenchmarkBatch => ({
+  importFingerprint: item.import_fingerprint,
+  pipelineId: item.pipeline_id,
+  pipelineVersion: item.pipeline_version,
+  datasetName: item.dataset_name,
+  datasetSplit: item.dataset_split,
+  labelSpace: item.label_space,
+  runCount: item.run_count,
+  detectionCount: item.detection_count,
+  archiveSha256: item.archive_sha256,
+  resultProvenance: item.result_provenance,
+  transportProvenance: item.transport_provenance,
+  ready: item.ready,
+  inconsistencyReasons: item.inconsistency_reasons,
+});
+
+const mapImportedResolution = (item: ImportedBatchResolutionWire): ImportedBatchResolution => ({
+  importFingerprint: item.import_fingerprint,
+  datasetName: item.dataset_name,
+  datasetSplit: item.dataset_split,
+  labelSpace: item.label_space,
+  pipelineId: item.pipeline_id,
+  pipelineVersion: item.pipeline_version,
+  recordingManifestHash: item.recording_manifest_hash,
+  expectedRecordings: item.expected_recordings,
+  resolvedRecordings: item.resolved_recordings,
+  missingRecordings: item.missing_recordings,
+  conflictCount: item.conflict_count,
+  entries: item.entries.map((entry) => ({
+    manifestOrder: entry.manifest_order,
+    recordingId: entry.recording_id,
+    recordingName: entry.recording_name,
+    analysisRunId: entry.analysis_run_id,
+    itemKey: entry.item_key,
+  })),
+});
+
+export async function listDatasetBenchmarks(): Promise<DatasetEvaluation[]> {
+  return (await apiGet<DatasetEvaluationWire[]>("/api/dataset-benchmarks")).map(mapDatasetEvaluation);
+}
+
+export async function getDatasetBenchmark(id: string): Promise<DatasetEvaluation> {
+  return mapDatasetEvaluation(await apiGet<DatasetEvaluationWire>(`/api/dataset-benchmarks/${id}`));
+}
+
+export async function listDatasetBenchmarkItems(id: string): Promise<DatasetEvaluationItem[]> {
+  return (await apiGet<DatasetEvaluationItemWire[]>(`/api/dataset-benchmarks/${id}/items`))
+    .map(mapDatasetEvaluationItem);
+}
+
+export async function listImportedBenchmarkBatches(): Promise<ImportedBenchmarkBatch[]> {
+  return (await apiGet<ImportedBenchmarkBatchWire[]>("/api/dataset-benchmarks/imported-batches"))
+    .map(mapImportedBatch);
+}
+
+export async function resolveImportedBenchmarkBatch(importFingerprint: string): Promise<ImportedBatchResolution> {
+  const wire = await apiPostJson<ImportedBatchResolutionWire>(
+    "/api/dataset-benchmarks/resolve-imported-batch",
+    { import_fingerprint: importFingerprint },
+  );
+  return mapImportedResolution(wire);
+}
+
+export async function createDatasetBenchmark(payload: {
+  name: string;
+  resolution: ImportedBatchResolution;
+}): Promise<DatasetEvaluation> {
+  return mapDatasetEvaluation(await apiPostJson<DatasetEvaluationWire>("/api/dataset-benchmarks", {
+    name: payload.name,
+    dataset_name: payload.resolution.datasetName,
+    dataset_split: payload.resolution.datasetSplit,
+    label_space: payload.resolution.labelSpace,
+    recording_manifest_hash: payload.resolution.recordingManifestHash,
+    allow_incomplete: false,
+    items: payload.resolution.entries.map((entry) => ({
+      recording_id: entry.recordingId,
+      analysis_run_id: entry.analysisRunId,
+    })),
+  }));
+}
+
+export async function runDatasetBenchmark(id: string): Promise<DatasetEvaluation> {
+  return mapDatasetEvaluation(await apiPostJson<DatasetEvaluationWire>(`/api/dataset-benchmarks/${id}/run`, {}));
+}
+
+export async function retryDatasetBenchmark(id: string): Promise<DatasetEvaluation> {
+  return mapDatasetEvaluation(await apiPostJson<DatasetEvaluationWire>(`/api/dataset-benchmarks/${id}/retry`, {}));
+}
+
+export async function compareDatasetBenchmarks(a: string, b: string): Promise<DatasetBenchmarkCompareResult> {
+  const wire = await apiPostJson<DatasetBenchmarkCompareWire>("/api/dataset-benchmarks/compare", {
+    evaluation_a_id: a,
+    evaluation_b_id: b,
+  });
+  return {
+    comparable: wire.comparable,
+    reasons: wire.reasons,
+    evaluationAId: wire.evaluation_a_id,
+    evaluationBId: wire.evaluation_b_id,
+    aggregateA: mapAggregate(wire.aggregate_a),
+    aggregateB: mapAggregate(wire.aggregate_b),
+    deltas: wire.deltas,
+  };
 }

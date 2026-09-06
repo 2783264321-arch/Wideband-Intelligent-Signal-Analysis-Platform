@@ -177,3 +177,150 @@ export interface AlgorithmLabCompareResponse {
   runB: RunComparison;
   cases: AlgorithmLabCase[];
 }
+
+export type DatasetEvaluationStatus = "pending" | "running" | "completed" | "failed" | "interrupted";
+
+export interface GroundTruthProvenance {
+  rawCount: number;
+  canonicalCount: number;
+  duplicatesRemoved: number;
+  duplicatePolicy: string;
+}
+
+export interface OperatingMetrics {
+  tp: number;
+  fp: number;
+  fn: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+export interface DatasetBenchmarkAggregateMetrics {
+  groundTruth?: GroundTruthProvenance;
+  classificationApplicable: boolean;
+  classificationReason: string | null;
+  localization: {
+    ap50: number | null;
+    ap50_95: number | null;
+    operating: OperatingMetrics;
+  };
+  classificationOnMatched: {
+    matchedCount: number;
+    classCorrect: number;
+    classWrong: number;
+    matchedAccuracy: number | null;
+  } | null;
+  classAware: {
+    map50: number | null;
+    map50_95: number | null;
+    operating: OperatingMetrics;
+  } | null;
+}
+
+export interface DatasetBenchmarkPerClassMetric {
+  classId: number;
+  className: string;
+  gtCount: number;
+  predictionCount: number;
+  ap50: number | null;
+  ap50_95: number | null;
+  operating: OperatingMetrics;
+}
+
+export interface DatasetBenchmarkConfusion {
+  gtClassId: number;
+  gtClassName: string;
+  predClassId: number;
+  predClassName: string;
+  count: number;
+}
+
+export interface DatasetEvaluation {
+  id: string;
+  name: string;
+  datasetName: string;
+  datasetSplit: string;
+  labelSpace: string;
+  pipelineId: string;
+  pipelineVersion: string;
+  status: DatasetEvaluationStatus;
+  expectedRecordings: number;
+  evaluatedRecordings: number;
+  missingRecordings: number;
+  coverage: number;
+  comparable: boolean;
+  recordingManifestHash: string;
+  evaluationProtocol: string;
+  protocolConfig: Record<string, unknown>;
+  aggregateMetrics: DatasetBenchmarkAggregateMetrics | null;
+  perClassMetrics: DatasetBenchmarkPerClassMetric[] | null;
+  confusion: DatasetBenchmarkConfusion[] | null;
+  progressStage: string | null;
+  progressCurrent: number | null;
+  progressTotal: number | null;
+  errorType: string | null;
+  errorMessage: string | null;
+  createdAt: string | null;
+  completedAt: string | null;
+}
+
+export interface DatasetEvaluationItem {
+  id: string;
+  evaluationId: string;
+  manifestOrder: number;
+  recordingId: string;
+  recordingName: string;
+  analysisRunId: string | null;
+  status: string;
+  gtCount: number;
+  predictionCount: number;
+  errorReason: string | null;
+}
+
+export interface ImportedBenchmarkBatch {
+  importFingerprint: string;
+  pipelineId: string | null;
+  pipelineVersion: string | null;
+  datasetName: string | null;
+  datasetSplit: string | null;
+  labelSpace: string | null;
+  runCount: number;
+  detectionCount: number;
+  archiveSha256: string | null;
+  resultProvenance: Record<string, unknown>;
+  transportProvenance: Record<string, unknown>;
+  ready: boolean;
+  inconsistencyReasons: string[];
+}
+
+export interface ImportedBatchResolution {
+  importFingerprint: string;
+  datasetName: string;
+  datasetSplit: string;
+  labelSpace: string;
+  pipelineId: string;
+  pipelineVersion: string;
+  recordingManifestHash: string;
+  expectedRecordings: number;
+  resolvedRecordings: number;
+  missingRecordings: number;
+  conflictCount: number;
+  entries: Array<{
+    manifestOrder: number;
+    recordingId: string;
+    recordingName: string;
+    analysisRunId: string;
+    itemKey: string;
+  }>;
+}
+
+export interface DatasetBenchmarkCompareResult {
+  comparable: boolean;
+  reasons: string[];
+  evaluationAId: string;
+  evaluationBId: string;
+  aggregateA: DatasetBenchmarkAggregateMetrics | null;
+  aggregateB: DatasetBenchmarkAggregateMetrics | null;
+  deltas: Record<string, number | null>;
+}
