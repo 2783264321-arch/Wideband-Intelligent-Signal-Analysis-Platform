@@ -1,8 +1,9 @@
-import { Button, Card, Space, Typography } from "antd";
+import { Button, Space, Typography } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import { listDatasetBenchmarks, retryDatasetBenchmark, runDatasetBenchmark } from "../../api/client";
 import type { DatasetEvaluation } from "../../api/types";
 import { BenchmarkCreatePanel } from "./BenchmarkCreatePanel";
+import { BenchmarkDetailView } from "./BenchmarkDetailView";
 import { BenchmarkListTable } from "./BenchmarkListTable";
 
 export interface DatasetBenchmarksViewProps {
@@ -24,10 +25,11 @@ export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, on
 
   if (selectedBenchmarkId) {
     return (
-      <Card title="Dataset Benchmark">
-        <Button onClick={() => onBenchmarkOpen(undefined)}>Back to list</Button>
-        <Typography.Paragraph>Benchmark started: {selectedBenchmarkId}</Typography.Paragraph>
-      </Card>
+      <BenchmarkDetailView
+        evaluationId={selectedBenchmarkId}
+        onBack={() => onBenchmarkOpen(undefined)}
+        onOpenCase={onOpenCase}
+      />
     );
   }
 
