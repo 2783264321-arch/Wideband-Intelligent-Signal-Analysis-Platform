@@ -215,3 +215,64 @@ test("renders classification metrics as N/A for detection-only evaluations", asy
   await screen.findByText("Localization");
   expect(screen.getAllByText("N/A").length).toBeGreaterThanOrEqual(2);
 });
+
+import { BenchmarkComparePanel } from "./BenchmarkComparePanel";
+
+test("shows backend incompatibility reasons and no metric table", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.endsWith("/api/dataset-benchmarks/compare") && init?.method === "POST") {
+      return new Response(JSON.stringify({
+        comparable: false, reasons: ["evaluation_protocol_mismatch"],
+        evaluation_a_id: "eval_a", evaluation_b_id: "eval_b",
+        aggregate_a: null, aggregate_b: null, deltas: {},
+      }));
+    }
+    throw new Error(`Unexpected request: ${urlStr}`);
+  }));
+
+  render(
+    <BenchmarkComparePanel
+      evaluationAId="eval_a"
+      evaluationBId="eval_b"
+      onOpenCase={() => undefined}
+    />,
+  );
+  expect(await screen.findByText("Not comparable")).toBeInTheDocument();
+  expect(screen.getByText(/evaluation_protocol_mismatch/)).toBeInTheDocument();
+  expect(screen.queryByText("Δ (B-A)")).not.toBeInTheDocument();
+});
+
+test("shows lightweight comparable metrics and drills into the two frozen runs", async () => {
+  const onOpenCase = vi.fn();
+  const aggregate = {
+    classification_applicable: true, classification_reason: null,
+    localization: { ap50: 0.6, ap50_95: 0.45, operating: { tp: 10, fp: 2, fn: 3, precision: 0.8, recall: 0.7, f1: 0.75 } },
+    classification_on_matched: { matched_count: 10, class_correct: 8, class_wrong: 2, matched_accuracy: 0.8 },
+    class_aware: { map50: 0.5, map50_95: 0.37, operating: { tp: 8, fp: 4, fn: 5, precision: 0.67, recall: 0.62, f1: 0.64 } },
+  };
+  const itemA = [{ id: "ia", evaluation_id: "eval_a", manifest_order: 0, recording_id: "rec_0", recording_name: "0", analysis_run_id: "run_a", status: "included", gt_count: 6, prediction_count: 13, error_reason: null }];
+  const itemB = [{ id: "ib", evaluation_id: "eval_b", manifest_order: 0, recording_id: "rec_0", recording_name: "0", analysis_run_id: "run_b", status: "included", gt_count: 6, prediction_count: 11, error_reason: null }];
+
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    if (urlStr.endsWith("/api/dataset-benchmarks/compare") && init?.method === "POST") {
+      return new Response(JSON.stringify({
+        comparable: true, reasons: [], evaluation_a_id: "eval_a", evaluation_b_id: "eval_b",
+        aggregate_a: aggregate,
+        aggregate_b: { ...aggregate, class_aware: { ...aggregate.class_aware, map50_95: 0.40 } },
+        deltas: { class_aware_map50_95: 0.03, class_aware_map50: 0, localization_ap50_95: 0, matched_accuracy: 0 },
+      }));
+    }
+    if (urlStr.endsWith("/api/dataset-benchmarks/eval_a/items")) return new Response(JSON.stringify(itemA));
+    if (urlStr.endsWith("/api/dataset-benchmarks/eval_b/items")) return new Response(JSON.stringify(itemB));
+    throw new Error(`Unexpected request: ${urlStr}`);
+  }));
+
+  render(<BenchmarkComparePanel evaluationAId="eval_a" evaluationBId="eval_b" onOpenCase={onOpenCase} />);
+  expect(await screen.findByText("Class-aware mAP50:95")).toBeInTheDocument();
+  fireEvent.mouseDown(screen.getByLabelText("Compare Recording"));
+  fireEvent.click(await screen.findByTitle("0"));
+  fireEvent.click(screen.getByRole("button", { name: "Open Case Comparison" }));
+  expect(onOpenCase).toHaveBeenCalledWith("rec_0", "run_a", "run_b");
+});

@@ -2,6 +2,7 @@ import { Button, Space, Typography } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import { listDatasetBenchmarks, retryDatasetBenchmark, runDatasetBenchmark } from "../../api/client";
 import type { DatasetEvaluation } from "../../api/types";
+import { BenchmarkComparePanel } from "./BenchmarkComparePanel";
 import { BenchmarkCreatePanel } from "./BenchmarkCreatePanel";
 import { BenchmarkDetailView } from "./BenchmarkDetailView";
 import { BenchmarkListTable } from "./BenchmarkListTable";
@@ -16,6 +17,7 @@ export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, on
   const [items, setItems] = useState<DatasetEvaluation[]>([]);
   const [creating, setCreating] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showCompare, setShowCompare] = useState(false);
 
   const refresh = useCallback(async () => setItems(await listDatasetBenchmarks()), []);
   useEffect(() => { void refresh(); }, [refresh]);
@@ -40,6 +42,14 @@ export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, on
         <Button onClick={() => setCreating(true)}>New Benchmark</Button>
       </Space>
       {creating ? <BenchmarkCreatePanel onCreated={(id) => { setCreating(false); void refresh(); onBenchmarkOpen(id); }} /> : null}
+      {selectedIds.length === 2 ? <Button onClick={() => setShowCompare(true)}>Compare Selected</Button> : null}
+      {showCompare && selectedIds.length === 2 ? (
+        <BenchmarkComparePanel
+          evaluationAId={selectedIds[0]}
+          evaluationBId={selectedIds[1]}
+          onOpenCase={onOpenCase}
+        />
+      ) : null}
       <BenchmarkListTable
         items={items}
         selectedIds={selectedIds}
