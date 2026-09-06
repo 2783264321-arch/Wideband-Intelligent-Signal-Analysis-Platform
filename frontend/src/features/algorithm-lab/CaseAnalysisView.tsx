@@ -60,16 +60,19 @@ export function CaseAnalysisView({
 
   // Resolve the selected Recording: from the paged list when present, otherwise
   // hydrate directly by id so any of the 2500 benchmark samples can be reached.
+  // When the Recording identity changes, any derived display state for the previous
+  // Recording must be invalidated so a stale comparison is never shown.
   useEffect(() => {
     let cancelled = false;
+    setCompare(null);
+    setMeta(null);
+    setGroundTruth([]);
+    setDetectionsA([]);
+    setDetectionsB([]);
+    setSelectedCaseId(undefined);
     if (!recordingId) {
       setSelectedRecording(null);
       setRuns([]);
-      setCompare(null);
-      setMeta(null);
-      setGroundTruth([]);
-      setDetectionsA([]);
-      setDetectionsB([]);
       return;
     }
     const fromList = recordings.find((item) => item.id === recordingId);

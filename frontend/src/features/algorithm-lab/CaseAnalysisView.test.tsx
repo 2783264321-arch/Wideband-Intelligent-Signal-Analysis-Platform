@@ -306,3 +306,25 @@ test("hydrates a query-selected recording even when it is not in the first 500 l
   expect(requests.some((url) => url.endsWith("/api/recordings/rec2500"))).toBe(true);
   expect(requests.some((url) => url.includes("recording_id=rec2500"))).toBe(true);
 });
+
+test("clears stale comparison state when switching to another Recording", async () => {
+  const recB = { ...recording, id: "recB", name: "Sample B" };
+  setupCaseFetch({
+    recordingPage: [recording, recB],
+    directRecordings: { rec1: recording, recB },
+    runsByRecording: { rec1: completedRuns, recB: [completedRuns[0]] },
+  });
+  renderView();
+  // Compare Recording A (Run A + Run B).
+  await chooseRecording();
+  await chooseRun("Run A", "stft_energy_detector · run_a");
+  await chooseRun("Run B", "zoomspec · run_b");
+  expect(await screen.findByText("both_detected", {}, { timeout: 3000 })).toBeInTheDocument();
+
+  // Switch to Recording B -> onRecordingChange clears runA/runB; old comparison must disappear.
+  fireEvent.mouseDown(screen.getByLabelText("Recording"));
+  fireEvent.click(await screen.findByTitle("Sample B"));
+  await waitFor(() => expect(screen.queryByText("both_detected")).not.toBeInTheDocument());
+  expect(screen.queryByText(/ZoomSpec/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Case Comparison")).not.toBeInTheDocument();
+});
