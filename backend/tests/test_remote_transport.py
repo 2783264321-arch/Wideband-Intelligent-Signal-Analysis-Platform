@@ -39,7 +39,11 @@ class MaterializingRecorder:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((list(argv), dict(kwargs)))
-        Path(argv[-1]).write_bytes(b"data")
+        target = argv[-1]
+        # scp downloads end in a local destination path; scp uploads end in a
+        # remote "user@host:path" target that must never be touched locally.
+        if "@" not in target:
+            Path(target).write_bytes(b"data")
         return _ok()
 
 
@@ -489,3 +493,149 @@ def test_no_remote_repo_mutation_commands(tmp_path):
     for forbidden in ("git", "checkout", "pull", "reset", "fetch"):
         assert forbidden not in all_tokens
     assert "StrictHostKeyChecking=no" not in all_tokens
+
+
+# ------------------------------------------- CORRECTIVE: remote shell boundary
+
+
+@pytest.mark.parametrize("root", [
+    "/root/jobs/a;id",
+    "/root/jobs/a b",
+    "/root/jobs/$HOME",
+    "/root/jobs/$(id)",
+    "/root/jobs/a&b",
+    "/root/jobs/a|b",
+    "/root/jobs/a#b",
+    "/root/jobs/a'b",
+    '/root/jobs/a"b',
+    "/root/jobs/a`b",
+    "/root/jobs/a>b",
+    "/root/jobs/a<b",
+    r"/root/jobs/a\b",
+    "/root/./escape",
+    "/root//double",
+])
+def test_profile_rejects_remote_shell_unsafe_paths(tmp_path, monkeypatch, settings, root):
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_JOB_ROOT=root)
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("root", [
+    "/root/jobs/a;id",
+    "/root/jobs/a b",
+    "/root/jobs/a&b",
+    "/root/jobs/a#b",
+    "/root/./escape",
+])
+def test_profile_mapping_rejects_shell_unsafe_values(tmp_path, monkeypatch, settings, root):
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings,
+                      WSP_REMOTE_DATASET_ROOTS_JSON=json.dumps({"SpaceNet": root}))
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("job_root", [
+    "/root/autodl-tmp/Wideband-Intelligent-Signal-Analysis-Platform",
+    "/root/autodl-tmp/SpaceNet_Dataset",
+])
+def test_profile_accepts_realistic_job_roots(tmp_path, monkeypatch, settings, job_root):
+    profile = _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_JOB_ROOT=job_root)
+    assert profile.remote_job_root == PurePosixPath(job_root)
+
+
+def test_profile_accepts_realistic_deep_mapping_paths(tmp_path, monkeypatch, settings):
+    deep = "/root/autodl-tmp/Claude/runs/cpn/ls_stft_yolo26n_aug_warm/weights/best.pt"
+    profile = _load_profile(
+        tmp_path, monkeypatch, settings,
+        WSP_REMOTE_DATASET_ROOTS_JSON=json.dumps({"SpaceNet": deep}),
+    )
+    assert profile.dataset_roots["SpaceNet"] == PurePosixPath(deep)
+
+
+@pytest.mark.parametrize("bad", [
+    "/root/jobs/a;id",
+    "/root/jobs/a b",
+    "/root/jobs/$HOME",
+    "/root/jobs/$(id)",
+    "/root/jobs/a&b",
+    "/root/jobs/a|b",
+    "/root/jobs/a#b",
+    "/root/jobs/a'b",
+    '/root/jobs/a"b',
+    "/root/jobs/a`b",
+    "/root/jobs/a>b",
+    "/root/jobs/a<b",
+    r"/root/jobs/a\b",
+    "/root/./escape",
+    "/root//double",
+])
+def test_transport_rejects_shell_unsafe_remote_paths(tmp_path, bad):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    local = tmp_path / "request.json"
+    local.write_bytes(b"{}")
+    with pytest.raises(PlatformError):
+        runner.upload_file(local, bad)
+    with pytest.raises(PlatformError):
+        runner.download_file(bad, tmp_path / "out" / "x")
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("bad", [
+    "/root/jobs/a;id",
+    "/root/jobs/a b",
+    "/root/jobs/$(id)",
+    "/root/jobs/a#b",
+    "/root/./escape",
+])
+def test_runner_rejects_shell_unsafe_request_path_before_subprocess(tmp_path, bad):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    with pytest.raises(PlatformError):
+        runner.run_runner("submit", ("--request-path", bad))
+    assert recorder.calls == []
+
+
+def test_transport_accepts_realistic_autodl_paths(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = MaterializingRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    local = tmp_path / "request.json"
+    local.write_bytes(b"{}")
+    deep = PurePosixPath("/root/autodl-tmp/Claude/runs/cpn/ls_stft_yolo26n_aug_warm/weights/best.pt")
+    runner.upload_file(local, deep)
+    runner.download_file(deep, tmp_path / "out" / "best.pt")
+    assert len(recorder.calls) == 2
+
+
+# --------------------------------------- CORRECTIVE: status identity checks
+
+
+def test_status_wrong_batch_id_fails(tmp_path):
+    profile = _profile(tmp_path)
+    raw = json.dumps({"batch_id": "batch_y", "status": "running", "items": []})
+    recorder = ProcessRecorder(responses=[_ok(stdout=raw)])
+    manager = RemoteGpuJobManager(profile, SshRunner(profile, run_process=recorder))
+    with pytest.raises(PlatformError) as exc:
+        manager.status("batch_x")
+    assert exc.value.code == "REMOTE_STATUS_UNAVAILABLE"
+
+
+def test_status_duplicate_item_key_fails(tmp_path):
+    profile = _profile(tmp_path)
+    raw = json.dumps({
+        "batch_id": "batch_x",
+        "status": "running",
+        "items": [
+            {"item_key": "000000", "status": "running"},
+            {"item_key": "000000", "status": "completed"},
+        ],
+    })
+    recorder = ProcessRecorder(responses=[_ok(stdout=raw)])
+    manager = RemoteGpuJobManager(profile, SshRunner(profile, run_process=recorder))
+    with pytest.raises(PlatformError) as exc:
+        manager.status("batch_x")
+    assert exc.value.code == "REMOTE_STATUS_UNAVAILABLE"

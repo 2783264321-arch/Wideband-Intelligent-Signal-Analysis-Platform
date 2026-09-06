@@ -81,7 +81,16 @@ class RemoteGpuJobManager:
             result = self.transport.run_runner("status", ("--batch-id", batch_id))
         except RemoteTransportError:
             raise PlatformError("REMOTE_STATUS_UNAVAILABLE", "Remote status transport failed.")
-        return _parse_status_json(result.stdout)
+        status = _parse_status_json(result.stdout)
+        if status.batch_id != batch_id:
+            raise PlatformError(
+                "REMOTE_STATUS_UNAVAILABLE",
+                "Remote status batch identity does not match the requested batch.",
+            )
+        item_keys = [item.item_key for item in status.items]
+        if len(set(item_keys)) != len(item_keys):
+            raise PlatformError("REMOTE_STATUS_UNAVAILABLE", "Remote status contains duplicate item keys.")
+        return status
 
     def download(self, batch_id: str, item_key: str, dest_dir: Path) -> Path:
         _require_identifier(batch_id, "batch_id", "REMOTE_DOWNLOAD_FAILED")

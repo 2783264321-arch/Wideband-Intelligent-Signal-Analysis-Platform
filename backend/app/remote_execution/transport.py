@@ -12,7 +12,7 @@ import re
 import subprocess
 
 from app.core.errors import PlatformError
-from app.remote_execution.profile import RemoteProfile
+from app.remote_execution.profile import RemoteProfile, is_safe_remote_posix_path_text
 
 _RUNNER_COMMANDS = ("probe", "submit", "status", "work")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
@@ -24,19 +24,14 @@ class RemoteTransportError(RuntimeError):
 
 
 def _is_safe_remote_posix_path(value: str) -> bool:
-    if not value:
-        return False
-    if "\x00" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        return False
-    path = PurePosixPath(value)
-    if not path.is_absolute():
-        return False
-    return bool(path.parts) and not any(part in ("", ".", "..") for part in path.parts)
+    return is_safe_remote_posix_path_text(value)
 
 
-def _validate_remote_posix_path(path: PurePosixPath) -> None:
-    if not _is_safe_remote_posix_path(path.as_posix()):
+def _validate_remote_posix_path(path: str | PurePosixPath) -> PurePosixPath:
+    text = path.as_posix() if isinstance(path, PurePosixPath) else path
+    if not is_safe_remote_posix_path_text(text):
         raise PlatformError("REMOTE_TRANSPORT_ERROR", "Remote path is not a safe absolute POSIX path.")
+    return PurePosixPath(text)
 
 
 class SshRunner:
@@ -102,23 +97,23 @@ class SshRunner:
             return True
         return _is_safe_remote_posix_path(token)
 
-    def upload_file(self, local_path: Path, remote_path: PurePosixPath) -> None:
-        _validate_remote_posix_path(remote_path)
+    def upload_file(self, local_path: Path, remote_path: str | PurePosixPath) -> None:
+        remote = _validate_remote_posix_path(remote_path)
         if not local_path.is_file():
             raise PlatformError("REMOTE_TRANSPORT_ERROR", "Upload source must be a regular file.")
         argv = [
             *self._scp_base_argv(),
             str(local_path),
-            f"{self._destination()}:{remote_path.as_posix()}",
+            f"{self._destination()}:{remote.as_posix()}",
         ]
         self._invoke(argv)
 
-    def download_file(self, remote_path: PurePosixPath, local_path: Path) -> None:
-        _validate_remote_posix_path(remote_path)
+    def download_file(self, remote_path: str | PurePosixPath, local_path: Path) -> None:
+        remote = _validate_remote_posix_path(remote_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
         argv = [
             *self._scp_base_argv(),
-            f"{self._destination()}:{remote_path.as_posix()}",
+            f"{self._destination()}:{remote.as_posix()}",
             str(local_path),
         ]
         self._invoke(argv)

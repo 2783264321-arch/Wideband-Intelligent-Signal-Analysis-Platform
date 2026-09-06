@@ -17,6 +17,36 @@ from app.core.errors import PlatformError
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9._:\-]+$")
 _USER_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
+_REMOTE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_safe_remote_posix_path_text(value: str) -> bool:
+    """Conservative raw remote-path check used by BOTH config and transport.
+
+    Validated on the raw text BEFORE any PurePosixPath normalization so that
+    ``.`` and duplicate separators cannot be hidden. Every component after the
+    leading ``/`` must match ``[A-Za-z0-9._-]+`` and be non-empty / non-``.`` /
+    non-``..``; shell-significant characters are therefore never allowed.
+    """
+    if not value.startswith("/"):
+        return False
+    if value != value.strip():
+        return False
+    if "\\" in value:
+        return False
+    if "\x00" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return False
+    raw_parts = value.split("/")
+    if raw_parts[0] != "":
+        return False
+    if len(raw_parts) < 2:
+        return False
+    for part in raw_parts[1:]:
+        if not part or part in (".", ".."):
+            return False
+        if _REMOTE_COMPONENT_RE.fullmatch(part) is None:
+            return False
+    return True
 
 
 def _unavailable(message: str) -> PlatformError:
@@ -55,14 +85,9 @@ def _safe_local_path(value: str, name: str) -> Path:
 def _safe_posix_root(value: str, name: str) -> PurePosixPath:
     if not value:
         raise _unavailable(f"{name} must be configured.")
-    if "\x00" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise _unavailable(f"{name} contains NUL or control characters.")
-    path = PurePosixPath(value)
-    if not path.is_absolute():
-        raise _unavailable(f"{name} must be an absolute POSIX path.")
-    if not path.parts or any(part in ("", ".", "..") for part in path.parts):
-        raise _unavailable(f"{name} contains invalid path components.")
-    return path
+    if not is_safe_remote_posix_path_text(value):
+        raise _unavailable(f"{name} is not a safe absolute POSIX path.")
+    return PurePosixPath(value)
 
 
 def _safe_posix_mapping(value: str | None, name: str) -> dict[str, PurePosixPath]:
