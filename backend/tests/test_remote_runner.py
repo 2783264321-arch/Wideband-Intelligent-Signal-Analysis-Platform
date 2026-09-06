@@ -178,6 +178,7 @@ def test_runner_module_imports_without_future_dependencies():
     import importlib
     import sys
 
+    before = set(sys.modules)
     module = importlib.import_module("app.remote_execution.runner")
     assert hasattr(module, "ItemExecutor")
     assert hasattr(module, "validate_request_sha256")
@@ -185,16 +186,18 @@ def test_runner_module_imports_without_future_dependencies():
     assert hasattr(module, "reconcile_status")
     assert hasattr(module, "submit_job")
     assert hasattr(module, "run_work")
-    # No future-module imports at module import time.
-    future = [
+    # No future-module imports at module import time. resolver/assets are now
+    # legitimate platform modules (Task 9), so assert runner's OWN import chain
+    # does not newly load them rather than requiring global absence.
+    newly_loaded = set(sys.modules) - before
+    future = {
         "app.remote_execution.resolver",
         "app.remote_execution.assets",
         "app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3",
         "torch",
         "ultralytics",
-    ]
-    for name in future:
-        assert name not in sys.modules, f"runner.py imported {name} at module level"
+    }
+    assert future.isdisjoint(newly_loaded)
 
 
 # ---------------------------------------------------------------------------
