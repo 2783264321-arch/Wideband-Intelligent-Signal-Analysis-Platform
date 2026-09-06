@@ -73,6 +73,7 @@ def _profile(tmp_path):
         known_hosts_path=hosts,
         remote_repo_root=PurePosixPath("/root/repo"),
         remote_job_root=PurePosixPath("/root/jobs"),
+        remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
     )
@@ -92,6 +93,7 @@ def _profile_env(tmp_path, monkeypatch, **overrides):
         "WSP_REMOTE_KNOWN_HOSTS_PATH": str(hosts),
         "WSP_REMOTE_REPO_ROOT": "/root/repo",
         "WSP_REMOTE_JOB_ROOT": "/root/jobs",
+        "WSP_REMOTE_PYTHON_PATH": "/opt/wsp-runtime/bin/python",
         "WSP_REMOTE_DATASET_ROOTS_JSON": json.dumps({"SpaceNet": "/root/autodl-tmp/SpaceNet_Dataset"}),
         "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({"detector_checkpoint": "/root/models/best.pt"}),
     }
@@ -200,6 +202,33 @@ def test_profile_posix_root_rejects_nul_and_control_chars():
         assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
 
 
+def test_profile_missing_remote_python_path_fails(tmp_path, monkeypatch, settings):
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_PYTHON_PATH=None)
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("python_path", [
+    "python3",                       # bare name, not absolute
+    "relative/python",               # relative path
+    "/root/runtime dir/python",      # space in path
+    "/root/../python",               # .. traversal
+    "/root//python",                 # duplicate slash
+    "/root/python;id",               # shell metacharacter
+    "/root/\\bin\\python",           # backslash
+])
+def test_profile_invalid_remote_python_path_fails(tmp_path, monkeypatch, settings, python_path):
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_PYTHON_PATH=python_path)
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+def test_profile_valid_remote_python_path_stored_as_pure_posix(tmp_path, monkeypatch, settings):
+    profile = _load_profile(tmp_path, monkeypatch, settings)
+    assert profile.remote_python_path == PurePosixPath("/opt/wsp-runtime/bin/python")
+    assert isinstance(profile.remote_python_path, PurePosixPath)
+
+
 @pytest.mark.parametrize("value", ["not-json", "{bad", "[]"])
 def test_profile_malformed_mapping_json_fails(tmp_path, monkeypatch, settings, value):
     with pytest.raises(PlatformError) as exc:
@@ -230,7 +259,7 @@ def test_ssh_runner_status_argv(tmp_path):
     assert "-i" in argv and str(profile.ssh_key_path) in argv
     assert "-p" in argv and "22" in argv
     assert "root@auto.example.com" in argv
-    assert "python3" in argv
+    assert profile.remote_python_path.as_posix() in argv
     assert "-m" in argv
     assert "app.remote_execution.runner" in argv
     assert "status" in argv
@@ -248,7 +277,8 @@ def test_ssh_runner_argv_sets_deterministic_module_root(tmp_path):
     # The remote command prefix must establish the backend module root.
     assert "env" in argv
     assert "PYTHONPATH=/root/repo/backend" in argv
-    assert "python3" in argv
+    assert "WSP_REMOTE_JOB_ROOT=/root/jobs" in argv
+    assert profile.remote_python_path.as_posix() in argv
     assert "-m" in argv
     assert "app.remote_execution.runner" in argv
     assert "status" in argv
@@ -273,6 +303,7 @@ def test_ssh_runner_argv_env_prefix_uses_remote_repo_root(tmp_path):
         known_hosts_path=hosts,
         remote_repo_root=PurePosixPath("/opt/platform"),
         remote_job_root=PurePosixPath("/root/jobs"),
+        remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
     )
@@ -292,10 +323,97 @@ def test_ssh_runner_argv_env_before_python3(tmp_path):
     argv, _ = recorder.calls[0]
     env_idx = argv.index("env")
     assert argv[env_idx + 1] == "PYTHONPATH=/root/repo/backend"
-    assert argv[env_idx + 2] == "python3"
-    assert argv[env_idx + 3] == "-m"
-    assert argv[env_idx + 4] == "app.remote_execution.runner"
-    assert argv[env_idx + 5] == "submit"
+    assert argv[env_idx + 2] == "WSP_REMOTE_JOB_ROOT=/root/jobs"
+    assert argv[env_idx + 3] == profile.remote_python_path.as_posix()
+    assert argv[env_idx + 4] == "-m"
+    assert argv[env_idx + 5] == "app.remote_execution.runner"
+    assert argv[env_idx + 6] == "submit"
+
+
+def test_ssh_runner_argv_exact_ordered_segment(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("status", ("--batch-id", "batch_x"))
+    argv, kwargs = recorder.calls[0]
+    env_idx = argv.index("env")
+    segment = argv[env_idx:]
+    assert segment == [
+        "env",
+        "PYTHONPATH=/root/repo/backend",
+        "WSP_REMOTE_JOB_ROOT=/root/jobs",
+        "/opt/wsp-runtime/bin/python",
+        "-m",
+        "app.remote_execution.runner",
+        "status",
+        "--batch-id",
+        "batch_x",
+    ]
+    assert kwargs["shell"] is False
+
+
+def test_ssh_runner_argv_has_no_bare_python3(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("status", ("--batch-id", "batch_x"))
+    argv, _ = recorder.calls[0]
+    env_idx = argv.index("env")
+    segment = argv[env_idx:]
+    assert "python3" not in segment
+
+
+def test_ssh_runner_argv_uses_custom_remote_python(tmp_path):
+    key = tmp_path / "id_ed25519"
+    key.write_bytes(b"key")
+    hosts = tmp_path / "known_hosts"
+    hosts.write_bytes(b"hosts")
+    profile = RemoteProfile(
+        name="autodl_primary",
+        host="auto.example.com",
+        port=22,
+        user="root",
+        ssh_key_path=key,
+        known_hosts_path=hosts,
+        remote_repo_root=PurePosixPath("/root/repo"),
+        remote_job_root=PurePosixPath("/root/jobs"),
+        remote_python_path=PurePosixPath("/srv/runtime/python"),
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("probe")
+    argv, _ = recorder.calls[0]
+    assert "/srv/runtime/python" in argv
+    assert "/opt/wsp-runtime/bin/python" not in argv
+
+
+def test_ssh_runner_argv_uses_custom_job_root(tmp_path):
+    key = tmp_path / "id_ed25519"
+    key.write_bytes(b"key")
+    hosts = tmp_path / "known_hosts"
+    hosts.write_bytes(b"hosts")
+    profile = RemoteProfile(
+        name="autodl_primary",
+        host="auto.example.com",
+        port=22,
+        user="root",
+        ssh_key_path=key,
+        known_hosts_path=hosts,
+        remote_repo_root=PurePosixPath("/root/repo"),
+        remote_job_root=PurePosixPath("/srv/jobs"),
+        remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("status", ("--batch-id", "batch_x"))
+    argv, kwargs = recorder.calls[0]
+    assert "WSP_REMOTE_JOB_ROOT=/srv/jobs" in argv
+    assert "WSP_REMOTE_JOB_ROOT=/root/jobs" not in argv
+    assert kwargs["shell"] is False
 
 
 def test_ssh_never_uses_insecure_host_key_policy(tmp_path):

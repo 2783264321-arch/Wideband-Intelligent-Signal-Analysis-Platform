@@ -78,16 +78,20 @@ class SshRunner:
         for argument in args:
             if not self._is_safe_runner_token(argument):
                 raise PlatformError("REMOTE_TRANSPORT_ERROR", "Runner argument is not a safe token.")
-        # Deterministic module root: the deployed checkout's backend directory.
-        # PYTHONPATH is generated ONLY from the conservative validated
-        # remote_repo_root; no request-controlled value ever reaches argv.
+        # Deterministic module root and runtime: PYTHONPATH is generated ONLY
+        # from the conservative validated remote_repo_root; WSP_REMOTE_JOB_ROOT
+        # and the remote Python executable come from the validated profile.
+        # No request-controlled value ever reaches argv.
         module_root = _validate_remote_posix_path(self.profile.remote_repo_root / "backend")
+        job_root = _validate_remote_posix_path(self.profile.remote_job_root)
+        python_path = _validate_remote_posix_path(self.profile.remote_python_path)
         argv = [
             *self._ssh_base_argv(),
             self._destination(),
             "env",
             f"PYTHONPATH={module_root.as_posix()}",
-            "python3",
+            f"WSP_REMOTE_JOB_ROOT={job_root.as_posix()}",
+            python_path.as_posix(),
             "-m",
             "app.remote_execution.runner",
             subcommand,

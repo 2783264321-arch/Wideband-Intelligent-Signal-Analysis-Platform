@@ -120,6 +120,7 @@ class RemoteProfile:
 
     remote_repo_root: PurePosixPath
     remote_job_root: PurePosixPath
+    remote_python_path: PurePosixPath
 
     dataset_roots: dict[str, PurePosixPath]
     asset_paths: dict[str, PurePosixPath]
@@ -152,6 +153,10 @@ class RemoteProfile:
 
         remote_repo_root = _safe_posix_root(_get("WSP_REMOTE_REPO_ROOT"), "WSP_REMOTE_REPO_ROOT")
         remote_job_root = _safe_posix_root(_get("WSP_REMOTE_JOB_ROOT"), "WSP_REMOTE_JOB_ROOT")
+        # The remote Python executable is immutable runtime configuration. It is
+        # validated as a safe absolute POSIX path only; the local computer cannot
+        # inspect the server filesystem, so no Path.exists() is used here.
+        remote_python_path = _safe_posix_root(_get("WSP_REMOTE_PYTHON_PATH"), "WSP_REMOTE_PYTHON_PATH")
 
         dataset_roots = _safe_posix_mapping(env.get("WSP_REMOTE_DATASET_ROOTS_JSON"), "WSP_REMOTE_DATASET_ROOTS_JSON")
         asset_paths = _safe_posix_mapping(env.get("WSP_REMOTE_ASSET_PATHS_JSON"), "WSP_REMOTE_ASSET_PATHS_JSON")
@@ -165,6 +170,7 @@ class RemoteProfile:
             known_hosts_path=known_hosts_path,
             remote_repo_root=remote_repo_root,
             remote_job_root=remote_job_root,
+            remote_python_path=remote_python_path,
             dataset_roots=dataset_roots,
             asset_paths=asset_paths,
         )
