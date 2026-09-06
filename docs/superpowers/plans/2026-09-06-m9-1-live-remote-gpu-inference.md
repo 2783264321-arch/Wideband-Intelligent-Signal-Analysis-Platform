@@ -65,7 +65,9 @@ backend/app/remote_execution/
   operator.py            # exact-membership operator batch service
   cli.py                 # local operator batch CLI
   parity.py              # live_remote_parity_v1 + certificate helpers
-  validation.py          # shared result-writer validation / AnalysisResultWriter
+  validation.py          # shared result-writer validation / AnalysisResultWriter + LiveImplementationValidationCertificateV1
+  certificate_store.py   # persistent immutable validation-certificate loader / state
+  validation_certificates/  # immutable certificate JSON artifacts (created in Task 20)
   parity/live_remote_parity_v1.json
   parity/spacenet_test_cohort_v1.json
 ```
@@ -174,7 +176,7 @@ def test_columns_exist_on_fresh_db(session):
 
 def test_old_db_gets_columns_after_additive_migration(tmp_path):
     from app.core.config import Settings
-    from app.db.base import Base, load_domain_models
+    from app.db.base import load_domain_models
     from app.db.session import Database
 
     settings = Settings(project_root=tmp_path, data_root=tmp_path / "data",
@@ -182,15 +184,13 @@ def test_old_db_gets_columns_after_additive_migration(tmp_path):
                         database_url=f"sqlite:///{tmp_path / 'old.db'}")
     load_domain_models()
     db = Database(settings.database_url)
-    # Simulate an old DB that only had the pre-M9.1 schema.
-    Base.metadata.create_all(db.engine)
+    # Build a minimal pre-M9.1 DB directly with exec_driver_sql. Keep the tables
+    # that run_additive_migrations() inspects/alters so it can execute successfully.
     with db.engine.begin() as connection:
-        connection.execute("DROP TABLE recordings")
-        connection.execute("DROP TABLE analysis_runs")
-    # Recreate minimal old tables without the new columns.
-    with db.engine.begin() as connection:
-        connection.execute("CREATE TABLE recordings (id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL)")
-        connection.execute("CREATE TABLE analysis_runs (id VARCHAR(64) PRIMARY KEY, status VARCHAR(32) NOT NULL DEFAULT 'pending')")
+        connection.exec_driver_sql(
+            "CREATE TABLE recordings (id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL)")
+        connection.exec_driver_sql(
+            "CREATE TABLE analysis_runs (id VARCHAR(64) PRIMARY KEY, status VARCHAR(32) NOT NULL DEFAULT 'pending')")
     run_additive_migrations(db.engine)
     with db.engine.begin() as connection:
         recordings = {c["name"] for c in inspect(connection).get_columns("recordings")}
@@ -409,22 +409,34 @@ def test_compute_file_sha256_matches_manual_hash(tmp_path):
     assert compute_file_sha256(path) == hashlib.sha256(blob).hexdigest()
 
 
-def test_resolve_source_data_sha256_caches_on_recording(client, tmp_path):
+def test_resolve_source_data_sha256_caches_on_recording(client, tmp_path, monkeypatch):
     blob = b"\x00\x01" * 5000
-    raw_path = tmp_path / "raw.iq"
+    data_root = tmp_path / "data"
+    data_root.mkdir(parents=True, exist_ok=True)
+    raw_path = data_root / "raw.iq"
     raw_path.write_bytes(blob)
     with client.app.state.database.session_factory() as session:
         add_recording(session, recording_id="rec_x", name="x")
         session.commit()
         from app.recordings.model import RecordingModel
         recording = session.get(RecordingModel, "rec_x")
-        # point the recording's data_path at the raw file inside data_root
-        data_root = tmp_path / "data"
-        recording.data_path = raw_path.name
+        recording.data_path = "raw.iq"
+        recording.external_path = None
         session.commit()
+
+        import app.remote_execution.source_hash as source_hash
+        calls = []
+        original = source_hash.compute_file_sha256
+        monkeypatch.setattr(source_hash, "compute_file_sha256",
+                            lambda path: calls.append(str(path)) or original(path))
+
         first = resolve_source_data_sha256(session, recording, data_root)
+        assert first == hashlib.sha256(blob).hexdigest()
+        # cache is now persisted; the second call must not re-read the file.
+        session.expire(recording)
         second = resolve_source_data_sha256(session, recording, data_root)
-        assert first == second == hashlib.sha256(blob).hexdigest()
+        assert second == first
+        assert len(calls) == 1  # compute_file_sha256 called exactly once
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -459,6 +471,7 @@ git commit -m "feat: hash and cache raw iq source identity"
 **Owner:** 本地电脑opencode
 
 **Files:**
+- Create: `backend/app/remote_execution/executor.py` (defines the `RemoteExecutorProbe` Protocol)
 - Modify: `backend/app/pipelines/base.py`
 - Modify: `backend/app/pipelines/registry.py`
 - Modify: `backend/app/analysis/schema.py`
@@ -468,46 +481,86 @@ git commit -m "feat: hash and cache raw iq source identity"
 **Interfaces:**
 - `PipelineDefinition` gains `executors_supported: tuple[str, ...] = ("local_cpu",)` and `recommended_executor: str = "local_cpu"`.
 - `ExecutorAvailabilityRead` — `executor`, `available`, `reason_code`, `reason_message`, `remote_profile`, `recommended`.
-- `AnalysisService.executor_availability(recording_id, pipeline_id) -> ExecutorAvailabilityRead` — the backend is the only authority; it checks static pipeline capability and dynamic deployment availability (AutoDL profile configured/reachable, and for SpaceNet `source_data_sha256`/fingerprint establishable).
+- `RemoteExecutorProbe` — injected dependency interface (defined in this task; the production implementation is wired in Task 13 and reads `RemoteProfile` from Task 7):
+
+```python
+class RemoteExecutorProbe(Protocol):
+    def availability(self, recording: RecordingModel, pipeline: PipelineDefinition,
+                     source_data_sha256: str | None) -> ExecutorAvailabilityRead:
+        pass
+```
+
+- `AnalysisService` gains an optional `remote_executor_probe: RemoteExecutorProbe | None = None` constructor parameter and a method `executor_availability(recording_id: str, pipeline_id: str) -> ExecutorAvailabilityRead`. The backend is the only authority; it combines static pipeline capability with the injected probe's dynamic deployment decision. Unit tests inject a `FakeRemoteExecutorProbe`; they never touch a real AutoDL connection.
 
 - [ ] **Step 1: Write failing tests**
 
-Create `backend/tests/test_remote_executor_availability.py`:
+Create `backend/tests/test_remote_executor_availability.py`. All service calls happen inside one live session scope:
 
 ```python
+import pytest
+
 from benchmark_fixture import add_recording
 
 from app.analysis.schema import ExecutorAvailabilityRead
 from app.analysis.service import AnalysisService
+from app.pipelines.base import PipelineDefinition
 from app.pipelines.registry import create_pipeline_registry
+from app.remote_execution.executor import RemoteExecutorProbe
 
 
-def _service(client):
+class FakeRemoteExecutorProbe:
+    def __init__(self, available=False, reason_code="REMOTE_EXECUTOR_UNAVAILABLE", profile="autodl_primary"):
+        self._available = available
+        self._reason = reason_code
+        self._profile = profile
+
+    def availability(self, recording, pipeline, source_data_sha256):
+        return ExecutorAvailabilityRead(
+            executor="remote_gpu", available=self._available, reason_code=self._reason,
+            reason_message="", remote_profile=self._profile, recommended=self._available,
+        )
+
+
+def _availability(client, recording_id, pipeline_id, probe=None):
     with client.app.state.database.session_factory() as session:
-        return AnalysisService(session, create_pipeline_registry(), client.app.state.job_manager)
+        service = AnalysisService(session, create_pipeline_registry(), client.app.state.job_manager,
+                                  remote_executor_probe=probe)
+        return service.executor_availability(recording_id, pipeline_id)
 
 
-def test_remote_gpu_unavailable_for_non_spacenet_recording(client):
+def test_remote_gpu_unavailable_for_non_remote_pipeline(client):
     with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_local", name="local", dataset_name=None, dataset_split=None, label_space=None)
+        add_recording(session, recording_id="rec_local", name="local", dataset_name=None,
+                      dataset_split=None, label_space=None)
         session.commit()
-    svc = _service(client)
-    with client.app.state.database.session_factory() as session:
-        availability = svc.executor_availability("rec_local", "stft_energy_detector")
+    availability = _availability(client, "rec_local", "stft_energy_detector",
+                                probe=FakeRemoteExecutorProbe())
     assert availability.executor == "remote_gpu"
     assert availability.available is False
-    assert availability.reason_code in {"PIPELINE_NOT_REMOTE_CAPABLE", "REMOTE_PROFILE_UNAVAILABLE", "REMOTE_RECORDING_UNAVAILABLE"}
+    assert availability.reason_code == "PIPELINE_NOT_REMOTE_CAPABLE"
 
 
-def test_remote_gpu_available_for_frozen_pipeline_and_spacenet_when_profile_configured(client):
+def test_remote_gpu_unavailable_when_profile_absent(client):
     with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_sn", name="0", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14")
+        add_recording(session, recording_id="rec_sn", name="0", dataset_name="SpaceNet",
+                      dataset_split="test", label_space="spacenet_14")
         session.commit()
-    svc = _service(client)
+    availability = _availability(client, "rec_sn", "zoomspec_yolo26n_aug_combined_frn_v3",
+                                probe=FakeRemoteExecutorProbe(available=False, reason_code="REMOTE_EXECUTOR_UNAVAILABLE"))
+    assert availability.available is False
+    assert availability.reason_code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+def test_remote_gpu_available_with_configured_probe(client):
     with client.app.state.database.session_factory() as session:
-        availability = svc.executor_availability("rec_sn", "zoomspec_yolo26n_aug_combined_frn_v3")
+        add_recording(session, recording_id="rec_sn", name="0", dataset_name="SpaceNet",
+                      dataset_split="test", label_space="spacenet_14")
+        session.commit()
+    availability = _availability(client, "rec_sn", "zoomspec_yolo26n_aug_combined_frn_v3",
+                                probe=FakeRemoteExecutorProbe(available=True))
     assert availability.available is True
     assert availability.recommended is True
+    assert availability.remote_profile == "autodl_primary"
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -520,7 +573,7 @@ Expected RED: `ExecutorAvailabilityRead` missing and `executor_availability` mis
 
 - [ ] **Step 3: Minimal implementation**
 
-Add the fields to `PipelineDefinition`, update `registry.list()` serialization, add `ExecutorAvailabilityRead` to `analysis/schema.py`, and implement `AnalysisService.executor_availability(...)`. The availability logic consults `RemoteProfile.from_env()` (Task 6 profile) and `source_hash.resolve_source_data_sha256` for SpaceNet. The UI later renders only this backend decision.
+Add the fields to `PipelineDefinition`, update `registry.list()` serialization, add `ExecutorAvailabilityRead` to `analysis/schema.py`, and add the `remote_executor_probe` constructor parameter plus `AnalysisService.executor_availability(...)`. The method first checks static capability: if `"remote_gpu" not in pipeline.definition.executors_supported`, it returns `PIPELINE_NOT_REMOTE_CAPABLE`; otherwise it delegates to the injected `RemoteExecutorProbe` (which, in production, consults `RemoteProfile` from Task 7 and `source_hash.resolve_source_data_sha256` for SpaceNet). The UI later renders only this backend decision.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -533,7 +586,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/pipelines/base.py backend/app/pipelines/registry.py backend/app/analysis/schema.py backend/app/analysis/service.py backend/tests/test_remote_executor_availability.py
+git add backend/app/remote_execution/executor.py backend/app/pipelines/base.py backend/app/pipelines/registry.py backend/app/analysis/schema.py backend/app/analysis/service.py backend/tests/test_remote_executor_availability.py
 git commit -m "feat: backend owned executor availability"
 ```
 
@@ -548,14 +601,17 @@ git commit -m "feat: backend owned executor availability"
 
 **Interfaces:**
 - `AnalysisResultWriter(session, label_service, pipeline_definition, workspace)` with `persist(run, recording, output: PipelineOutput) -> None`
-- The writer validates each detection (physical box + label) and inserts `DetectionResultModel` rows, writes `artifacts.json` and `run_metadata.json`, and sets `run.status = "completed"`.
-- The writer must NOT perform an unconditional `delete(DetectionResultModel)` for an already-`completed` run. The local worker keeps its existing delete-then-rewrite only when the run is not yet `completed` (preserving current `local_cpu` behavior); completed remote runs are immutable (handled by the ingestor in Task 6).
+- The writer validates each detection (physical box + label), inserts `DetectionResultModel` rows, writes `artifacts.json` and `run_metadata.json`, and sets `run.status = "completed"`.
+- `persist()` is valid only for a nonterminal run being finalized. If `run.status == "completed"`, the writer MUST refuse mutation, e.g. `raise ValueError("completed AnalysisRun is immutable")`. The writer never appends/delete/rewrites a completed run.
+- The local worker keeps its existing delete-then-rewrite **only** for runs whose status is not yet `completed` (pending/running), preserving current `local_cpu` behavior. Remote idempotency/no-op/conflict belongs to Task 6 and is handled by `RemoteResultIngestor` before any writer call.
 
-- [ ] **Step 1: Write failing test that writer does not delete completed-run detections**
+- [ ] **Step 1: Write failing test that the writer refuses to mutate a completed run**
 
 Create `backend/tests/test_analysis_result_writer.py`:
 
 ```python
+import pytest
+
 from benchmark_fixture import add_detection, add_recording
 
 from app.analysis.model import AnalysisRunModel
@@ -563,7 +619,7 @@ from app.detections.model import DetectionResultModel
 from app.remote_execution.validation import AnalysisResultWriter
 
 
-def test_writer_inserts_new_detections_without_touching_existing_completed(client, tmp_path):
+def test_writer_refuses_to_mutate_completed_run(client, tmp_path):
     with client.app.state.database.session_factory() as session:
         add_recording(session, recording_id="rec_w", name="w")
         session.commit()
@@ -574,20 +630,24 @@ def test_writer_inserts_new_detections_without_touching_existing_completed(clien
                       confidence=0.9, t0=0.01, t1=0.02, f0=2440600000.0, f1=2440700000.0)
         session.commit()
         from app.labels.service import LabelSpaceService
-        from app.pipelines.base import DetectionPayload, PipelineOutput
-        from app.pipelines.base import PipelineDefinition
+        from app.pipelines.base import DetectionPayload, PipelineDefinition, PipelineOutput
+        from app.recordings.model import RecordingModel
+
         writer = AnalysisResultWriter(
-            session, LabelSpaceService(""), PipelineDefinition(id="pipeline_x", name="P", version="1.0",
-                                                              label_space="spacenet_14", recommended_device="CPU",
-                                                              cpu_supported=True, stages=(), inspectable_stages=()),
+            session, LabelSpaceService(""),
+            PipelineDefinition(id="pipeline_x", name="P", version="1.0", label_space="spacenet_14",
+                              recommended_device="CPU", cpu_supported=True, stages=(), inspectable_stages=()),
             tmp_path / "ws")
         run = session.get(AnalysisRunModel, "run_w")
-        recording = session.get(__import__("app.recordings.model", fromlist=["RecordingModel"]).RecordingModel, "rec_w")
-        writer.persist(run, recording, PipelineOutput(detections=[DetectionPayload(
-            t_start_s=0.01, t_end_s=0.02, f_low_hz=2440600000.0, f_high_hz=2440700000.0,
-            class_id=9, class_name="LoRa 250kHz", confidence=0.9)]))
-        session.commit()
-        assert session.query(DetectionResultModel).filter(DetectionResultModel.run_id == "run_w").count() == 2
+        recording = session.get(RecordingModel, "rec_w")
+        with pytest.raises(ValueError, match="completed AnalysisRun is immutable"):
+            writer.persist(run, recording, PipelineOutput(detections=[DetectionPayload(
+                t_start_s=0.01, t_end_s=0.02, f_low_hz=2440600000.0, f_high_hz=2440700000.0,
+                class_id=9, class_name="LoRa 250kHz", confidence=0.9)]))
+        session.rollback()
+        dets = session.query(DetectionResultModel).filter(DetectionResultModel.run_id == "run_w").all()
+        assert len(dets) == 1
+        assert dets[0].id == "det_old"
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -600,7 +660,7 @@ Expected RED: missing `AnalysisResultWriter`.
 
 - [ ] **Step 3: Minimal implementation**
 
-Implement `AnalysisResultWriter` with the validation and insert logic extracted from `worker.execute_run` (validation + row creation + artifact/metadata writes + completion transition). Refactor `execute_run` to call it, preserving the current `local_cpu` delete-then-rewrite only for non-completed runs.
+Implement `AnalysisResultWriter` with the validation and insert logic extracted from `worker.execute_run` (validation + row creation + artifact/metadata writes + completion transition). Guard `persist()` so that `run.status == "completed"` raises `ValueError("completed AnalysisRun is immutable")` before any mutation. Refactor `execute_run` to call it, preserving the current `local_cpu` delete-then-rewrite only for pending/running runs.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -626,32 +686,37 @@ git commit -m "refactor: extract shared analysis result writer"
 - Create: `backend/tests/test_remote_result_ingestor.py`
 
 **Interfaces:**
-- `ingest_remote_result(session, run_id, envelope: RemoteExecutionEnvelopeV1, zip_path: Path, label_service, writer: AnalysisResultWriter) -> str`
+- `ingest_remote_result(session, run_id, envelope: RemoteExecutionEnvelopeV1, zip_path: Path, writer: AnalysisResultWriter) -> str`
+- `AnalysisResultWriter` carries the label service, pipeline definition, and workspace; the ingestor calls `writer.persist(...)` only for a fresh ingest.
 - Verifies: envelope identity fields match the local run; `payload_sha256` equals SHA256 of exact `zip_path` bytes; strict envelope JSON; bbox bounds; label validity; confidence validity; safe ZIP extraction (reuse `app.imported_runs.archive.safe_path` and bounded extraction semantics).
 - Transaction rules:
   - `pending`/`running` run + valid result -> ingest once -> `completed`;
-  - already `completed` run + same `payload_sha256` -> idempotent no-op (return existing payload hash);
+  - already `completed` run + same `payload_sha256` -> idempotent no-op (return existing payload hash; writer is never called);
   - already `completed` run + different `payload_sha256` -> `REMOTE_RESULT_CONFLICT`;
-  - `failed`/`interrupted` run -> never resurrected by an unrelated result.
+  - `failed`/`interrupted` run -> never resurrected by an unrelated result;
+  - payload SHA mismatch -> `REMOTE_RESULT_INVALID`;
+  - unsafe/path-traversal ZIP -> `REMOTE_RESULT_INVALID` via safe-archive primitives.
 - Never calls `ImportedRunService`; writes to the same `AnalysisRun`.
 
 - [ ] **Step 1: Write failing tests**
 
-Create `backend/tests/test_remote_result_ingestor.py`:
+Create `backend/tests/test_remote_result_ingestor.py`. The helper `_write_valid_analysis_result_zip` builds a real Analysis Package v1-compatible ZIP (`manifest.json` + `detections.json`):
 
 ```python
 import hashlib
+import json
 import zipfile
 
 import pytest
 
-from benchmark_fixture import add_detection, add_recording
+from benchmark_fixture import add_recording
 
 from app.analysis.model import AnalysisRunModel
 from app.core.errors import PlatformError
 from app.detections.model import DetectionResultModel
 from app.remote_execution.result_ingestor import ingest_remote_result
 from app.remote_execution.schema import RemoteExecutionEnvelopeV1
+from app.remote_execution.validation import AnalysisResultWriter
 
 
 def _envelope(payload_sha256):
@@ -664,32 +729,150 @@ def _envelope(payload_sha256):
     )
 
 
-def _zip_bytes():
-    buffer = __import__("io").BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr("detections.json", '{"detections": []}')
-    return buffer.getvalue()
+def _write_valid_analysis_result_zip(tmp_path, *, detection=True, traversal=False) -> tuple[Path, str]:
+    manifest = {
+        "schema_version": 1,
+        "pipeline": {"id": "pipeline_x", "name": "Pipeline X", "version": "1.0"},
+        "label_space": "spacenet_14",
+        "recording": {"name": "r", "dataset": "SpaceNet"},
+        "execution": {"executor": "remote_gpu", "device": "GPU", "environment": "autodl"},
+        "results": {"detections": "detections.json"},
+    }
+    detections = [] if not detection else [{
+        "id": "det_new",
+        "t_start_s": 0.0005, "t_end_s": 0.0035,
+        "f_low_hz": 2440600000.0, "f_high_hz": 2440700000.0,
+        "class_id": 9, "class_name": "LoRa 250kHz", "confidence": 0.94,
+    }]
+    path = tmp_path / "analysis_result.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("detections.json", json.dumps({"detections": detections}))
+        if traversal:
+            archive.writestr("../escape.bin", "x")
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_ingest_once_then_idempotent_noop(client, tmp_path, settings):
+def _writer(session, settings, tmp_path):
     from app.labels.service import LabelSpaceService
+    from app.pipelines.base import PipelineDefinition
+    return AnalysisResultWriter(
+        session, LabelSpaceService(settings.label_space_root),
+        PipelineDefinition(id="pipeline_x", name="Pipeline X", version="1.0",
+                           label_space="spacenet_14", recommended_device="GPU",
+                           cpu_supported=False, stages=(), inspectable_stages=(),
+                           executors_supported=("remote_gpu",), recommended_executor="remote_gpu"),
+        tmp_path / "ws")
+
+
+def _running_run(session):
+    session.add(AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
+                                 pipeline_version="1.0", executor="remote_gpu", status="running"))
+    session.commit()
+
+
+def test_running_run_ingests_valid_package_once(client, tmp_path, settings):
     with client.app.state.database.session_factory() as session:
         add_recording(session, recording_id="rec_r", name="r")
         session.commit()
-    zip_bytes = _zip_bytes()
-    payload = hashlib.sha256(zip_bytes).hexdigest()
-    zip_path = tmp_path / "analysis_result.zip"
-    zip_path.write_bytes(zip_bytes)
+    zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
     with client.app.state.database.session_factory() as session:
-        session.add(AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
-                                     pipeline_version="1.0", executor="remote_gpu", status="running"))
+        _running_run(session)
+        result = ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
+                                      _writer(session, settings, tmp_path))
         session.commit()
-        labels = LabelSpaceService(settings.label_space_root)
-        writer = None  # replaced by AnalysisResultWriter instance in implementation
-        first = ingest_remote_result(session, "run_r", _envelope(payload), zip_path, labels, writer)
-        second = ingest_remote_result(session, "run_r", _envelope(payload), zip_path, labels, writer)
-        assert first == second == payload
+        assert result == payload
         assert session.get(AnalysisRunModel, "run_r").status == "completed"
+        rows = session.query(DetectionResultModel).filter(DetectionResultModel.run_id == "run_r").all()
+        assert len(rows) == 1 and rows[0].id == "det_new"
+
+
+def test_completed_run_same_payload_is_noop_without_writer_call(client, tmp_path, settings):
+    with client.app.state.database.session_factory() as session:
+        add_recording(session, recording_id="rec_r", name="r")
+        session.commit()
+    zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
+    with client.app.state.database.session_factory() as session:
+        run = AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
+                               pipeline_version="1.0", executor="remote_gpu", status="completed",
+                               execution_metadata_json={"payload_sha256": payload})
+        session.add(run)
+        session.commit()
+        calls = {"persist": 0}
+        class _SpyWriter:
+            def persist(self, *args, **kwargs):
+                calls["persist"] += 1
+        result = ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
+                                      _SpyWriter())
+        assert result == payload
+        assert calls["persist"] == 0
+        assert session.query(DetectionResultModel).filter(DetectionResultModel.run_id == "run_r").count() == 0
+
+
+def test_completed_run_different_payload_conflicts(client, tmp_path, settings):
+    with client.app.state.database.session_factory() as session:
+        add_recording(session, recording_id="rec_r", name="r")
+        session.commit()
+    zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
+    other = "f" * 64
+    with client.app.state.database.session_factory() as session:
+        run = AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
+                               pipeline_version="1.0", executor="remote_gpu", status="completed",
+                               execution_metadata_json={"payload_sha256": other})
+        session.add(run)
+        session.commit()
+        with pytest.raises(PlatformError) as exc:
+            ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
+                                 _writer(session, settings, tmp_path))
+        assert exc.value.code == "REMOTE_RESULT_CONFLICT"
+        session.rollback()
+        assert session.query(DetectionResultModel).filter(DetectionResultModel.run_id == "run_r").count() == 0
+
+
+def test_failed_run_is_not_resurrected(client, tmp_path, settings):
+    with client.app.state.database.session_factory() as session:
+        add_recording(session, recording_id="rec_r", name="r")
+        session.commit()
+    zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
+    with client.app.state.database.session_factory() as session:
+        run = AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
+                               pipeline_version="1.0", executor="remote_gpu", status="failed",
+                               error_type="PIPELINE_EXECUTION_FAILED")
+        session.add(run)
+        session.commit()
+        with pytest.raises(PlatformError) as exc:
+            ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
+                                 _writer(session, settings, tmp_path))
+        assert exc.value.code == "REMOTE_RESULT_INVALID"
+        session.rollback()
+        assert session.get(AnalysisRunModel, "run_r").status == "failed"
+
+
+def test_payload_sha_mismatch_is_invalid(client, tmp_path, settings):
+    with client.app.state.database.session_factory() as session:
+        add_recording(session, recording_id="rec_r", name="r")
+        session.commit()
+    zip_path, _ = _write_valid_analysis_result_zip(tmp_path)
+    wrong = "0" * 64
+    with client.app.state.database.session_factory() as session:
+        _running_run(session)
+        with pytest.raises(PlatformError) as exc:
+            ingest_remote_result(session, "run_r", _envelope(wrong), zip_path,
+                                 _writer(session, settings, tmp_path))
+        assert exc.value.code == "REMOTE_RESULT_INVALID"
+
+
+def test_unsafe_traversal_zip_is_rejected(client, tmp_path, settings):
+    with client.app.state.database.session_factory() as session:
+        add_recording(session, recording_id="rec_r", name="r")
+        session.commit()
+    zip_path, _ = _write_valid_analysis_result_zip(tmp_path, traversal=True)
+    with client.app.state.database.session_factory() as session:
+        _running_run(session)
+        with pytest.raises(PlatformError) as exc:
+            ingest_remote_result(session, "run_r", _envelope("1" * 64), zip_path,
+                                 _writer(session, settings, tmp_path))
+        assert exc.value.code == "REMOTE_RESULT_INVALID"
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -745,8 +928,14 @@ git commit -m "feat: idempotent remote result ingestion"
 Create `backend/tests/test_remote_transport.py` (representative):
 
 ```python
+import subprocess
+
 from app.remote_execution.profile import RemoteProfile
 from app.remote_execution.transport import SshRunner
+
+
+def _ok() -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
 
 def test_ssh_argv_uses_fixed_command_and_host_key(tmp_path, monkeypatch):
@@ -801,15 +990,140 @@ git commit -m "feat: secure remote gpu job transport"
 - Create: `backend/tests/test_remote_runner.py`
 
 **Interfaces:**
+- `runner.py` exposes a testable core plus a CLI. The core does NOT import `resolver`, `assets`, or the pipeline package at module import time; those are only imported lazily inside the `work` path or supplied via an injected item executor.
+
+```python
+class ItemExecutor(Protocol):
+    def execute(self, item: RemoteExecutionItemV1, job_root: Path) -> None:
+        pass
+
+def validate_request_sha256(batch: RemoteExecutionBatchV1) -> None:
+    # recompute canonical request sha (excluding request_sha256) and require equality
+    pass
+
+def create_or_attach(batch: RemoteExecutionBatchV1, job_root: Path) -> bool:
+    # True if created, False if attached to an existing identical request
+    pass
+
+def reconcile_status(batch_id: str, job_root: Path) -> RemoteBatchStatusV1:
+    pass
+
+def run_work(batch_id: str, job_root: Path, item_executor: ItemExecutor) -> None:
+    # iterate items; each item publishes result + per-item status atomically; terminal results are write-once
+    pass
+```
+
 - CLI: `python -m app.remote_execution.runner probe|submit|status|work` with strict flags.
   - `probe` — verify deployed repo HEAD equals `required_remote_runtime_commit` and asset hashes match the manifest; exit nonzero on mismatch.
-  - `submit` — strict-parse the request, exclude `request_sha256`, rebuild canonical payload, recompute `request_sha256`, require equality (else `REMOTE_REQUEST_INVALID`); create-or-attach by `batch_id`; on duplicate identical hash return existing job; on duplicate different hash return `REMOTE_REQUEST_CONFLICT`.
+  - `submit` — strict-parse, recompute `request_sha256`, require equality (else `REMOTE_REQUEST_INVALID`); `create_or_attach`; on duplicate identical hash return existing job; on duplicate different hash return `REMOTE_REQUEST_CONFLICT`.
   - `status` — write `status.json` atomically (temp + fsync + rename).
-  - `work` — detached process that resolves assets once, initializes CUDA once, loads models once, then iterates items; each item writes per-item result + status; terminal item results are write-once. If a terminal item exists but its result artifact is missing/corrupted, the runner reports `REMOTE_RESULT_CORRUPTED` and never regenerates/overwrites it.
+  - `work` — detached process that resolves assets once, initializes CUDA once, loads models once, then iterates items; each item writes per-item result + status; terminal item results are write-once; a terminal item with a missing/corrupted artifact reports `REMOTE_RESULT_CORRUPTED` and never regenerates.
 
 - [ ] **Step 1: Write failing runner tests**
 
-Create `backend/tests/test_remote_runner.py` with `submit` create-or-attach semantics (same `batch_id` + same hash -> attach; different hash -> `REMOTE_REQUEST_CONFLICT`) and write-once terminal result (re-`work` on a completed item does not overwrite the result).
+Create `backend/tests/test_remote_runner.py` with a `FakeItemExecutor` and in-memory job directories (no Task 9/10/12 imports):
+
+```python
+import json
+from pathlib import Path
+
+import pytest
+
+from app.core.errors import PlatformError
+from app.remote_execution.runner import (
+    create_or_attach, reconcile_status, run_work, validate_request_sha256,
+)
+from app.remote_execution.schema import (
+    RemoteExecutionBatchV1, RemoteExecutionItemV1, RemoteRecordingRefV1,
+)
+
+
+def _batch(batch_id="batch_x", request_sha256="0" * 64, item_key="000000"):
+    return RemoteExecutionBatchV1(
+        schema_version=1, batch_id=batch_id,
+        required_remote_runtime_commit="9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c",
+        pipeline={"id": "pipeline_x", "version": "1.0"},
+        items=[RemoteExecutionItemV1(item_key=item_key, local_run_id="run_x",
+                                     recording=RemoteRecordingRefV1(
+                                         dataset_name="SpaceNet", dataset_split="test", dataset_key="0",
+                                         label_space="spacenet_14",
+                                         expected_recording_fingerprint="a" * 64,
+                                         expected_source_data_sha256="b" * 64),
+                                     parameters={})],
+        request_sha256=request_sha256,
+    )
+
+
+class FakeItemExecutor:
+    def __init__(self):
+        self.spawn_count = 0
+
+    def execute(self, item, job_root):
+        self.spawn_count += 1
+        result_dir = job_root / "results" / item.item_key
+        result_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write(result_dir / "envelope.json", {"item_key": item.item_key})
+        _atomic_write(result_dir / "analysis_result.zip", b"payload")
+
+
+def _atomic_write(path, data):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data if isinstance(data, bytes) else json.dumps(data).encode())
+    tmp.replace(path)
+
+
+def test_create_or_attach_attaches_without_second_worker(tmp_path):
+    batch = _batch()
+    job_root = tmp_path / "jobs" / batch.batch_id
+    job_root.mkdir(parents=True)
+    created = create_or_attach(batch, job_root)
+    assert created is True
+    attached = create_or_attach(batch, job_root)
+    assert attached is False  # second call attaches, does not create a second job
+
+
+def test_duplicate_batch_with_different_request_hash_conflicts(tmp_path):
+    job_root = tmp_path / "jobs" / "batch_x"
+    job_root.mkdir(parents=True)
+    create_or_attach(_batch(), job_root)
+    with pytest.raises(PlatformError) as exc:
+        create_or_attach(_batch(request_sha256="f" * 64), job_root)
+    assert exc.value.code == "REMOTE_REQUEST_CONFLICT"
+
+
+def test_invalid_supplied_request_sha256_rejected():
+    with pytest.raises(PlatformError) as exc:
+        validate_request_sha256(_batch(request_sha256="f" * 64))
+    assert exc.value.code == "REMOTE_REQUEST_INVALID"
+
+
+def test_terminal_result_is_write_once(tmp_path):
+    batch = _batch()
+    job_root = tmp_path / "jobs" / batch.batch_id
+    job_root.mkdir(parents=True)
+    create_or_attach(batch, job_root)
+    executor = FakeItemExecutor()
+    run_work(batch.batch_id, job_root, executor)
+    first = (job_root / "results" / "000000" / "analysis_result.zip").read_bytes()
+    run_work(batch.batch_id, job_root, executor)  # reconciliation re-invocation
+    second = (job_root / "results" / "000000" / "analysis_result.zip").read_bytes()
+    assert first == second
+    assert executor.spawn_count == 1  # terminal item never re-executed
+
+
+def test_corrupted_terminal_artifact_reports_corrupted(tmp_path):
+    batch = _batch()
+    job_root = tmp_path / "jobs" / batch.batch_id
+    job_root.mkdir(parents=True)
+    create_or_attach(batch, job_root)
+    executor = FakeItemExecutor()
+    run_work(batch.batch_id, job_root, executor)
+    (job_root / "results" / "000000" / "analysis_result.zip").unlink()
+    with pytest.raises(PlatformError) as exc:
+        run_work(batch.batch_id, job_root, executor)
+    assert exc.value.code == "REMOTE_RESULT_CORRUPTED"
+    assert not (job_root / "results" / "000000" / "analysis_result.zip").exists()  # never regenerated
+```
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -821,7 +1135,7 @@ Expected RED: missing `app.remote_execution.runner`.
 
 - [ ] **Step 3: Minimal implementation**
 
-Implement the four subcommands with atomic file publication and strict identifier validation. The remote worker does not run pipeline algorithm logic here; it delegates to `app.pipelines.zoomspec_...` (Task 12) via a resolver (Task 9).
+Implement the four core functions and CLI subcommands with atomic file publication and strict identifier validation. The runner core takes the `ItemExecutor`; the `work` CLI path lazily imports the production item executor (resolver + assets + pipeline from Tasks 9/10/12) only inside `run_work`. Module import of `runner.py` must not import `resolver`/`assets`/`pipelines.zoomspec...`.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -829,7 +1143,7 @@ Implement the four subcommands with atomic file publication and strict identifie
 pytest backend/tests/test_remote_runner.py -q
 ```
 
-Expected: PASS.
+Expected: PASS, independently of Tasks 9/10/12.
 
 - [ ] **Step 5: Commit**
 
@@ -857,31 +1171,94 @@ git commit -m "feat: detached remote runner with idempotent submit"
 
 - [ ] **Step 1: Write failing resolver tests**
 
-Create `backend/tests/test_remote_resolver.py` (representative):
+Create `backend/tests/test_remote_resolver.py`:
 
 ```python
 import hashlib
+import json
 
 import pytest
 
-from app.core.errors import PlatformError
-from app.remote_execution.resolver import resolve_space_net
 from app.benchmarks.manifest import ManifestGroundTruth, ManifestRecording
+from app.core.errors import PlatformError
 from app.imported_runs.fingerprint import build_recording_fingerprint
+from app.remote_execution.resolver import resolve_space_net
+
+OBSERVATION_LOW_MHZ = 2401.0
+OBSERVATION_HIGH_MHZ = 2431.0
+FS_HZ = (OBSERVATION_HIGH_MHZ - OBSERVATION_LOW_MHZ) * 1e6
+SIGNAL_START_S = 0.01 / 1000.0
+SIGNAL_END_S = 0.02 / 1000.0
+SIGNAL_F_LOW_HZ = 2417.0 * 1e6
+SIGNAL_F_HIGH_HZ = 2417.1 * 1e6
 
 
-def test_resolve_requires_source_hash_equality(tmp_path):
-    # build a tiny SpaceNet dataset dir with sample a
-    ...
-    resolved = resolve_space_net(tmp_path, "test", "a", "spacenet_14", fp, source_sha, ...)
+def _write_sample(tmp_path, sample_id="a", bin_bytes=b"\x00\x01" * 2000):
+    split = tmp_path / "test"
+    split.mkdir(parents=True, exist_ok=True)
+    (split / f"{sample_id}.bin").write_bytes(bin_bytes)
+    (split / f"{sample_id}.json").write_text(json.dumps({
+        "observation_range": [OBSERVATION_LOW_MHZ, OBSERVATION_HIGH_MHZ],
+        "signals": [{
+            "signal_id": 0,
+            "start_frequency": SIGNAL_F_LOW_HZ / 1e6,
+            "end_frequency": SIGNAL_F_HIGH_HZ / 1e6,
+            "start_time": SIGNAL_START_S * 1000.0,
+            "end_time": SIGNAL_END_S * 1000.0,
+            "class": 9,
+        }],
+    }), encoding="utf-8")
+
+
+def _expected_fingerprint(bin_bytes):
+    num_samples = len(bin_bytes) // 4
+    duration_s = num_samples / FS_HZ
+    recording = ManifestRecording(
+        recording_id="local-only", name="a", data_format="float16_interleaved_le",
+        sample_rate_hz=FS_HZ,
+        center_frequency_hz=((OBSERVATION_LOW_MHZ + OBSERVATION_HIGH_MHZ) / 2.0) * 1e6,
+        frequency_low_hz=OBSERVATION_LOW_MHZ * 1e6,
+        frequency_high_hz=OBSERVATION_HIGH_MHZ * 1e6,
+        num_samples=num_samples, duration_s=duration_s,
+        ground_truth=(ManifestGroundTruth(
+            t_start_s=SIGNAL_START_S, t_end_s=SIGNAL_END_S,
+            f_low_hz=SIGNAL_F_LOW_HZ, f_high_hz=SIGNAL_F_HIGH_HZ,
+            class_id=9, class_name="LoRa 250kHz"),),
+    )
+    return build_recording_fingerprint("SpaceNet", "test", "spacenet_14", recording).sha256
+
+
+def test_resolve_verifies_both_identities_and_sanitizes(tmp_path, settings):
+    bin_bytes = b"\x00\x01" * 2000
+    _write_sample(tmp_path, bin_bytes=bin_bytes)
+    source_sha = hashlib.sha256(bin_bytes).hexdigest()
+    fingerprint = _expected_fingerprint(bin_bytes)
+    resolved = resolve_space_net(
+        tmp_path, "test", "a", "spacenet_14",
+        fingerprint, source_sha, settings.label_space_root,
+    )
     assert resolved.source_data_sha256 == source_sha
+    assert resolved.recording_fingerprint == fingerprint
+    # sanitized inference input exposes no signals / class labels
+    assert getattr(resolved, "signals", None) is None
+
+
+def test_resolve_source_hash_mismatch_fails_closed(tmp_path, settings):
+    bin_bytes = b"\x00\x01" * 2000
+    _write_sample(tmp_path, bin_bytes=bin_bytes)
+    fingerprint = _expected_fingerprint(bin_bytes)
     with pytest.raises(PlatformError) as exc:
-        resolve_space_net(tmp_path, "test", "a", "spacenet_14", fp, "0" * 64, ...)
+        resolve_space_net(tmp_path, "test", "a", "spacenet_14", fingerprint, "0" * 64, settings.label_space_root)
     assert exc.value.code == "SOURCE_DATA_HASH_MISMATCH"
 
 
-def test_sanitized_input_excludes_signals(resolved):
-    assert getattr(resolved, "signals", None) is None
+def test_resolve_fingerprint_mismatch_fails_closed(tmp_path, settings):
+    bin_bytes = b"\x00\x01" * 2000
+    _write_sample(tmp_path, bin_bytes=bin_bytes)
+    source_sha = hashlib.sha256(bin_bytes).hexdigest()
+    with pytest.raises(PlatformError) as exc:
+        resolve_space_net(tmp_path, "test", "a", "spacenet_14", "f" * 64, source_sha, settings.label_space_root)
+    assert exc.value.code == "RECORDING_FINGERPRINT_MISMATCH"
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -1010,13 +1387,47 @@ No runtime code depends on the legacy tree; it is reference only.
 - Create: `backend/tests/test_zoomspec_pipeline_cpu.py`
 
 **Interfaces:**
-- `ZoomSpecYolo26nAugCombinedFrnV3Pipeline` implements `Pipeline.run(...) -> PipelineOutput` with `definition.id = "zoomspec_yolo26n_aug_combined_frn_v3"`, `version = "1.0.0"`, `label_space = "spacenet_14"`, `executors_supported = ("local_cpu", "remote_gpu")`, `recommended_executor = "remote_gpu"`.
-- GPU-heavy imports (PyTorch, CUDA) are lazy and only executed on the server-side runner path; the CPU/mock path runs a deterministic stub that returns empty detections or a fixed fixture for tests.
-- `preprocessing.py` implements LS-STFT / frozen preprocessing; `detector.py` the YOLOv26n / CPN-equivalent forward; `ahlp.py`; `frn.py`; `pipeline.py` orchestrates them into physical `DetectionPayload`s.
+- `ZoomSpecYolo26nAugCombinedFrnV3Pipeline` implements `Pipeline.run(...) -> PipelineOutput` with:
+  - `definition.id = "zoomspec_yolo26n_aug_combined_frn_v3"`
+  - `definition.version = "1.0.0"`
+  - `definition.label_space = "spacenet_14"`
+  - `definition.cpu_supported = False`
+  - `definition.executors_supported = ("remote_gpu",)`
+  - `definition.recommended_executor = "remote_gpu"`
+  - `definition.recommended_device = "GPU"`
+- The formal pipeline must NOT advertise `local_cpu` execution, and the plan does NOT create a fake production `local_cpu` behavior for it.
+- GPU-heavy imports (PyTorch, CUDA) are lazy and only executed on the server-side runner path. CPU unit tests are achieved by (a) testing pure preprocessing/coordinate helpers directly, (b) injecting/monkeypatching fake detector/AHLP/FRN stages into orchestration, and/or (c) testing a pure `assemble_detection_payloads(...)` helper that converts stage outputs into physical `DetectionPayload`s.
+- `preprocessing.py` implements LS-STFT / frozen preprocessing; `detector.py` the YOLOv26n / CPN-equivalent forward; `ahlp.py`; `frn.py`; `pipeline.py` orchestrates them into physical `DetectionPayload`s via `assemble_detection_payloads(...)`.
 
-- [ ] **Step 1: Write failing CPU/mock pipeline test**
+- [ ] **Step 1: Write failing definition + helper tests**
 
-Create `backend/tests/test_zoomspec_pipeline_cpu.py`: assert the registered pipeline has the exact id/version/label_space and that `pipeline.run` accepts a `RecordingInput` and returns a `PipelineOutput` with physical-coordinate detections (seconds / absolute Hz) or an empty list on the CPU stub.
+Create `backend/tests/test_zoomspec_pipeline_cpu.py`:
+
+```python
+from app.pipelines.registry import create_pipeline_registry
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.pipeline import assemble_detection_payloads
+
+
+def test_frozen_pipeline_is_remote_gpu_only():
+    registry = create_pipeline_registry()
+    definition = registry.get("zoomspec_yolo26n_aug_combined_frn_v3").definition
+    assert definition.id == "zoomspec_yolo26n_aug_combined_frn_v3"
+    assert definition.version == "1.0.0"
+    assert definition.label_space == "spacenet_14"
+    assert definition.cpu_supported is False
+    assert definition.executors_supported == ("remote_gpu",)
+    assert definition.recommended_executor == "remote_gpu"
+    assert definition.recommended_device == "GPU"
+
+
+def test_assemble_detection_payloads_uses_physical_coordinates():
+    payloads = assemble_detection_payloads([
+        {"t_start_s": 0.001, "t_end_s": 0.003, "f_low_hz": 2417.0e6, "f_high_hz": 2417.1e6,
+         "class_id": 9, "class_name": "LoRa 250kHz", "confidence": 0.9},
+    ])
+    assert len(payloads) == 1
+    assert payloads[0].t_start_s == 0.001 and payloads[0].f_low_hz == 2417.0e6
+```
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -1024,19 +1435,19 @@ Create `backend/tests/test_zoomspec_pipeline_cpu.py`: assert the registered pipe
 pytest backend/tests/test_zoomspec_pipeline_cpu.py -q
 ```
 
-Expected RED: pipeline not registered.
+Expected RED: pipeline not registered and `assemble_detection_payloads` missing.
 
 - [ ] **Step 3: Minimal implementation**
 
-Port the minimal inference chain. Add a module scan test proving the platform runtime never imports `/root/autodl-tmp/Claude` or `/root/autodl-tmp/ZoomSpec` (e.g., a test that asserts `sys.path` / module import hooks never reference those roots).
+Port the minimal inference chain. `pipeline.run` lazily imports the GPU detector/FRN only on the server-side path; the CPU test path never triggers a model load. Add a module scan test proving the platform runtime never imports `/root/autodl-tmp/Claude` or `/root/autodl-tmp/ZoomSpec` (e.g., assert `sys.path` / import hooks never reference those roots).
 
 - [ ] **Step 4: Run GREEN**
 
 ```bash
-pytest backend/tests/test_zoomspec_pipeline_cpu.py backend/tests/test_analysis_runs.py -q
+pytest backend/tests/test_zoomspec_pipeline_cpu.py backend/tests/test_remote_executor_availability.py backend/tests/test_analysis_runs.py -q
 ```
 
-Expected: PASS.
+Expected: PASS; backend executor availability never offers `local_cpu` for this pipeline.
 
 - [ ] **Step 5: Commit**
 
@@ -1050,21 +1461,22 @@ git commit -m "feat: platform native frozen zoomspec pipeline"
 **Owner:** 本地电脑opencode
 
 **Files:**
+- Modify: `backend/app/remote_execution/executor.py` (created in Task 4; add the production `RemoteGpuExecutor`)
+- Create: `backend/app/remote_execution/supervisor.py` (basic single-run supervisor; extended with reconciliation/batch in Task 15)
 - Modify: `backend/app/analysis/service.py`
 - Modify: `backend/app/analysis/router.py`
 - Modify: `backend/app/analysis/schema.py`
 - Modify: `backend/app/main.py`
-- Modify: `backend/app/remote_execution/executor.py` (create)
-- Modify: `backend/app/remote_execution/supervisor.py` (create)
+- Create: `backend/tests/test_analysis_remote_create.py`
 - Modify: `frontend/src/api/client.ts`
 - Modify: `frontend/src/api/types.ts`
 - Modify: `frontend/src/pages/SpectrumAnalysisPage.tsx`
 - Modify: `frontend/src/pages/SpectrumAnalysisPage.test.tsx`
 
 **Interfaces:**
-- `AnalysisService.create_run(..., executor="local_cpu")` stops hardcoding the local_cpu-only rejection; for `executor="remote_gpu"` it constructs a `RemoteExecutionBatchV1` (single item) and calls `RemoteGpuJobManager.submit`, persisting `execution_metadata_json`.
-- `AnalysisService.startup_reconcile()` — local_cpu running -> interrupted; remote_gpu running -> reconcile remote state (Task 15).
-- `frontend createAnalysisRun(recordingId, pipelineId, executor)` no longer hardcodes `local_cpu`; the page passes the backend-selected executor.
+- `AnalysisService.create_run(..., executor="local_cpu")` stops hardcoding the local_cpu-only rejection; for `executor="remote_gpu"` it constructs a `RemoteExecutionBatchV1` (single item) via `RemoteGpuExecutor` and calls `RemoteGpuJobManager.submit`, persisting `execution_metadata_json`.
+- `RemoteRunSupervisor` (created here) starts polling a `remote_gpu` run's status and triggers the ingestor on completion; the executor-aware restart reconciliation (`startup_reconcile`) and N-item batch supervision are added in Task 15.
+- `frontend createAnalysisRun(recordingId, pipelineId, executor)` no longer hardcodes `local_cpu`; the page passes the backend-selected executor and renders backend-owned availability.
 
 - [ ] **Step 1: Write failing create_run(remote_gpu) test**
 
@@ -1130,7 +1542,8 @@ This is an early integration gate only; it is re-run on the final candidate in T
 **Owner:** 本地电脑opencode
 
 **Files:**
-- Create: `backend/app/remote_execution/supervisor.py` (extend), `backend/app/remote_execution/reconciler.py`
+- Create: `backend/app/remote_execution/reconciler.py`
+- Modify: `backend/app/remote_execution/supervisor.py` (extend with restart reconciliation + N-item batch supervision)
 - Modify: `backend/app/analysis/service.py` (`mark_stale_running_runs_interrupted` split)
 - Modify: `backend/app/main.py`
 - Create: `backend/tests/test_restart_reconciliation.py`
@@ -1276,17 +1689,32 @@ git commit -m "feat: freeze live remote parity protocol and cohort"
 **Owner:** 本地电脑opencode
 
 **Files:**
-- Create: `backend/app/remote_execution/validation.py` (extend with certificate)
+- Modify: `backend/app/remote_execution/validation.py` (created in Task 5 for `AnalysisResultWriter`; add the certificate dataclass)
+- Create: `backend/app/remote_execution/certificate_store.py`
+- Create: `backend/app/remote_execution/validation_certificates/` (directory; immutable certificate JSONs are added in Task 20)
 - Modify: `backend/app/remote_execution/parity.py`
 - Create: `backend/tests/test_remote_validation.py`
 
 **Interfaces:**
 - `LiveImplementationValidationCertificateV1` dataclass with identity fields: `pipeline_id`, `pipeline_version`, `remote_runtime_commit`, `asset_manifest_sha256`, `parity_protocol_id`, `parity_protocol_config_sha256`, `historical_dataset_evaluation_id`, `live_dataset_evaluation_id`, `dataset_manifest_hash`, `coverage`, `reference_metrics`, `live_metrics`, `parity_conclusion`, `accepted_at`.
-- `certificate_tuple(run) -> tuple` and `implementation_validation_state(run, accepted_certificates) -> "live_validated" | "live_candidate"` — derived from the exact tuple match, never a mutable bool.
+- `certificate_tuple(provenance) -> tuple` — `(pipeline_id, pipeline_version, remote_runtime_commit, asset_manifest_sha256)`.
+- `certificate_store.py`:
+
+```python
+def load_validation_certificates(root: Path) -> tuple[LiveImplementationValidationCertificateV1, ...]:
+    # strict JSON files under root; malformed/corrupt files fail closed (never live_validated)
+
+def implementation_validation_state(
+    run_provenance: dict, certificates: tuple[LiveImplementationValidationCertificateV1, ...]
+) -> Literal["live_candidate", "live_validated"]:
+    # live_validated iff certificate_tuple(run_provenance) matches an accepted certificate
+```
+
+- The certificate store is the persistent source of truth: certificates live as immutable JSON files in `backend/app/remote_execution/validation_certificates/` (created by Task 20 after Gate 3), so the UI/backend reloads them across restarts. Before Gate 3 the directory has no accepted certificate for this tuple -> `live_candidate`. Task 13/UI/backend may expose `live_candidate` initially; Task 18 wires the loader; after Task 20 the certificate artifact exists and restart still reports `live_validated`.
 
 - [ ] **Step 1: Write failing certificate tests**
 
-Create `backend/tests/test_remote_validation.py`: a run whose tuple matches an accepted certificate -> `live_validated`; any different `remote_runtime_commit` or `asset_manifest_sha256` -> `live_candidate`.
+Create `backend/tests/test_remote_validation.py` with concrete certificate fixtures covering: no certificate -> `live_candidate`; exact tuple match -> `live_validated`; different `remote_runtime_commit` -> `live_candidate`; different `asset_manifest_sha256` -> `live_candidate`; a malformed certificate file -> fail closed (never `live_validated`).
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -1294,11 +1722,11 @@ Create `backend/tests/test_remote_validation.py`: a run whose tuple matches an a
 pytest backend/tests/test_remote_validation.py -q
 ```
 
-Expected RED: missing certificate helpers.
+Expected RED: missing certificate helpers and store.
 
 - [ ] **Step 3: Minimal implementation**
 
-Implement the certificate dataclass and tuple-derived validation.
+Implement the certificate dataclass, the store loader (strict JSON, fail-closed on malformed files), and tuple-derived `implementation_validation_state`. Wire the loader into `AnalysisService`/UI via the availability/provenance read model so `live_candidate`/`live_validated` is backend-owned.
 
 - [ ] **Step 4: Run GREEN + full test/build**
 
@@ -1313,7 +1741,7 @@ Expected: all PASS. This task MUST complete before the final runtime candidate i
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/remote_execution/validation.py backend/app/remote_execution/parity.py backend/tests/test_remote_validation.py
+git add backend/app/remote_execution/validation.py backend/app/remote_execution/certificate_store.py backend/app/remote_execution/validation_certificates/ backend/app/remote_execution/parity.py backend/tests/test_remote_validation.py
 git commit -m "feat: immutable live validation certificate"
 ```
 
@@ -1354,7 +1782,7 @@ The evidence commit does not change the `remote_runtime_commit` identity.
 
 **Owner:** 本地电脑opencode（orchestration/DB/UI）+ 服务器opencode（GPU execution）
 
-**Files:** No product code changes expected. Evidence committed to `docs/research/m9_1_gate3.md`.
+**Files:** No product code changes expected. Evidence + certificate artifact committed: `docs/research/m9_1_gate3.md` and `backend/app/remote_execution/validation_certificates/zoomspec_yolo26n_aug_combined_frn_v3-1.0.0-<remote_runtime_commit>.json`.
 
 - [ ] **Step 1: Create fresh 2500 remote_gpu AnalysisRuns**
 
@@ -1377,16 +1805,18 @@ class-aware mAP50:95: 0.3732512758737991
 
 Compare prediction count, coverage, Localization AP50/AP50:95, class-aware mAP50/mAP50:95, matched accuracy, per-class AP, confusions, and item-level mismatch per the frozen config. `PARITY DIFFERENCE UNEXPLAINED` cannot pass.
 
-- [ ] **Step 4: Create the LiveImplementationValidationCertificateV1**
+- [ ] **Step 4: Create the immutable accepted certificate JSON**
 
-Only after accepted Gate 3, with `remote_runtime_commit`, `asset_manifest_sha256`, both DatasetEvaluation ids, dataset manifest hash, coverage, reference/live metrics, parity conclusion, and `accepted_at`.
+Only after accepted Gate 3, write `backend/app/remote_execution/validation_certificates/zoomspec_yolo26n_aug_combined_frn_v3-1.0.0-<remote_runtime_commit>.json` containing the exact `LiveImplementationValidationCertificateV1` fields: `pipeline_id`, `pipeline_version`, `remote_runtime_commit`, `asset_manifest_sha256`, `parity_protocol_id`, `parity_protocol_config_sha256`, `historical_dataset_evaluation_id`, `live_dataset_evaluation_id`, `dataset_manifest_hash`, `coverage`, `reference_metrics`, `live_metrics`, `parity_conclusion`, `accepted_at`. The certificate filename and content are immutable; changing `remote_runtime_commit` or `asset_manifest_sha256` means no tuple match and therefore `live_candidate`. This artifact is local validation provenance, not a RemoteJob/BatchRun ORM table, and does not change `pipeline_version`.
 
-- [ ] **Step 5: Commit documentation-only evidence**
+- [ ] **Step 5: Commit documentation-only + certificate evidence**
 
 ```bash
-git add docs/research/m9_1_gate3.md
+git add docs/research/m9_1_gate3.md backend/app/remote_execution/validation_certificates/zoomspec_yolo26n_aug_combined_frn_v3-1.0.0-<remote_runtime_commit>.json
 git commit -m "docs: record m9.1 gate 3 live parity"
 ```
+
+After this commit, restarting the local platform still reports `live_validated` for runs whose tuple matches the accepted certificate.
 
 ### Task 21: Final acceptance
 
