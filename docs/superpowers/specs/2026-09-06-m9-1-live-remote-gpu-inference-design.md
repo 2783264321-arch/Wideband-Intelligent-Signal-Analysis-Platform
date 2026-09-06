@@ -1,7 +1,7 @@
 # M9.1 Live Frozen-Pipeline Remote GPU Inference — Design
 
 Date: 2026-09-06
-Status: Formal design (product/architecture owner confirmed)
+Status: Formal design (product/architecture owner confirmed; corrective review applied)
 Base: `feature/v1-core @ 9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c`
 
 ## 1. Background and Objective
@@ -175,12 +175,16 @@ execution_metadata_json  JSON nullable
 - request_id
 - batch_id
 - item_key
+- request_sha256
+- payload_sha256
 - remote_profile
-- required_platform_commit
-- remote_platform_commit
+- orchestrator_commit
+- remote_runtime_commit
 - asset identities
 - submission provenance
 - remote job identity
+- remote server pid / job identity
+- remote start/end timestamps
 - result package identity
 
 `parameters_json` continues to represent algorithm parameters only. SSH / batch / host provenance must not be mixed into `parameters_json`.
@@ -196,6 +200,12 @@ execution_metadata_json  JSON nullable
 
 `hardware_info_json` must never store SSH private keys, passwords, tokens, or secrets.
 
+### 5.1 Local worker PID vs remote job identity
+
+`worker_pid` remains local-worker-specific and must never pretend to be the server PID. The remote server PID / remote job identity is recorded in `execution_metadata_json`.
+
+`started_at` for a remote `AnalysisRun` is set when the corresponding remote item actually enters `running`. `finished_at` is set when the local terminal-state transaction commits. Remote start/end timestamps are preserved separately inside the envelope / execution provenance.
+
 ## 6. Remote Profile
 
 Server deployment information comes from local secure configuration / environment, not from Git.
@@ -208,6 +218,7 @@ The profile may contain:
 - port
 - user
 - ssh key reference
+- known_hosts / pinned trusted host key
 - remote repo root
 - remote job root
 - dataset roots (e.g., `SpaceNet -> server dataset root`)
@@ -215,7 +226,7 @@ The profile may contain:
 
 Secrets and deployment absolute paths must never enter Git-tracked pipeline definitions.
 
-## 7. Recording Resolution
+## 7. Recording Resolution and Raw-IQ Identity
 
 M9.1-A (first slice) supports only Recordings whose raw IQ already exists on the server. The first dataset is `SpaceNet`.
 
@@ -227,6 +238,7 @@ dataset_split
 dataset_key
 label_space
 expected_recording_fingerprint
+expected_source_data_sha256
 ```
 
 For the current SpaceNet case:
@@ -236,26 +248,83 @@ For the current SpaceNet case:
 - dataset_key = `Recording.name` / sample stem
 - label_space = `spacenet_14`
 
-Server-side resolution:
+### 7.1 Two independent identities
+
+Remote recording identity requires **both**:
 
 ```text
-dataset-specific resolver
-  -> SpaceNetAdapter
-  -> split + sample key
-  -> resolve .bin + .json
-  -> parse metadata
-  -> recompute recording_fingerprint_v1
-  -> must equal expected fingerprint exactly
-  -> only then run inference
+recording_fingerprint_v1   = dataset / metadata / GroundTruth semantic identity
+source_data_sha256         = exact IQ-byte identity
 ```
 
-Custom / local-only Recordings return:
+`recording_fingerprint_v1` does **not** hash raw IQ bytes. It hashes canonical Recording metadata + GroundTruth semantics. It cannot by itself prove that the local `SpaceNet/test/0.bin` and the server `SpaceNet/test/0.bin` contain identical IQ samples. M8.6B/M8.6C depend on the existing `recording_fingerprint_v1` semantics; they are unchanged.
+
+A separate, independent raw-source identity is added:
 
 ```text
-REMOTE_RECORDING_UNAVAILABLE
+Recording.source_data_sha256   (nullable SHA256 string)
 ```
 
-No path guessing and no silent upload.
+- represents exact raw IQ data bytes;
+- is separate from `recording_fingerprint_v1`;
+- is an additive nullable field (no change to existing identity semantics).
+
+Local side:
+
+```text
+Recording
+  -> resolve local .bin
+  -> if source_data_sha256 absent, compute SHA256 once
+  -> persist/cache it
+  -> remote request carries expected_source_data_sha256
+```
+
+Server side:
+
+```text
+dataset resolver
+  -> resolve exact .bin
+  -> hash exact raw .bin bytes
+  -> require equality with expected_source_data_sha256
+  -> only then permit inference
+```
+
+Explicit error:
+
+```text
+SOURCE_DATA_HASH_MISMATCH
+```
+
+Remote recording verification fails closed. The server never silently recomputes/accepts a new expected hash. For the 2500 batch, local hashes may be precomputed/backfilled once; the same local file is not re-hashed for every later run when its cached identity is already trusted for that Recording snapshot.
+
+### 7.2 No GroundTruth leakage
+
+GroundTruth may be read by the dataset resolver **only** for recording identity / fingerprint validation. GroundTruth / SpaceNet signals / class labels must never be passed into:
+
+```text
+LS-STFT
+detector
+AHLP
+FRN
+pipeline inference input
+pipeline preprocessing
+pipeline postprocessing decisions
+```
+
+The frozen inference path receives only:
+
+```text
+raw IQ
+non-label signal metadata required for physical coordinate interpretation
+```
+
+The server-side SpaceNet resolver may parse the `.json` for validation, but must construct a sanitized inference input that excludes signals/labels.
+
+Future Testing Strategy must include:
+
+- resolver identity may inspect GT;
+- frozen inference adapter cannot access/use GT;
+- a test proving predictions do not depend on GroundTruth rows.
 
 ## 8. Remote Execution Request V1
 
@@ -266,7 +335,7 @@ Define a strict versioned wire contract.
 ```text
 schema_version
 request_id
-required_platform_commit
+orchestrator_commit
 
 pipeline:
   id
@@ -278,11 +347,14 @@ recording:
   dataset_key
   label_space
   expected_recording_fingerprint
+  expected_source_data_sha256
 
 parameters
 
 asset_manifest_identity
 ```
+
+### 8.1 RemoteExecutionBatchV1 and canonical request identity
 
 Batch transport definition:
 
@@ -290,10 +362,27 @@ Batch transport definition:
 RemoteExecutionBatchV1
   schema_version
   batch_id
-  required_platform_commit
+  required_remote_runtime_commit
+  request_sha256
   pipeline identity
   N items
 ```
+
+`request_sha256` is the canonical deterministic payload hash of the batch request (the exact serialized request bytes). It is the stable identity used for idempotent submission.
+
+Submission semantics:
+
+- same `batch_id` + same `request_sha256` -> idempotent create-or-attach; return/status the existing remote job; **must not** start a duplicate worker;
+- same `batch_id` + different `request_sha256` -> `REMOTE_REQUEST_CONFLICT`, fatal.
+
+This handles the case where the server accepted a job but the SSH connection died before the local side received the ACK. The local side reconciles the same `batch_id` first and must not immediately create a second remote job.
+
+If submit transport fails:
+
+1. query/reconcile the same `batch_id`;
+2. if a job exists with a matching request hash: attach/resume;
+3. if the server definitively proves the job is absent: `REMOTE_SUBMIT_FAILED`;
+4. if server status itself is temporarily unavailable: keep the run recoverable and record transient transport diagnostics; do not falsely mark a potentially-running remote job `failed`.
 
 Each item maps to an existing local `AnalysisRun`. The server never creates an `AnalysisRun`.
 
@@ -360,6 +449,43 @@ download
 
 all succeed.
 
+### 10.1 Idempotent / immutable local result ingest
+
+`RemoteRunSupervisor` and `RemoteRunReconciler` may race or repeat the same completion event. `RemoteResultIngestor` must therefore be idempotent.
+
+A stable remote result identity is used, for example `payload_sha256` (see Section 11).
+
+Transaction rules:
+
+- `pending`/`running` run + valid matching result -> ingest once -> `completed`;
+- already `completed` run + exact same `payload_sha256` -> idempotent no-op / already ingested; never duplicate detections;
+- already `completed` run + different `payload_sha256` -> `REMOTE_RESULT_CONFLICT`, fatal audit error; never overwrite completed detections;
+- `failed` / `interrupted` / `completed` AnalysisRuns must not be silently resurrected or mutated by an unrelated result.
+
+A completed `AnalysisRun` is immutable.
+
+When `AnalysisResultWriter` is extracted from the current local worker, it must **not** preserve an unconditional "delete all detections then rewrite" behavior for completed remote runs.
+
+### 10.2 Batch infrastructure failure semantics
+
+Partial batch failure is explicit:
+
+```text
+2500 items
+items 1..1733 completed
+remote worker crashes before the remaining items finish
+```
+
+Required behavior:
+
+- already locally ingested completed items -> remain completed forever;
+- item with an explicit pipeline/data error -> `failed`;
+- items that were still `pending`/`running` when the batch infrastructure died and have no valid terminal result -> `interrupted`.
+
+Completed items are never rolled back. Completed items are never marked `failed` because the batch later died.
+
+Retry of terminal `failed`/`interrupted` scientific runs normally creates **new** `AnalysisRun` rows. Exception: an uncertain submit/status event must first reconcile the same `AnalysisRun` rows / `batch_id` before declaring them terminal.
+
 ## 11. Result Contract
 
 Remote results use:
@@ -369,7 +495,17 @@ RemoteExecutionEnvelopeV1
 + Analysis Package v1 compatible result semantics
 ```
 
-The envelope contains at least:
+### 11.1 Result layout and hash coverage
+
+Per-item remote result:
+
+```text
+result/
+  envelope.json
+  analysis_result.zip
+```
+
+`envelope.json` includes:
 
 ```text
 schema_version
@@ -378,14 +514,29 @@ batch_id
 item_key
 local_run_id
 recording_fingerprint
+source_data_sha256
 pipeline_id
 pipeline_version
-platform_commit
+orchestrator_commit
+remote_runtime_commit
 asset identities
 hardware/runtime provenance
-result sha256
-remote timestamps
+payload_sha256
+remote start/end timestamps
 ```
+
+`payload_sha256` = SHA256 of the **exact bytes of `analysis_result.zip`**.
+
+`analysis_result.zip` contains the Analysis Package v1-compatible payload. The envelope is **not** included in its own payload hash (this avoids a self-referential hash).
+
+Local flow:
+
+1. download `envelope.json`;
+2. download `analysis_result.zip`;
+3. verify the exact ZIP bytes against `payload_sha256`;
+4. then safe-extract and validate the internal schema.
+
+If another exact layout is chosen, it must preserve the same non-self-referential integrity rule.
 
 The detection wire schema continues to be the existing standard:
 
@@ -414,10 +565,11 @@ The local `RemoteResultIngestor` must verify:
 - item identity
 - local run id
 - recording fingerprint
+- source data hash
 - pipeline id/version
-- platform commit
+- remote runtime commit
 - asset identity
-- result hash
+- payload hash
 - strict schema
 - bbox bounds
 - label validity
@@ -465,6 +617,8 @@ Forbidden at runtime:
 
 The M9.1 implementation must extract the minimal necessary inference implementation from legacy code into the platform repo. It must not copy the entire legacy project.
 
+The frozen inference adapter receives only raw IQ and non-label signal metadata; it cannot access or use GroundTruth.
+
 ## 13. Pipeline Asset Manifest
 
 Checkpoints and config do not enter Git, but an immutable Pipeline Asset Manifest is required.
@@ -483,6 +637,8 @@ assets:
 
 Any additional static files that algorithm behavior depends on must also be part of the manifest identity.
 
+`asset_manifest_sha256` is the hash of the manifest record itself and is part of the validation certificate identity.
+
 The server profile only maps:
 
 ```text
@@ -493,7 +649,7 @@ At each batch start the remote worker:
 
 - resolves asset paths
 - verifies SHA256
-- verifies required platform commit
+- verifies required remote runtime commit
 - loads models
 
 Any asset hash mismatch:
@@ -532,7 +688,7 @@ The remote worker:
 Then for each item:
 
 - resolve recording
-- verify fingerprint
+- verify fingerprint and source data hash
 - inference
 - write per-item result
 - update per-item status
@@ -570,7 +726,29 @@ M9.1 adds:
   - Executor: `AutoDL GPU`
   - `[Run Analysis]`
 
-The frontend must not rely on `cpuSupported` alone. It needs capability-aware executor availability.
+### 15.1 Executor availability contract
+
+The frontend does **not** infer remote executability itself. The backend owns executor availability.
+
+For the selected Recording + Pipeline, the backend provides an availability read model such as:
+
+```text
+executor
+available
+reason_code
+reason_message
+remote_profile
+recommended
+```
+
+Static pipeline capability and dynamic deployment availability are distinct:
+
+- pipeline does not support `remote_gpu` -> unavailable;
+- AutoDL profile missing/unreachable -> unavailable;
+- SpaceNet `source_data_sha256` / fingerprint cannot be established -> unavailable;
+- valid frozen pipeline + valid SpaceNet Recording + configured AutoDL -> `remote_gpu` available.
+
+The UI only renders the backend decision. It must not simply replace `cpuSupported` with another frontend boolean guess.
 
 Single-Recording user workflow:
 
@@ -592,7 +770,7 @@ executor
 GPU
 CUDA
 PyTorch
-platform commit
+remote runtime commit
 asset identity
 implementation validation state
 ```
@@ -606,6 +784,46 @@ Algorithm Lab -> Dataset Benchmarks
 ## 16. Live Implementation Validation State
 
 Algorithm version and implementation validation are two distinct concepts. No `1.0.1-live` version is created.
+
+### 16.1 LiveImplementationValidationCertificateV1
+
+`live_candidate` / `live_validated` are not an arbitrary mutable boolean. They are derived from an immutable validation certificate.
+
+`LiveImplementationValidationCertificateV1` is created only after Gate 3 acceptance. Its identity includes at least:
+
+```text
+pipeline_id
+pipeline_version
+remote_runtime_commit
+asset_manifest_sha256
+parity_protocol_id
+parity_protocol_config_sha256
+historical DatasetEvaluation id
+live DatasetEvaluation id
+dataset manifest hash
+coverage
+reference metrics
+live metrics
+parity conclusion
+accepted_at
+```
+
+UI/backend reports `live_validated` **only** when a run's exact tuple:
+
+```text
+pipeline_id
+pipeline_version
+remote_runtime_commit
+asset_manifest_sha256
+```
+
+matches an accepted validation certificate. Otherwise the run is `live_candidate`.
+
+A later different runtime commit or changed asset manifest automatically returns the run to `live_candidate` until revalidated.
+
+Pipeline version still remains `1.0.0`. No `1.0.1-live` version is created.
+
+The certificate is an immutable research/validation artifact. It does not require a new RemoteJob/BatchRun domain table.
 
 Before Gate 3:
 
@@ -623,6 +841,47 @@ implementation_validation: live_validated
 Validation state never changes `pipeline_version`.
 
 ## 17. M9.1 Live Parity Gates
+
+### 17.1 Parity protocol is frozen before Gate 2
+
+A versioned parity protocol `live_remote_parity_v1` and its config must be frozen **before** Gate 2 is first executed. The config defines deterministic comparison fields and fixed tolerances.
+
+Recommended automatic Gate 2 criteria:
+
+- prediction count exact;
+- same class_id;
+- deterministic one-to-one matching;
+- physical TF IoU >= `0.9999`;
+- confidence absolute delta <= `1e-5`;
+- zero unmatched predictions.
+
+If automatic criteria fail, status is `PARITY_REVIEW_REQUIRED` / not automatically PASS.
+
+Thresholds must not be loosened after seeing results. Any accepted explained difference must be documented explicitly in the parity audit.
+
+For Gate 3, the comparison configuration is frozen before execution. At minimum compare:
+
+```text
+prediction count
+coverage
+localization AP50
+localization AP50:95
+class-aware mAP50
+class-aware mAP50:95
+matched accuracy
+per-class AP
+confusions
+```
+
+Recommended automatic aggregate scalar tolerance:
+
+```text
+abs_delta <= 1e-6
+```
+
+Prediction count and coverage remain exact unless an explicit reviewed explanation exists. `PARITY DIFFERENCE UNEXPLAINED` cannot pass.
+
+The parity protocol config hash is recorded in the validation certificate.
 
 ### Gate 1 — Single Recording True Live Smoke
 
@@ -671,14 +930,7 @@ confidence
 scores (if applicable)
 ```
 
-JSON byte-identity is not required (CUDA / FP implementation may differ at machine level), but semantic parity is strict:
-
-- class identity exact
-- physical detection one-to-one matched
-- tiny numeric tolerance allowed
-- unexplained unmatched prediction = blocker
-
-Gate 2 failure blocks the full 2500.
+Semantic parity is strict, per the frozen `live_remote_parity_v1` criteria. Gate 2 failure blocks the full 2500.
 
 ### Gate 3 — Full SpaceNet Test 2500
 
@@ -704,7 +956,7 @@ localization AP50:95: 0.6715938311249926
 matched classification accuracy: 0.8151265187827444
 ```
 
-Compare:
+Compare (per the frozen config):
 
 - prediction count
 - coverage
@@ -727,11 +979,14 @@ Define at least these explicit error codes:
 REMOTE_EXECUTOR_UNAVAILABLE
 REMOTE_RECORDING_UNAVAILABLE
 REMOTE_SUBMIT_FAILED
+REMOTE_REQUEST_CONFLICT
 REMOTE_STATUS_UNAVAILABLE
 REMOTE_DOWNLOAD_FAILED
 REMOTE_RESULT_INVALID
+REMOTE_RESULT_CONFLICT
 REMOTE_JOB_INTERRUPTED
 RECORDING_FINGERPRINT_MISMATCH
+SOURCE_DATA_HASH_MISMATCH
 REMOTE_IMPLEMENTATION_MISMATCH
 PIPELINE_ASSET_MISMATCH
 PIPELINE_EXECUTION_FAILED
@@ -748,6 +1003,34 @@ SSH keys, passwords, tokens, and secrets must never enter:
 - AnalysisRun JSON
 - request packages
 - logs
+
+### 19.1 SSH trust / command safety
+
+SSH must use server host-key verification. Required:
+
+```text
+known_hosts / pinned trusted host key
+```
+
+Forbidden:
+
+```text
+StrictHostKeyChecking=no
+blind host-key acceptance
+```
+
+The remote executor may invoke only a fixed platform-owned remote runner entrypoint. Client/request data must never become an arbitrary shell command. Identifiers passed into remote commands must be strict validated IDs. The required remote commit must be validated as an exact commit identifier.
+
+The production `RemoteGpuJobManager` must **not**:
+
+```text
+git pull
+git checkout arbitrary client-supplied refs
+git reset
+mutate the remote repository automatically
+```
+
+The AutoDL runtime/worktree is deployed separately. Remote execution only verifies that the deployed remote runtime is the required commit.
 
 Clients cannot submit arbitrary shell commands. Clients cannot submit arbitrary remote absolute paths. `dataset_key` must go through the strict resolver. `request_id` / `batch_id` are system-generated and format-validated. Remote job paths are constructed from a safe fixed root plus validated id.
 
@@ -788,17 +1071,19 @@ The future implementation plan must test in layers:
 2. executor compatibility tests
 3. recording resolver tests
 4. fingerprint mismatch tests
-5. asset manifest/hash tests
-6. fake SSH transport tests
-7. result ingest transaction tests
-8. malformed/hostile result package tests
-9. restart/reconciliation tests
-10. batch partial failure tests
-11. remote runner CPU/mock tests
-12. server GPU Gate 1
-13. Gate 2 cohort
-14. Gate 3 full 2500
-15. actual browser smoke
+5. source data hash tests
+6. GroundTruth isolation tests (predictions independent of GT)
+7. asset manifest/hash tests
+8. fake SSH transport tests
+9. result ingest transaction tests (idempotency, immutability)
+10. malformed/hostile result package tests
+11. restart/reconciliation tests
+12. batch partial failure tests
+13. remote runner CPU/mock tests
+14. server GPU Gate 1
+15. Gate 2 cohort
+16. Gate 3 full 2500
+17. actual browser smoke
 
 Existing regression must continue to pass:
 
@@ -816,7 +1101,7 @@ physical_tf_detection_ap_v2
 
 Local 电脑opencode:
 
-- AnalysisRun schema/migration
+- AnalysisRun schema/migration (additive `execution_metadata_json`, `Recording.source_data_sha256`)
 - executor abstraction
 - RemoteGpuJobManager
 - SSH/SCP transport
@@ -832,6 +1117,7 @@ Server opencode:
 
 - remote runner
 - SpaceNet remote resolver
+- raw-IQ source data hashing and verification
 - asset verification
 - minimal platform-native frozen pipeline implementation
 - GPU runtime
@@ -845,6 +1131,8 @@ RemoteExecutionRequestV1
 RemoteExecutionBatchV1
 RemoteExecutionEnvelopeV1
 Pipeline Asset Manifest
+LiveImplementationValidationCertificateV1
+live_remote_parity_v1
 ```
 
 ## 23. Implementation Sequencing Constraints
@@ -876,6 +1164,16 @@ This is a DESIGN SPEC only. No implementation plan file is created in this task.
 13. No implementation may depend on importing/running legacy Claude/ZoomSpec source directories at runtime.
 14. Secrets never enter Git, DB, request contracts, or logs.
 15. M9.1 does not introduce new training/tuning behavior.
+16. `recording_fingerprint_v1` is semantic identity, not raw-IQ identity; its M8.6B/M8.6C semantics are unchanged.
+17. Remote SpaceNet execution requires `source_data_sha256` equality in addition to `recording_fingerprint_v1`.
+18. GroundTruth never enters model inference; it is used by the resolver only for identity/fingerprint validation.
+19. Remote submission is idempotent by `batch_id` + `request_sha256`.
+20. Remote result ingestion is idempotent by `payload_sha256`.
+21. A completed AnalysisRun and its DetectionResults are immutable.
+22. SSH host identity is verified (known_hosts / pinned host key); blind host-key acceptance is forbidden.
+23. The remote executor never mutates/checks out the remote repository state automatically.
+24. `live_validated` is derived from an exact validation certificate tuple; otherwise the run is `live_candidate`.
+25. The parity protocol is frozen before Gate 2; tolerances are never loosened after seeing results.
 
 ## 25. Design Alternatives / Rejected Approaches
 
