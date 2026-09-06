@@ -21,6 +21,7 @@ class AnalysisRunRead(BaseModel):
     executor: str
     status: str
     parameters_json: dict[str, Any]
+    execution_metadata_json: dict[str, Any] | None
     hardware_info_json: dict[str, Any] | None
     started_at: datetime | None
     finished_at: datetime | None

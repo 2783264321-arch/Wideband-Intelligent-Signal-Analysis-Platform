@@ -19,6 +19,7 @@ class RecordingRead(BaseModel):
     dataset_split: str | None
     label_space: str | None
     has_ground_truth: bool
+    source_data_sha256: str | None
 
 
 class RecordingListRead(BaseModel):

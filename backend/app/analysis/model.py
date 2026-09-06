@@ -21,6 +21,7 @@ class AnalysisRunModel(Base):
     executor: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     parameters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    execution_metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     hardware_info_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
