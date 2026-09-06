@@ -86,6 +86,10 @@ async function chooseZipAndRecording() {
   await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeEnabled());
 }
 
+// Heavy integration test: renders RecordingsPage + import modal, performs a real
+// ZIP import, and navigates. Under vitest's default parallel worker threads this
+// occasionally exceeds the 5s default when the whole frontend suite runs; it is
+// correct and reliable in isolation, so it gets a targeted per-test timeout.
 test("imports a ZIP for the selected Recording and opens the shared Spectrum run route", async () => {
   setup();
   await openModal();
@@ -93,7 +97,7 @@ test("imports a ZIP for the selected Recording and opens the shared Spectrum run
   fireEvent.click(screen.getByRole("button", { name: "Import" }));
   fireEvent.click(await screen.findByRole("button", { name: "Open Results" }));
   expect(await screen.findByText("Results destination: /spectrum/rec_local?run=run_imported")).toBeInTheDocument();
-});
+}, 20000);
 
 test("keeps validation errors in the import dialog and allows retry", async () => {
   setup(true);

@@ -149,12 +149,14 @@ type CaseFetchOptions = {
 
 function setupCaseFetch(options: CaseFetchOptions = {}) {
   const requests: string[] = [];
+  const postBodies: string[] = [];
   const recordingPage = options.recordingPage ?? [recording];
   const directRecordings = options.directRecordings ?? { rec1: recording };
   const runsByRecording = options.runsByRecording ?? { rec1: completedRuns };
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     const urlStr = String(url);
     requests.push(urlStr);
+    if (init?.method === "POST" && init.body) postBodies.push(String(init.body));
     if (urlStr.includes("/api/recordings?limit=")) {
       return new Response(JSON.stringify({ items: recordingPage, total: recordingPage.length }));
     }
@@ -182,7 +184,7 @@ function setupCaseFetch(options: CaseFetchOptions = {}) {
     if (urlStr.endsWith("/analysis-runs/run_b/detections")) return new Response(JSON.stringify(detectionsB));
     throw new Error(`Unexpected request: ${urlStr}`);
   }));
-  return requests;
+  return { requests, postBodies };
 }
 
 function Harness({ initial = {} }: { initial?: { recordingId?: string; runAId?: string; runBId?: string } }) {
@@ -222,19 +224,20 @@ async function chooseRun(label: string, value: string) {
   fireEvent.click(matches[matches.length - 1]);
 }
 
+// Heavy integration test: recording hydration, run listing, and a full 5-fetch
+// A/B comparison under jsdom. Under vitest's default parallel worker threads this
+// occasionally exceeds the 5s default when the whole frontend suite runs; it is
+// correct and reliable in isolation, so it gets a targeted per-test timeout.
 test("selects a recording, exposes only completed runs, and compares", async () => {
-  const requests = setupCaseFetch();
+  const { requests, postBodies } = setupCaseFetch();
   renderView();
   await chooseRecording();
 
   await chooseRun("Run A", "stft_energy_detector · run_a");
   await chooseRun("Run B", "zoomspec · run_b");
 
-  const compareButton = await screen.findByRole("button", { name: /Compare/ });
-  await waitFor(() => expect(compareButton).toBeEnabled());
-  fireEvent.click(compareButton);
-
-  expect(await screen.findByText("both_detected")).toBeInTheDocument();
+  // Selecting both runs triggers the A/B comparison automatically.
+  expect(await screen.findByText("both_detected", {}, { timeout: 3000 })).toBeInTheDocument();
   expect(screen.getAllByText(/STFT Energy Detector/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/ZoomSpec/).length).toBeGreaterThan(0);
   expect(screen.getAllByText("Precision").length).toBeGreaterThan(0);
@@ -247,14 +250,27 @@ test("selects a recording, exposes only completed runs, and compares", async () 
   expect(screen.getByText("a_only")).toBeInTheDocument();
   expect(screen.getByText("b_only")).toBeInTheDocument();
   expect(screen.getByText("both_missed")).toBeInTheDocument();
-});
+
+  const compareBody = postBodies.find((body) => {
+    try { return JSON.parse(body).run_a_id === "run_a" && JSON.parse(body).run_b_id === "run_b"; }
+    catch { return false; }
+  });
+  expect(compareBody).toBeDefined();
+  expect(JSON.parse(compareBody!)).toEqual({
+    recording_id: "rec1",
+    run_a_id: "run_a",
+    run_b_id: "run_b",
+    iou_threshold: 0.5,
+  });
+  expect(requests.some((url) => url.endsWith("/api/algorithm-lab/compare"))).toBe(true);
+}, 20000);
 
 test("shows empty state when the recording has fewer than two completed runs", async () => {
   setupCaseFetch({ runsByRecording: { rec1: [completedRuns[0]] } });
   renderView();
   await chooseRecording();
   expect(await screen.findByText(/fewer than two completed/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: /Compare/ })).toBeDisabled();
 });
 
 test("renders a non-destructive error when compare fails", async () => {
@@ -263,16 +279,14 @@ test("renders a non-destructive error when compare fails", async () => {
   await chooseRecording();
   await chooseRun("Run A", "stft_energy_detector · run_a");
   await chooseRun("Run B", "zoomspec · run_b");
-  const compareButton = await screen.findByRole("button", { name: /Compare/ });
-  await waitFor(() => expect(compareButton).toBeEnabled());
-  fireEvent.click(compareButton);
-  expect(await screen.findByText("Run must be completed.")).toBeInTheDocument();
+  // Auto-compare fails non-destructively; controls remain usable.
+  expect(await screen.findByText("Run must be completed.", {}, { timeout: 3000 })).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("button", { name: /Compare/ })).toBeEnabled());
   expect(screen.getByLabelText("Recording")).toBeInTheDocument();
 });
 
 test("loads one frozen run for inspection without requiring Run B", async () => {
-  const requests = setupCaseFetch();
+  const { requests, postBodies } = setupCaseFetch();
   renderView({ recordingId: "rec1", runAId: "run_a" });
   expect(await screen.findByText(/Select Run B to compare/)).toBeInTheDocument();
   expect(requests.some((url) => url.endsWith("/api/analysis-runs/run_a/detections"))).toBe(true);
@@ -282,7 +296,7 @@ test("loads one frozen run for inspection without requiring Run B", async () => 
 test("hydrates a query-selected recording even when it is not in the first 500 list", async () => {
   const selected = { ...recording, id: "rec2500", name: "Sample 2499" };
   const run2500 = { ...completedRuns[0], id: "run_2500", recording_id: "rec2500" };
-  const requests = setupCaseFetch({
+  const { requests, postBodies } = setupCaseFetch({
     recordingPage: [recording],
     directRecordings: { rec2500: selected },
     runsByRecording: { rec2500: [run2500] },
