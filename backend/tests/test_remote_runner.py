@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -388,7 +389,7 @@ def test_second_run_work_is_write_once(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_completed_status_missing_payload_is_corrupted_and_not_regenerated(tmp_path):
+def test_completed_status_missing_payload_is_interrupted_and_not_regenerated(tmp_path):
     batch = _make_batch()
     job_root = _job_root(tmp_path)
     create_or_attach(batch, job_root)
@@ -396,40 +397,45 @@ def test_completed_status_missing_payload_is_corrupted_and_not_regenerated(tmp_p
     run_work(batch.batch_id, job_root, executor)
     payload_path = job_root / "results" / "000000" / "analysis_result.zip"
     payload_path.unlink()
-    with pytest.raises(PlatformError) as exc:
-        run_work(batch.batch_id, job_root, executor)
-    assert exc.value.code == "REMOTE_RESULT_CORRUPTED"
+    run_work(batch.batch_id, job_root, executor)
     assert executor.execution_count == 1
     assert not payload_path.exists()
+    status = reconcile_status(batch.batch_id, job_root)
+    assert status.status == "interrupted"
+    assert status.items[0].status == "interrupted"
+    assert status.items[0].error_code == "REMOTE_RESULT_CORRUPTED"
 
 
-def test_completed_status_payload_hash_mismatch_is_corrupted(tmp_path):
+def test_completed_status_payload_hash_mismatch_is_interrupted(tmp_path):
     batch = _make_batch()
     job_root = _job_root(tmp_path)
     create_or_attach(batch, job_root)
     executor = FakeItemExecutor()
     run_work(batch.batch_id, job_root, executor)
     payload_path = job_root / "results" / "000000" / "analysis_result.zip"
-    # Corrupt the payload bytes so the envelope hash no longer matches.
     payload_path.write_bytes(b"tampered")
-    with pytest.raises(PlatformError) as exc:
-        run_work(batch.batch_id, job_root, executor)
-    assert exc.value.code == "REMOTE_RESULT_CORRUPTED"
+    run_work(batch.batch_id, job_root, executor)
     assert executor.execution_count == 1
     assert payload_path.read_bytes() == b"tampered"  # never regenerated
+    status = reconcile_status(batch.batch_id, job_root)
+    assert status.status == "interrupted"
+    assert status.items[0].status == "interrupted"
+    assert status.items[0].error_code == "REMOTE_RESULT_CORRUPTED"
 
 
-def test_completed_status_missing_envelope_is_corrupted(tmp_path):
+def test_completed_status_missing_envelope_is_interrupted(tmp_path):
     batch = _make_batch()
     job_root = _job_root(tmp_path)
     create_or_attach(batch, job_root)
     executor = FakeItemExecutor()
     run_work(batch.batch_id, job_root, executor)
     (job_root / "results" / "000000" / "envelope.json").unlink()
-    with pytest.raises(PlatformError) as exc:
-        run_work(batch.batch_id, job_root, executor)
-    assert exc.value.code == "REMOTE_RESULT_CORRUPTED"
+    run_work(batch.batch_id, job_root, executor)
     assert executor.execution_count == 1
+    status = reconcile_status(batch.batch_id, job_root)
+    assert status.status == "interrupted"
+    assert status.items[0].status == "interrupted"
+    assert status.items[0].error_code == "REMOTE_RESULT_CORRUPTED"
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +465,7 @@ def test_running_with_valid_existing_result_reconciles_without_executor(tmp_path
 # ---------------------------------------------------------------------------
 
 
-def test_running_with_partial_result_is_corrupted_without_executor(tmp_path):
+def test_running_with_partial_result_is_interrupted_without_executor(tmp_path):
     batch = _make_batch()
     job_root = _job_root(tmp_path)
     create_or_attach(batch, job_root)
@@ -470,10 +476,12 @@ def test_running_with_partial_result_is_corrupted_without_executor(tmp_path):
         {"item_key": "000000", "status": "running"},
     ])
     executor = FakeItemExecutor()
-    with pytest.raises(PlatformError) as exc:
-        run_work(batch.batch_id, job_root, executor)
-    assert exc.value.code == "REMOTE_RESULT_CORRUPTED"
+    run_work(batch.batch_id, job_root, executor)
     assert executor.execution_count == 0
+    status = reconcile_status(batch.batch_id, job_root)
+    assert status.status == "interrupted"
+    assert status.items[0].status == "interrupted"
+    assert status.items[0].error_code == "REMOTE_RESULT_CORRUPTED"
 
 
 # ---------------------------------------------------------------------------
@@ -653,3 +661,197 @@ def test_submit_job_writes_initial_status_atomically(tmp_path):
 def _write_status(batch_id: str, job_root: Path, items: list[dict]) -> None:
     payload = {"batch_id": batch_id, "status": "running", "items": items}
     _atomic_write_bytes(job_root / "status.json", json.dumps(payload).encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# 5. spawn failure marks the job interrupted, keeps request frozen, and the
+#    same-request retry attaches without spawning again.
+# ---------------------------------------------------------------------------
+
+
+def test_spawn_failure_marks_job_interrupted_and_does_not_leave_queued(tmp_path):
+    batch = _make_batch()
+    job_root = _job_root(tmp_path)
+    assert not job_root.exists()
+
+    def failing_spawn(_batch_id):
+        raise RuntimeError("synthetic spawn failure")
+
+    with pytest.raises(PlatformError) as exc:
+        submit_job(batch, job_root, failing_spawn)
+    assert exc.value.code == "REMOTE_JOB_INTERRUPTED"
+
+    status = reconcile_status(batch.batch_id, job_root)
+    assert status.status == "interrupted"
+    assert all(item.status == "interrupted" for item in status.items)
+    assert all(item.error_code == "REMOTE_JOB_INTERRUPTED" for item in status.items)
+
+    # request.json remains frozen.
+    stored = json.loads((job_root / "request.json").read_text(encoding="utf-8"))
+    assert stored["request_sha256"] == batch.request_sha256
+
+    # Same-request retry attaches; interrupted job is terminal, no re-spawn.
+    spawned = []
+    result = submit_job(batch, job_root, lambda bid: spawned.append(bid))
+    assert result == "attached"
+    assert spawned == []
+
+
+# ---------------------------------------------------------------------------
+# 7. run_work must reject a wrong status.batch_id before any mutation.
+# ---------------------------------------------------------------------------
+
+
+def test_run_work_rejects_wrong_status_batch_id(tmp_path):
+    batch = _make_batch()
+    job_root = _job_root(tmp_path)
+    create_or_attach(batch, job_root)
+    wrong = {"batch_id": "batch_y", "status": "queued",
+             "items": [{"item_key": "000000", "status": "queued"}]}
+    _atomic_write_bytes(job_root / "status.json", json.dumps(wrong).encode("utf-8"))
+    executor = FakeItemExecutor()
+    with pytest.raises(PlatformError) as exc:
+        run_work(batch.batch_id, job_root, executor)
+    assert exc.value.code == "REMOTE_STATUS_UNAVAILABLE"
+    assert executor.execution_count == 0
+    # The status file is not silently rewritten.
+    stored = json.loads((job_root / "status.json").read_text(encoding="utf-8"))
+    assert stored["batch_id"] == "batch_y"
+
+
+# ---------------------------------------------------------------------------
+# 10. crash window: corrupted item does not block later independent items.
+# ---------------------------------------------------------------------------
+
+
+def test_partial_crash_item_does_not_block_later_item(tmp_path):
+    batch = _make_batch_two_items()
+    job_root = _job_root(tmp_path)
+    create_or_attach(batch, job_root)
+    # item 000000: running with a partial artifact; item 000001: queued.
+    result_dir = job_root / "results" / "000000"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / "envelope.json").write_bytes(b"{}")
+    _write_status(batch.batch_id, job_root, [
+        {"item_key": "000000", "status": "running"},
+        {"item_key": "000001", "status": "queued"},
+    ])
+    executor = FakeItemExecutor()
+    run_work(batch.batch_id, job_root, executor)
+    assert executor.execution_count == 1  # only the second item executes
+    status = reconcile_status(batch.batch_id, job_root)
+    by_key = {item.item_key: item for item in status.items}
+    assert by_key["000000"].status == "interrupted"
+    assert by_key["000000"].error_code == "REMOTE_RESULT_CORRUPTED"
+    assert by_key["000001"].status == "completed"
+    assert status.status == "interrupted"
+
+
+# ---------------------------------------------------------------------------
+# 11. fresh executor publishes incomplete/corrupt result -> item interrupted,
+#     later items continue.
+# ---------------------------------------------------------------------------
+
+
+class PartialPublishExecutor:
+    """Fake executor that returns normally but publishes only one file."""
+
+    def __init__(self, broken_items=()):
+        self.execution_count = 0
+        self.broken_items = set(broken_items)
+
+    def execute(self, item, job_root):
+        self.execution_count += 1
+        if item.item_key in self.broken_items:
+            result_dir = job_root / "results" / item.item_key
+            result_dir.mkdir(parents=True, exist_ok=True)
+            (result_dir / "envelope.json").write_bytes(b"{}")
+            return
+        FakeItemExecutor().execute(item, job_root)
+
+
+def test_fresh_executor_partial_publish_marks_item_interrupted_and_continues(tmp_path):
+    batch = _make_batch_two_items()
+    job_root = _job_root(tmp_path)
+    create_or_attach(batch, job_root)
+    executor = PartialPublishExecutor(broken_items={"000000"})
+    run_work(batch.batch_id, job_root, executor)
+    assert executor.execution_count == 2
+    status = reconcile_status(batch.batch_id, job_root)
+    by_key = {item.item_key: item for item in status.items}
+    assert by_key["000000"].status == "interrupted"
+    assert by_key["000000"].error_code == "REMOTE_RESULT_CORRUPTED"
+    assert by_key["000001"].status == "completed"
+    assert status.status == "interrupted"
+
+
+# ---------------------------------------------------------------------------
+# 12. unexpected ordinary exception is isolated per item.
+# ---------------------------------------------------------------------------
+
+
+class UnexpectedErrorExecutor:
+    def __init__(self, failing_items=()):
+        self.execution_count = 0
+        self.failing_items = set(failing_items)
+
+    def execute(self, item, job_root):
+        self.execution_count += 1
+        if item.item_key in self.failing_items:
+            raise RuntimeError("synthetic")
+        FakeItemExecutor().execute(item, job_root)
+
+
+def test_unexpected_executor_exception_is_isolated(tmp_path):
+    batch = _make_batch_two_items()
+    job_root = _job_root(tmp_path)
+    create_or_attach(batch, job_root)
+    executor = UnexpectedErrorExecutor(failing_items={"000000"})
+    run_work(batch.batch_id, job_root, executor)
+    assert executor.execution_count == 2
+    status = reconcile_status(batch.batch_id, job_root)
+    by_key = {item.item_key: item for item in status.items}
+    assert by_key["000000"].status == "failed"
+    assert by_key["000000"].error_code == "PIPELINE_EXECUTION_FAILED"
+    assert by_key["000000"].error_message == "Remote pipeline execution failed."
+    # No Python traceback is exposed in status.
+    assert "RuntimeError" not in (by_key["000000"].error_message or "")
+    assert by_key["000001"].status == "completed"
+    assert status.status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# 3. detached worker cwd must be the backend module root.
+# ---------------------------------------------------------------------------
+
+
+def test_default_spawn_worker_uses_backend_cwd(tmp_path, monkeypatch):
+    import subprocess as _subprocess
+
+    from app.remote_execution import runner as runner_module
+
+    captured = {}
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = dict(kwargs)
+        return object()
+
+    monkeypatch.setattr(_subprocess, "Popen", fake_popen)
+    batch = _make_batch()
+    job_root = _job_root(tmp_path)
+    job_root.mkdir(parents=True, exist_ok=True)  # spawn opens log files under job_root
+    spawn = runner_module._default_spawn_worker(job_root)
+    spawn(batch.batch_id)
+    argv = captured["argv"]
+    assert argv[0] == sys.executable
+    assert argv[1] == "-m"
+    assert argv[2] == "app.remote_execution.runner"
+    assert argv[3] == "work"
+    assert "--batch-id" in argv and batch.batch_id in argv
+    assert "--job-root" in argv and str(job_root) in argv
+    assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["start_new_session"] is True
+    # cwd must be the backend module root (parents[2]), not the repo root.
+    expected_backend = Path(runner_module.__file__).resolve().parents[2]
+    assert Path(captured["kwargs"]["cwd"]).resolve() == expected_backend

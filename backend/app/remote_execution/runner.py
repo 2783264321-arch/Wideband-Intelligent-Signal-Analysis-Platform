@@ -198,6 +198,25 @@ def _initial_status(batch: RemoteExecutionBatchV1) -> RemoteBatchStatusV1:
     return RemoteBatchStatusV1(batch_id=batch.batch_id, status="queued", items=items)
 
 
+def _persist_spawn_failure(job_root: Path, batch_id: str) -> None:
+    """Atomically mark every item interrupted after a spawn failure.
+
+    The frozen request.json is left untouched; the interrupted job remains a
+    terminal auditable object that a later retry attaches to without re-spawn.
+    """
+    batch = _load_batch(job_root)
+    items = [
+        RemoteItemStatusV1(
+            item_key=item.item_key,
+            status="interrupted",
+            error_code="REMOTE_JOB_INTERRUPTED",
+            error_message="Detached remote worker failed to start.",
+        )
+        for item in batch.items
+    ]
+    _write_status(job_root, RemoteBatchStatusV1(batch_id=batch_id, status="interrupted", items=items))
+
+
 def _validate_status_membership(
     batch: RemoteExecutionBatchV1,
     status: RemoteBatchStatusV1,
@@ -246,6 +265,25 @@ def _update_and_persist_item(
     return updated
 
 
+def _mark_corrupted(
+    job_root: Path,
+    status: RemoteBatchStatusV1,
+    item_key: str,
+    message: str,
+) -> RemoteBatchStatusV1:
+    """Persist an infrastructure/result-integrity corruption as interrupted.
+
+    Corruption is never ``failed`` (that is a scientific pipeline/data failure)
+    and the result artifacts are never regenerated or overwritten.
+    """
+    return _update_and_persist_item(
+        job_root, status, item_key,
+        value="interrupted",
+        error_code="REMOTE_RESULT_CORRUPTED",
+        error_message=message,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Create-or-attach
 # ---------------------------------------------------------------------------
@@ -288,10 +326,17 @@ def submit_job(
     """Validate, create-or-attach, and spawn the detached worker only once."""
     _require_identifier(batch.batch_id, "batch_id", "REMOTE_REQUEST_INVALID")
     created = create_or_attach(batch, job_root)
-    if created:
+    if not created:
+        return "attached"
+    try:
         spawn_worker(batch.batch_id)
-        return "created"
-    return "attached"
+    except Exception as exc:
+        _persist_spawn_failure(job_root, batch.batch_id)
+        raise PlatformError(
+            "REMOTE_JOB_INTERRUPTED",
+            "Detached remote worker failed to start.",
+        ) from exc
+    return "created"
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +455,8 @@ def run_work(
         raise PlatformError("REMOTE_JOB_INTERRUPTED", "job_root name does not match batch_id.")
     batch = _load_batch(job_root)
     status = _load_status(job_root)
+    if status.batch_id != batch_id or batch.batch_id != batch_id:
+        raise PlatformError("REMOTE_STATUS_UNAVAILABLE", "status batch_id does not match.")
     _validate_status_membership(batch, status)
 
     for item in batch.items:
@@ -420,7 +467,12 @@ def run_work(
 
         if item_status.status == "completed":
             # Completed items are write-once: verify and never re-execute.
-            _verify_terminal_result(batch, item, job_root)
+            try:
+                _verify_terminal_result(batch, item, job_root)
+            except PlatformError as exc:
+                if exc.code != "REMOTE_RESULT_CORRUPTED":
+                    raise
+                status = _mark_corrupted(job_root, status, item.item_key, exc.message)
             continue
         if item_status.status in ("failed", "interrupted"):
             # Terminal for Task 8; no automatic retry policy exists.
@@ -432,17 +484,24 @@ def run_work(
         if envelope_exists or payload_exists:
             # Crash window: result files exist before status==completed.
             if envelope_exists and payload_exists:
-                _verify_terminal_result(batch, item, job_root)
+                try:
+                    _verify_terminal_result(batch, item, job_root)
+                except PlatformError as exc:
+                    if exc.code != "REMOTE_RESULT_CORRUPTED":
+                        raise
+                    status = _mark_corrupted(job_root, status, item.item_key, exc.message)
+                    continue
                 status = _update_and_persist_item(
                     job_root, status, item.item_key,
                     value="completed",
                     result_relative_path=f"{_RESULT_RELATIVE_PREFIX}/{item.item_key}",
                 )
                 continue
-            raise PlatformError(
-                "REMOTE_RESULT_CORRUPTED",
+            status = _mark_corrupted(
+                job_root, status, item.item_key,
                 "partial terminal artifact exists; refusing to regenerate.",
             )
+            continue
 
         # Fresh execution path.
         status = _update_and_persist_item(job_root, status, item.item_key, value="running")
@@ -456,13 +515,30 @@ def run_work(
                 error_message=exc.message,
             )
             continue
+        except Exception:
+            # One item bug must not kill the rest of a batch. Never expose a
+            # Python traceback in the persisted status.
+            status = _update_and_persist_item(
+                job_root, status, item.item_key,
+                value="failed",
+                error_code="PIPELINE_EXECUTION_FAILED",
+                error_message="Remote pipeline execution failed.",
+            )
+            continue
 
         if not (envelope_path.is_file() and zip_path.is_file()):
-            raise PlatformError(
-                "REMOTE_RESULT_CORRUPTED",
+            status = _mark_corrupted(
+                job_root, status, item.item_key,
                 "item executor did not publish a complete terminal result.",
             )
-        _verify_terminal_result(batch, item, job_root)
+            continue
+        try:
+            _verify_terminal_result(batch, item, job_root)
+        except PlatformError as exc:
+            if exc.code != "REMOTE_RESULT_CORRUPTED":
+                raise
+            status = _mark_corrupted(job_root, status, item.item_key, exc.message)
+            continue
         status = _update_and_persist_item(
             job_root, status, item.item_key,
             value="completed",
@@ -494,12 +570,15 @@ def _default_spawn_worker(job_root: Path) -> Callable[[str], None]:
         ]
         stdout = (job_root / "stdout.log").open("ab")
         stderr = (job_root / "stderr.log").open("ab")
-        repo_root = Path(__file__).resolve().parents[3]
+        # cwd is the backend module root (parents[2] of runner.py), so the
+        # detached worker is importable without pytest/conftest or an editable
+        # install.
+        backend_root = Path(__file__).resolve().parents[2]
         subprocess.Popen(
             argv,
             shell=False,
             start_new_session=True,
-            cwd=str(repo_root),
+            cwd=str(backend_root),
             stdout=stdout,
             stderr=stderr,
         )

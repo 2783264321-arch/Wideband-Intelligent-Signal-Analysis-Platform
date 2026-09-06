@@ -237,6 +237,67 @@ def test_ssh_runner_status_argv(tmp_path):
     assert kwargs["shell"] is False
 
 
+def test_ssh_runner_argv_sets_deterministic_module_root(tmp_path):
+    """The runner must resolve the deployed checkout deterministically via
+    ``env PYTHONPATH=<remote_repo_root>/backend``, not an implicit install."""
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("status")
+    argv, kwargs = recorder.calls[0]
+    # The remote command prefix must establish the backend module root.
+    assert "env" in argv
+    assert "PYTHONPATH=/root/repo/backend" in argv
+    assert "python3" in argv
+    assert "-m" in argv
+    assert "app.remote_execution.runner" in argv
+    assert "status" in argv
+    # All existing security properties must remain.
+    assert kwargs["shell"] is False
+    assert "StrictHostKeyChecking=yes" in argv
+    assert f"UserKnownHostsFile={profile.known_hosts_path}" in argv
+    assert "BatchMode=yes" in argv
+
+
+def test_ssh_runner_argv_env_prefix_uses_remote_repo_root(tmp_path):
+    key = tmp_path / "id_ed25519"
+    key.write_bytes(b"key")
+    hosts = tmp_path / "known_hosts"
+    hosts.write_bytes(b"hosts")
+    profile = RemoteProfile(
+        name="autodl_primary",
+        host="auto.example.com",
+        port=22,
+        user="root",
+        ssh_key_path=key,
+        known_hosts_path=hosts,
+        remote_repo_root=PurePosixPath("/opt/platform"),
+        remote_job_root=PurePosixPath("/root/jobs"),
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("probe")
+    argv, _ = recorder.calls[0]
+    assert "PYTHONPATH=/opt/platform/backend" in argv
+    assert "PYTHONPATH=/root/repo/backend" not in argv
+
+
+def test_ssh_runner_argv_env_before_python3(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("submit", ("--request-path", "/root/jobs/incoming/batch_x.request.json"))
+    argv, _ = recorder.calls[0]
+    env_idx = argv.index("env")
+    assert argv[env_idx + 1] == "PYTHONPATH=/root/repo/backend"
+    assert argv[env_idx + 2] == "python3"
+    assert argv[env_idx + 3] == "-m"
+    assert argv[env_idx + 4] == "app.remote_execution.runner"
+    assert argv[env_idx + 5] == "submit"
+
+
 def test_ssh_never_uses_insecure_host_key_policy(tmp_path):
     profile = _profile(tmp_path)
     recorder = ProcessRecorder()
