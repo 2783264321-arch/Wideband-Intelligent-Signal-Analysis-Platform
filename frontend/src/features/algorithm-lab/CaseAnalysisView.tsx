@@ -1,5 +1,5 @@
 import { Alert, Button, Card, Col, Row, Select, Space, Spin, Typography } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   compareAnalysisRuns,
   getDetections,
@@ -51,6 +51,7 @@ export function CaseAnalysisView({
   const [detectionsA, setDetectionsA] = useState<DetectionResult[]>([]);
   const [detectionsB, setDetectionsB] = useState<DetectionResult[]>([]);
   const [selectedCaseId, setSelectedCaseId] = useState<string | undefined>();
+  const lastRecordingIdRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     listRecordings(500, 0)
@@ -61,15 +62,21 @@ export function CaseAnalysisView({
   // Resolve the selected Recording: from the paged list when present, otherwise
   // hydrate directly by id so any of the 2500 benchmark samples can be reached.
   // When the Recording identity changes, any derived display state for the previous
-  // Recording must be invalidated so a stale comparison is never shown.
+  // Recording must be invalidated so a stale comparison is never shown. The clear
+  // only runs on an actual identity change, never when the recordings catalog
+  // arrives or a run list refresh happens for the same Recording.
   useEffect(() => {
     let cancelled = false;
-    setCompare(null);
-    setMeta(null);
-    setGroundTruth([]);
-    setDetectionsA([]);
-    setDetectionsB([]);
-    setSelectedCaseId(undefined);
+    const identityChanged = recordingId !== lastRecordingIdRef.current;
+    lastRecordingIdRef.current = recordingId;
+    if (identityChanged) {
+      setCompare(null);
+      setMeta(null);
+      setGroundTruth([]);
+      setDetectionsA([]);
+      setDetectionsB([]);
+      setSelectedCaseId(undefined);
+    }
     if (!recordingId) {
       setSelectedRecording(null);
       setRuns([]);
