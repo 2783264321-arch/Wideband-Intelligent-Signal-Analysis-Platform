@@ -100,3 +100,68 @@ This confirms the Dataset Benchmarks list/detail/per-class/confusion/GT-provenan
 
 - Two heavy frontend integration tests (the CaseAnalysisView A/B comparison flow and the pre-existing ImportRunModal ZIP-import flow) occasionally exceed the vitest 5s default under parallel-worker CPU contention; both are correct and reliable in isolation. They were given a targeted per-test timeout (20000ms) with an explanatory comment. This is a contention accommodation for known-correct tests, not a correctness waiver.
 - No new persistence table, no DB migration, no sixth top-level route, no BatchRun/BatchImportModel entity, and no model/data artifact was added.
+---
+
+## Corrective review (C-3 corrective acceptance)
+
+### Backend error code/message behavior
+
+The frontend API boundary (`apiGet`/`apiPostJson`) previously threw only `API request failed: <status>` for non-2xx responses. It now preserves the backend error contract via `PlatformApiError`:
+
+- `status`, `code`, `message`, `details`
+- `display` renders `CODE: message` (e.g. `INVALID_BENCHMARK_TRANSITION: Only pending evaluations can be started.`)
+- Non-JSON error bodies fall back to `HTTP_<status>` with the generic message
+
+Covered by `frontend/src/api/client.test.ts` for both `apiGet` and `apiPostJson`, including an `INVALID_BENCHMARK_TRANSITION` (409) and `IMPORTED_BATCH_DATASET_INCOMPLETE` (422) payload and the non-JSON fallback.
+
+### List / run / retry non-destructive errors
+
+`DatasetBenchmarksView` now surfaces a non-destructive error `Alert` on list-load, Run, and Retry failures:
+
+- a failed benchmark list load keeps `New Benchmark` and the page structure visible;
+- a rejected Run keeps the current list and selection;
+- a failed Retry never auto-switches the benchmark or auto-recreates the evaluation.
+
+`BenchmarkCreatePanel` keeps its `fingerprint`/`resolution`/`benchmarkName` state on error and shows `CODE: message`. `BenchmarkComparePanel` surfaces compare/items errors. `BenchmarkDetailView` keeps `Back to list` even when the initial load or a polling request fails.
+
+Covered by `DatasetBenchmarksView.test.tsx` error-contract tests and the detail/compare error tests.
+
+### Recording switch stale-state regression
+
+CaseAnalysisView previously retained the previous Recording's comparison panels after switching Recordings because derived state was only cleared when the Recording became empty. It now invalidates `compare`/`meta`/`groundTruth`/`detectionsA`/`detectionsB`/`selectedCaseId` whenever the Recording identity changes (and only then, so the recordings catalog arrival or a run-list refresh for the same Recording never clobbers an in-flight single-run or comparison view). Covered by the "clears stale comparison state when switching to another Recording" test; single-run inspection, A/B compare, and outside-first-500 hydration remain green.
+
+### Detection-only list N/A
+
+Benchmark list now shows `N/A` (not `—`) for a completed detection-only benchmark's class-aware mAP50:95, matching the approved detection-only contract. Covered by a list test.
+
+### Real browser smoke
+
+Servers were started against the real primary database (`WSP_DATABASE_URL` = `sqlite:///D:/LGFiles/Wideband Signal Analysis Platform/Wideband-Intelligent-Signal-Analysis-Platform/platform.db`):
+
+- backend: `http://127.0.0.1:8000`
+- frontend: `http://127.0.0.1:5173`
+
+A real Chrome browser (agent-browser/CDP) opened:
+
+`http://127.0.0.1:5173/algorithm-lab?tab=benchmarks&benchmark=eval_23bfb7a075e04d80a30e70754042a61c`
+
+Observed in the browser (values come from the real backend, not hardcoded):
+
+- Dataset Benchmarks tab active; heading `M8.6C SpaceNet Test - ZoomSpec YOLO26n Aug + Combined FRN V3`
+- status completed; End-to-End Class-aware mAP50:95 `0.3733`; mAP50 `0.4971`
+- GT provenance: Raw annotations `20018`, Evaluation GT `19962`, Exact duplicates removed `56`, Policy `exact_physical_class_dedup`
+- Localization AP50 `0.8666`, AP50:95 `0.6716`; matched accuracy `0.8151`
+- End-to-End mAP50 `0.4971`, mAP50:95 `0.3733`; class-aware P/R/F1 `0.4382 / 0.7326 / 0.5484`
+- Per-class 14 rows reachable; Top Classification Confusions renders
+- Protocol `physical_tf_detection_ap_v2`; Manifest `91496138ee4a10590e6e304e70b9bca8120e70c783c61df7aaad84e42d64181b`
+- 2500 Evaluation Items; first row Recording name `0`, GT 6, Predictions 13, Analysis Run `run_14db9792067e4c9eb6a3ed00408504a1`
+
+Clicking `Inspect` on the sample-0 row navigated the real browser to:
+
+`/algorithm-lab?tab=case&recording=rec_eea493d189754e61a0f1520e3215690a&runA=run_14db9792067e4c9eb6a3ed00408504a1`
+
+The single-run view rendered the real STFT spectrogram, 6 GroundTruth overlays, 13 Run A detection overlays, and the prompt `Select Run B to compare this result with another run.` Run A is the exact frozen M8.6B batch run (not the older M9.0 single-package run).
+
+Selecting a second completed run (the old M9.0 sample-0 run `run_90f01b90a8fa4300bdb9e46d4e561745`) as Run B executed the existing M8.5 A/B comparison in the browser with real metric cards.
+
+DB integrity before and after the smoke was identical: formal NAME count `1`, SpaceNet/test/spacenet_14 GroundTruth `20018`, AnalysisRuns `2507`, DetectionResults `33571`, DatasetEvaluation total `1`. No duplicate real benchmark was created.
