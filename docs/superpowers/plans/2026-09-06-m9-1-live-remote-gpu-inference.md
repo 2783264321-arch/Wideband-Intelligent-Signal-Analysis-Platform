@@ -494,18 +494,32 @@ class RemoteExecutorProbe(Protocol):
 
 - [ ] **Step 1: Write failing tests**
 
-Create `backend/tests/test_remote_executor_availability.py`. All service calls happen inside one live session scope:
+Create `backend/tests/test_remote_executor_availability.py`. Task 4 must be independently GREEN, so it uses a test-only remote-capable pipeline (`remote_test`) and an explicit registry; it does NOT depend on the production ZoomSpec pipeline (Task 12). All service calls happen inside one live session scope:
 
 ```python
-import pytest
-
 from benchmark_fixture import add_recording
 
 from app.analysis.schema import ExecutorAvailabilityRead
 from app.analysis.service import AnalysisService
-from app.pipelines.base import PipelineDefinition
-from app.pipelines.registry import create_pipeline_registry
-from app.remote_execution.executor import RemoteExecutorProbe
+from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
+from app.pipelines.registry import PipelineRegistry
+from app.pipelines.stft_energy.pipeline import STFTEnergyDetectorPipeline
+
+
+class RemoteCapableTestPipeline(Pipeline):
+    @property
+    def definition(self):
+        return PipelineDefinition(
+            id="remote_test", name="Remote Test", version="1.0", label_space="spacenet_14",
+            recommended_device="GPU", cpu_supported=False, stages=(), inspectable_stages=(),
+            executors_supported=("remote_gpu",), recommended_executor="remote_gpu",
+        )
+
+    def run(self, recording: RecordingInput, parameters: dict, workspace) -> PipelineOutput:
+        raise AssertionError("test pipeline must not execute")
+
+
+TEST_REGISTRY = PipelineRegistry([STFTEnergyDetectorPipeline(), RemoteCapableTestPipeline()])
 
 
 class FakeRemoteExecutorProbe:
@@ -521,9 +535,9 @@ class FakeRemoteExecutorProbe:
         )
 
 
-def _availability(client, recording_id, pipeline_id, probe=None):
+def _availability(client, recording_id, pipeline_id, probe=None, registry=TEST_REGISTRY):
     with client.app.state.database.session_factory() as session:
-        service = AnalysisService(session, create_pipeline_registry(), client.app.state.job_manager,
+        service = AnalysisService(session, registry, client.app.state.job_manager,
                                   remote_executor_probe=probe)
         return service.executor_availability(recording_id, pipeline_id)
 
@@ -545,7 +559,7 @@ def test_remote_gpu_unavailable_when_profile_absent(client):
         add_recording(session, recording_id="rec_sn", name="0", dataset_name="SpaceNet",
                       dataset_split="test", label_space="spacenet_14")
         session.commit()
-    availability = _availability(client, "rec_sn", "zoomspec_yolo26n_aug_combined_frn_v3",
+    availability = _availability(client, "rec_sn", "remote_test",
                                 probe=FakeRemoteExecutorProbe(available=False, reason_code="REMOTE_EXECUTOR_UNAVAILABLE"))
     assert availability.available is False
     assert availability.reason_code == "REMOTE_EXECUTOR_UNAVAILABLE"
@@ -556,11 +570,12 @@ def test_remote_gpu_available_with_configured_probe(client):
         add_recording(session, recording_id="rec_sn", name="0", dataset_name="SpaceNet",
                       dataset_split="test", label_space="spacenet_14")
         session.commit()
-    availability = _availability(client, "rec_sn", "zoomspec_yolo26n_aug_combined_frn_v3",
+    availability = _availability(client, "rec_sn", "remote_test",
                                 probe=FakeRemoteExecutorProbe(available=True))
     assert availability.available is True
     assert availability.recommended is True
     assert availability.remote_profile == "autodl_primary"
+```
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -717,6 +732,7 @@ from app.detections.model import DetectionResultModel
 from app.remote_execution.result_ingestor import ingest_remote_result
 from app.remote_execution.schema import RemoteExecutionEnvelopeV1
 from app.remote_execution.validation import AnalysisResultWriter
+from app.recordings.model import RecordingModel
 
 
 def _envelope(payload_sha256):
@@ -765,19 +781,40 @@ def _writer(session, settings, tmp_path):
         tmp_path / "ws")
 
 
-def _running_run(session):
-    session.add(AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
-                                 pipeline_version="1.0", executor="remote_gpu", status="running"))
+def _seed_remote_run(session, *, status="running", payload_sha256=None):
+    recording = session.get(RecordingModel, "rec_r")
+    recording.source_data_sha256 = "b" * 64
+    metadata = {
+        "request_id": "req_1",
+        "batch_id": "batch_x",
+        "item_key": "000000",
+        "recording_fingerprint": "a" * 64,
+        "source_data_sha256": "b" * 64,
+        "orchestrator_commit": "9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c",
+        "required_remote_runtime_commit": "9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c",
+        "asset_manifest_sha256": "c" * 64,
+    }
+    if payload_sha256 is not None:
+        metadata["payload_sha256"] = payload_sha256
+    run = AnalysisRunModel(
+        id="run_r", recording_id="rec_r", pipeline_id="pipeline_x", pipeline_version="1.0",
+        executor="remote_gpu", status=status, execution_metadata_json=metadata,
+    )
+    session.add(run)
     session.commit()
 
 
-def test_running_run_ingests_valid_package_once(client, tmp_path, settings):
+def _seed_recording(client):
     with client.app.state.database.session_factory() as session:
         add_recording(session, recording_id="rec_r", name="r")
         session.commit()
+
+
+def test_running_run_ingests_valid_package_once(client, tmp_path, settings):
+    _seed_recording(client)
     zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
     with client.app.state.database.session_factory() as session:
-        _running_run(session)
+        _seed_remote_run(session)
         result = ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
                                       _writer(session, settings, tmp_path))
         session.commit()
@@ -788,16 +825,10 @@ def test_running_run_ingests_valid_package_once(client, tmp_path, settings):
 
 
 def test_completed_run_same_payload_is_noop_without_writer_call(client, tmp_path, settings):
-    with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_r", name="r")
-        session.commit()
+    _seed_recording(client)
     zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
     with client.app.state.database.session_factory() as session:
-        run = AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
-                               pipeline_version="1.0", executor="remote_gpu", status="completed",
-                               execution_metadata_json={"payload_sha256": payload})
-        session.add(run)
-        session.commit()
+        _seed_remote_run(session, status="completed", payload_sha256=payload)
         calls = {"persist": 0}
         class _SpyWriter:
             def persist(self, *args, **kwargs):
@@ -810,17 +841,11 @@ def test_completed_run_same_payload_is_noop_without_writer_call(client, tmp_path
 
 
 def test_completed_run_different_payload_conflicts(client, tmp_path, settings):
-    with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_r", name="r")
-        session.commit()
+    _seed_recording(client)
     zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
     other = "f" * 64
     with client.app.state.database.session_factory() as session:
-        run = AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
-                               pipeline_version="1.0", executor="remote_gpu", status="completed",
-                               execution_metadata_json={"payload_sha256": other})
-        session.add(run)
-        session.commit()
+        _seed_remote_run(session, status="completed", payload_sha256=other)
         with pytest.raises(PlatformError) as exc:
             ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
                                  _writer(session, settings, tmp_path))
@@ -830,15 +855,13 @@ def test_completed_run_different_payload_conflicts(client, tmp_path, settings):
 
 
 def test_failed_run_is_not_resurrected(client, tmp_path, settings):
-    with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_r", name="r")
-        session.commit()
+    _seed_recording(client)
     zip_path, payload = _write_valid_analysis_result_zip(tmp_path)
     with client.app.state.database.session_factory() as session:
-        run = AnalysisRunModel(id="run_r", recording_id="rec_r", pipeline_id="pipeline_x",
-                               pipeline_version="1.0", executor="remote_gpu", status="failed",
-                               error_type="PIPELINE_EXECUTION_FAILED")
-        session.add(run)
+        # identity provenance is valid; the terminal state alone must block resurrection
+        _seed_remote_run(session, status="failed", payload_sha256=payload)
+        run = session.get(AnalysisRunModel, "run_r")
+        run.error_type = "PIPELINE_EXECUTION_FAILED"
         session.commit()
         with pytest.raises(PlatformError) as exc:
             ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
@@ -849,13 +872,11 @@ def test_failed_run_is_not_resurrected(client, tmp_path, settings):
 
 
 def test_payload_sha_mismatch_is_invalid(client, tmp_path, settings):
-    with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_r", name="r")
-        session.commit()
+    _seed_recording(client)
     zip_path, _ = _write_valid_analysis_result_zip(tmp_path)
     wrong = "0" * 64
     with client.app.state.database.session_factory() as session:
-        _running_run(session)
+        _seed_remote_run(session)
         with pytest.raises(PlatformError) as exc:
             ingest_remote_result(session, "run_r", _envelope(wrong), zip_path,
                                  _writer(session, settings, tmp_path))
@@ -863,16 +884,19 @@ def test_payload_sha_mismatch_is_invalid(client, tmp_path, settings):
 
 
 def test_unsafe_traversal_zip_is_rejected(client, tmp_path, settings):
+    _seed_recording(client)
+    # use the ACTUAL traversal ZIP hash so payload integrity passes and the
+    # failure is caused by unsafe archive extraction, not a payload-hash mismatch.
+    zip_path, payload = _write_valid_analysis_result_zip(tmp_path, traversal=True)
     with client.app.state.database.session_factory() as session:
-        add_recording(session, recording_id="rec_r", name="r")
-        session.commit()
-    zip_path, _ = _write_valid_analysis_result_zip(tmp_path, traversal=True)
-    with client.app.state.database.session_factory() as session:
-        _running_run(session)
+        _seed_remote_run(session, payload_sha256=payload)
         with pytest.raises(PlatformError) as exc:
-            ingest_remote_result(session, "run_r", _envelope("1" * 64), zip_path,
+            ingest_remote_result(session, "run_r", _envelope(payload), zip_path,
                                  _writer(session, settings, tmp_path))
         assert exc.value.code == "REMOTE_RESULT_INVALID"
+        session.rollback()
+        assert session.query(DetectionResultModel).filter(DetectionResultModel.run_id == "run_r").count() == 0
+        assert session.get(AnalysisRunModel, "run_r").status == "running"
 ```
 
 - [ ] **Step 2: Run and confirm RED**
@@ -919,7 +943,7 @@ git commit -m "feat: idempotent remote result ingestion"
 **Interfaces:**
 - `RemoteProfile` — dataclass with `name`, `host`, `port`, `user`, `ssh_key_path`, `known_hosts_path`, `remote_repo_root`, `remote_job_root`, `dataset_roots`, `asset_paths`.
 - `RemoteProfile.from_env(settings: Settings) -> RemoteProfile` — reads `WSP_REMOTE_*` environment variables; raises `REMOTE_EXECUTOR_UNAVAILABLE` when missing.
-- `SshRunner` — runs fixed-argv commands via `subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", f"UserKnownHostsFile={known_hosts_path}", "-i", key_path, "-p", str(port), f"{user}@{host}", *argv], ...)` with `shell=False`; never `StrictHostKeyChecking=no`.
+- `SshRunner` — runs fixed-argv commands via `subprocess.run([...], ...)` with `shell=False`. The production argv explicitly contains `-o StrictHostKeyChecking=yes` and `-o UserKnownHostsFile=<trusted known_hosts>`; `StrictHostKeyChecking=no` is never allowed (no blind first-use acceptance).
 - `RemoteGpuJobManager` — `submit(batch: RemoteExecutionBatchV1, request_json_path: Path)`, `status(batch_id) -> RemoteBatchStatusV1`, `download(batch_id, item_key, dest_dir) -> Path`.
 - Transport tests use a fake `subprocess` / recorded argv; no real SSH.
 
@@ -949,7 +973,9 @@ def test_ssh_argv_uses_fixed_command_and_host_key(tmp_path, monkeypatch):
     runner.run(["status"])
     argv = calls[0][0]
     assert "ssh" in argv[0]
-    assert "-o" in argv and "StrictHostKeyChecking=no" not in argv
+    assert "-o" in argv
+    assert "StrictHostKeyChecking=yes" in argv
+    assert "StrictHostKeyChecking=no" not in argv
     assert f"UserKnownHostsFile={tmp_path / 'known_hosts'}" in argv
     assert calls[0][1]["shell"] is False
 ```
@@ -1008,20 +1034,32 @@ def create_or_attach(batch: RemoteExecutionBatchV1, job_root: Path) -> bool:
 def reconcile_status(batch_id: str, job_root: Path) -> RemoteBatchStatusV1:
     pass
 
+def submit_job(
+    batch: RemoteExecutionBatchV1,
+    job_root: Path,
+    spawn_worker: Callable[[str], None],
+) -> Literal["created", "attached"]:
+    validate_request_sha256(batch)
+    created = create_or_attach(batch, job_root)
+    if created:
+        spawn_worker(batch.batch_id)
+        return "created"
+    return "attached"
+
 def run_work(batch_id: str, job_root: Path, item_executor: ItemExecutor) -> None:
     # iterate items; each item publishes result + per-item status atomically; terminal results are write-once
     pass
 ```
 
-- CLI: `python -m app.remote_execution.runner probe|submit|status|work` with strict flags.
+  - CLI: `python -m app.remote_execution.runner probe|submit|status|work` with strict flags.
   - `probe` — verify deployed repo HEAD equals `required_remote_runtime_commit` and asset hashes match the manifest; exit nonzero on mismatch.
-  - `submit` — strict-parse, recompute `request_sha256`, require equality (else `REMOTE_REQUEST_INVALID`); `create_or_attach`; on duplicate identical hash return existing job; on duplicate different hash return `REMOTE_REQUEST_CONFLICT`.
+  - `submit` — calls the `submit_job` core function (strict-parse, recompute `request_sha256`, require equality else `REMOTE_REQUEST_INVALID`; `create_or_attach`; spawn the detached worker only on first creation; on duplicate identical hash return existing job/attach; on duplicate different hash return `REMOTE_REQUEST_CONFLICT`).
   - `status` — write `status.json` atomically (temp + fsync + rename).
   - `work` — detached process that resolves assets once, initializes CUDA once, loads models once, then iterates items; each item writes per-item result + status; terminal item results are write-once; a terminal item with a missing/corrupted artifact reports `REMOTE_RESULT_CORRUPTED` and never regenerates.
 
 - [ ] **Step 1: Write failing runner tests**
 
-Create `backend/tests/test_remote_runner.py` with a `FakeItemExecutor` and in-memory job directories (no Task 9/10/12 imports):
+Create `backend/tests/test_remote_runner.py` with a `FakeItemExecutor` and in-memory job directories (no Task 9/10/12 imports). Normal submit tests use a VALID `request_sha256` produced by `compute_request_sha256()`:
 
 ```python
 import json
@@ -1030,16 +1068,17 @@ from pathlib import Path
 import pytest
 
 from app.core.errors import PlatformError
+from app.remote_execution.canonical import compute_request_sha256
 from app.remote_execution.runner import (
-    create_or_attach, reconcile_status, run_work, validate_request_sha256,
+    create_or_attach, run_work, submit_job, validate_request_sha256,
 )
 from app.remote_execution.schema import (
     RemoteExecutionBatchV1, RemoteExecutionItemV1, RemoteRecordingRefV1,
 )
 
 
-def _batch(batch_id="batch_x", request_sha256="0" * 64, item_key="000000"):
-    return RemoteExecutionBatchV1(
+def _make_batch(batch_id="batch_x", item_key="000000"):
+    batch = RemoteExecutionBatchV1(
         schema_version=1, batch_id=batch_id,
         required_remote_runtime_commit="9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c",
         pipeline={"id": "pipeline_x", "version": "1.0"},
@@ -1050,8 +1089,16 @@ def _batch(batch_id="batch_x", request_sha256="0" * 64, item_key="000000"):
                                          expected_recording_fingerprint="a" * 64,
                                          expected_source_data_sha256="b" * 64),
                                      parameters={})],
-        request_sha256=request_sha256,
+        request_sha256="0" * 64,
     )
+    batch.request_sha256 = compute_request_sha256(batch)
+    return batch
+
+
+def _job_root(tmp_path, batch):
+    job_root = tmp_path / "jobs" / batch.batch_id
+    job_root.mkdir(parents=True)
+    return job_root
 
 
 class FakeItemExecutor:
@@ -1072,35 +1119,50 @@ def _atomic_write(path, data):
     tmp.replace(path)
 
 
-def test_create_or_attach_attaches_without_second_worker(tmp_path):
-    batch = _batch()
-    job_root = tmp_path / "jobs" / batch.batch_id
-    job_root.mkdir(parents=True)
-    created = create_or_attach(batch, job_root)
-    assert created is True
-    attached = create_or_attach(batch, job_root)
-    assert attached is False  # second call attaches, does not create a second job
+def test_submit_spawns_worker_once_for_same_request(tmp_path):
+    batch = _make_batch()
+    job_root = _job_root(tmp_path, batch)
+    spawned = []
+
+    def spawn(worker_batch_id: str) -> None:
+        spawned.append(worker_batch_id)
+
+    assert submit_job(batch, job_root, spawn) == "created"
+    assert len(spawned) == 1
+    # same batch_id + same valid request_sha256 attaches; no second worker
+    assert submit_job(batch, job_root, spawn) == "attached"
+    assert len(spawned) == 1
 
 
-def test_duplicate_batch_with_different_request_hash_conflicts(tmp_path):
-    job_root = tmp_path / "jobs" / "batch_x"
-    job_root.mkdir(parents=True)
-    create_or_attach(_batch(), job_root)
+def test_submit_with_different_request_hash_conflicts_and_does_not_spawn(tmp_path):
+    batch = _make_batch()
+    job_root = _job_root(tmp_path, batch)
+    submit_job(batch, job_root, lambda _bid: None)
+    changed = _make_batch()
+    changed.items[0].parameters = {"x": 1}  # semantic change -> different request_sha256
+    changed.request_sha256 = compute_request_sha256(changed)
+    spawned = []
+
+    def spawn(worker_batch_id: str) -> None:
+        spawned.append(worker_batch_id)
+
     with pytest.raises(PlatformError) as exc:
-        create_or_attach(_batch(request_sha256="f" * 64), job_root)
+        submit_job(changed, job_root, spawn)
     assert exc.value.code == "REMOTE_REQUEST_CONFLICT"
+    assert len(spawned) == 0
 
 
 def test_invalid_supplied_request_sha256_rejected():
+    batch = _make_batch()
+    batch.request_sha256 = "f" * 64  # deliberately wrong supplied hash
     with pytest.raises(PlatformError) as exc:
-        validate_request_sha256(_batch(request_sha256="f" * 64))
+        validate_request_sha256(batch)
     assert exc.value.code == "REMOTE_REQUEST_INVALID"
 
 
 def test_terminal_result_is_write_once(tmp_path):
-    batch = _batch()
-    job_root = tmp_path / "jobs" / batch.batch_id
-    job_root.mkdir(parents=True)
+    batch = _make_batch()
+    job_root = _job_root(tmp_path, batch)
     create_or_attach(batch, job_root)
     executor = FakeItemExecutor()
     run_work(batch.batch_id, job_root, executor)
@@ -1112,9 +1174,8 @@ def test_terminal_result_is_write_once(tmp_path):
 
 
 def test_corrupted_terminal_artifact_reports_corrupted(tmp_path):
-    batch = _batch()
-    job_root = tmp_path / "jobs" / batch.batch_id
-    job_root.mkdir(parents=True)
+    batch = _make_batch()
+    job_root = _job_root(tmp_path, batch)
     create_or_attach(batch, job_root)
     executor = FakeItemExecutor()
     run_work(batch.batch_id, job_root, executor)
