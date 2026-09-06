@@ -214,3 +214,89 @@ def test_tiny_end_to_end_benchmark_through_subprocess(client):
     refreshed_items = client.get(f"/api/dataset-benchmarks/{created['id']}/items").json()
     assert [item["analysis_run_id"] for item in refreshed_items] == ["run_a", "run_b"]
 
+
+
+API_FINGERPRINT = "a" * 64
+
+
+def _api_batch_parameters(item_key: str):
+    return {
+        "batch_import": {
+            "schema_version": 1,
+            "batch_id": "batch_api",
+            "item_key": item_key,
+            "package_path": f"items/{item_key}.analysis.zip",
+            "import_fingerprint": API_FINGERPRINT,
+            "recording_fingerprint": "b" * 64,
+            "archive_sha256": "c" * 64,
+            "result_provenance": {},
+            "transport_provenance": {"exporter_version": "m8_6b_v1"},
+        }
+    }
+
+
+def _seed_api_batch(client):
+    with client.app.state.database.session_factory() as session:
+        for recording_id, name, run_id in (("rec_a", "a", "run_a"), ("rec_b", "b", "run_b")):
+            add_recording(session, recording_id=recording_id, name=name)
+            add_ground_truth(
+                session, gt_id=f"gt_{recording_id}", recording_id=recording_id,
+                class_id=9, class_name="LoRa 250kHz",
+                t0=0.01, t1=0.02, f0=2_440_600_000.0, f1=2_440_700_000.0,
+            )
+            add_run(
+                session, run_id=run_id, recording_id=recording_id, pipeline_id="pipeline_x",
+                pipeline_version="1.0", executor="imported", status="completed",
+                parameters_json=_api_batch_parameters(name),
+            )
+        session.commit()
+
+
+def test_imported_batch_catalog_api(client):
+    _seed_api_batch(client)
+    response = client.get("/api/dataset-benchmarks/imported-batches")
+    assert response.status_code == 200
+    item = response.json()[0]
+    assert item["import_fingerprint"] == API_FINGERPRINT
+    assert item["run_count"] == 2
+    assert item["ready"] is True
+
+
+def test_resolve_imported_batch_api(client):
+    _seed_api_batch(client)
+    response = client.post(
+        "/api/dataset-benchmarks/resolve-imported-batch",
+        json={"import_fingerprint": API_FINGERPRINT},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["resolved_recordings"] == payload["expected_recordings"] == 2
+    assert payload["missing_recordings"] == 0
+    assert {x["analysis_run_id"] for x in payload["entries"]} == {"run_a", "run_b"}
+
+
+def test_standard_create_api_now_freezes_v2(client):
+    _seed_api_batch(client)
+    resolved = client.post(
+        "/api/dataset-benchmarks/resolve-imported-batch",
+        json={"import_fingerprint": API_FINGERPRINT},
+    ).json()
+    response = client.post(
+        "/api/dataset-benchmarks",
+        json={
+            "name": "api-v2",
+            "dataset_name": resolved["dataset_name"],
+            "dataset_split": resolved["dataset_split"],
+            "label_space": resolved["label_space"],
+            "recording_manifest_hash": resolved["recording_manifest_hash"],
+            "allow_incomplete": False,
+            "items": [
+                {"recording_id": item["recording_id"], "analysis_run_id": item["analysis_run_id"]}
+                for item in resolved["entries"]
+            ],
+        },
+    )
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["evaluation_protocol"] == "physical_tf_detection_ap_v2"
+    assert payload["protocol_config_json"]["gt_duplicate_policy"] == "exact_physical_class_dedup"

@@ -9,6 +9,9 @@ from app.benchmarks.schema import (
     DatasetManifestPreviewRead,
     DatasetSelection,
     FrozenRunItemInput,
+    ImportedBatchCatalogRead,
+    ImportedBatchResolutionPreviewRead,
+    ImportedBatchResolveRequest,
     RunResolutionPreviewRead,
     RunResolutionRequest,
 )
@@ -71,6 +74,29 @@ def create_evaluation(payload: DatasetEvaluationCreate, request: Request):
 def list_evaluations(request: Request):
     with request.app.state.database.session_factory() as session:
         return _service(request, session).list_evaluations()
+
+
+@router.get("/imported-batches", response_model=list[ImportedBatchCatalogRead])
+def list_imported_batches(request: Request):
+    with request.app.state.database.session_factory() as session:
+        entries = _service(request, session).list_imported_batches()
+        return [
+            {
+                **{k: v for k, v in entry.__dict__.items() if k != "inconsistency_reasons"},
+                "inconsistency_reasons": list(entry.inconsistency_reasons),
+            }
+            for entry in entries
+        ]
+
+
+@router.post("/resolve-imported-batch", response_model=ImportedBatchResolutionPreviewRead)
+def resolve_imported_batch(payload: ImportedBatchResolveRequest, request: Request):
+    with request.app.state.database.session_factory() as session:
+        preview = _service(request, session).resolve_imported_batch(payload.import_fingerprint)
+        return {
+            **{k: v for k, v in preview.__dict__.items() if k != "entries"},
+            "entries": [entry.__dict__ for entry in preview.entries],
+        }
 
 
 @router.get("/{evaluation_id}", response_model=DatasetEvaluationRead)

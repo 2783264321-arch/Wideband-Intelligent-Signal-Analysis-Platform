@@ -162,3 +162,46 @@ class DatasetBenchmarkCompareResponse(BaseModel):
     aggregate_a: dict | None
     aggregate_b: dict | None
     deltas: dict[str, float | None]
+
+
+class ImportedBatchResolveRequest(BaseModel):
+    import_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ImportedBatchCatalogRead(BaseModel):
+    import_fingerprint: str
+    pipeline_id: str | None
+    pipeline_version: str | None
+    dataset_name: str | None
+    dataset_split: str | None
+    label_space: str | None
+    run_count: int
+    detection_count: int
+    archive_sha256: str | None
+    result_provenance: dict
+    transport_provenance: dict
+    ready: bool
+    inconsistency_reasons: list[str]
+
+
+class ImportedBatchResolutionEntryRead(BaseModel):
+    manifest_order: int
+    recording_id: str
+    recording_name: str
+    analysis_run_id: str
+    item_key: str
+
+
+class ImportedBatchResolutionPreviewRead(BaseModel):
+    import_fingerprint: str
+    dataset_name: str
+    dataset_split: str
+    label_space: str
+    pipeline_id: str
+    pipeline_version: str
+    recording_manifest_hash: str
+    expected_recordings: int
+    resolved_recordings: int
+    missing_recordings: int
+    conflict_count: int
+    entries: list[ImportedBatchResolutionEntryRead]
