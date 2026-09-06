@@ -2,9 +2,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PHYSICAL_TF_PROTOCOL = "physical_tf_detection_ap_v1"
+PHYSICAL_TF_PROTOCOL_V1 = "physical_tf_detection_ap_v1"
+PHYSICAL_TF_PROTOCOL_V2 = "physical_tf_detection_ap_v2"
+DEFAULT_PHYSICAL_TF_PROTOCOL = PHYSICAL_TF_PROTOCOL_V2
+
 IOU_THRESHOLDS_V1 = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-PROTOCOL_CONFIG_V1 = {
+
+_BASE_PROTOCOL_CONFIG = {
     "iou_thresholds": IOU_THRESHOLDS_V1,
     "ap_interpolation": "101_point_max_precision",
     "ap_recall_points": 101,
@@ -21,6 +25,21 @@ PROTOCOL_CONFIG_V1 = {
         "class_id",
     ],
 }
+
+PROTOCOL_CONFIG_V1 = {
+    **_BASE_PROTOCOL_CONFIG,
+    "gt_duplicate_policy": "keep_all",
+    "ground_truth_view": "raw",
+}
+
+PROTOCOL_CONFIG_V2 = {
+    **_BASE_PROTOCOL_CONFIG,
+    "gt_duplicate_policy": "exact_physical_class_dedup",
+    "ground_truth_view": "evaluation_canonical",
+}
+
+# Compatibility alias for old imports only; it must continue to mean v1.
+PHYSICAL_TF_PROTOCOL = PHYSICAL_TF_PROTOCOL_V1
 
 
 class DatasetSelection(BaseModel):
