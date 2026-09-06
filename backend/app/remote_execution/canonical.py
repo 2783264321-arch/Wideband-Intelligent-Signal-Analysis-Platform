@@ -39,10 +39,11 @@ def _encode(value: object) -> bytes:
     if isinstance(value, (list, tuple)):
         return b"[" + b",".join(_encode(item) for item in value) + b"]"
     if isinstance(value, dict):
-        parts = []
-        for key in sorted(value):
+        for key in value:
             if not isinstance(key, str):
                 raise ValueError(f"non-string dict key in canonical payload: {key!r}")
+        parts = []
+        for key in sorted(value):
             key_bytes = json.dumps(key, ensure_ascii=False).encode("utf-8")
             parts.append(key_bytes + b":" + _encode(value[key]))
         return b"{" + b",".join(parts) + b"}"

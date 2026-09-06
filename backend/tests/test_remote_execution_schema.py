@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -11,6 +12,7 @@ from app.remote_execution.schema import (
     RemoteExecutionRequestV1,
     RemoteItemStatusV1,
     RemoteRecordingRefV1,
+    parse_remote_execution_batch_json,
 )
 
 
@@ -186,3 +188,138 @@ def test_valid_batch_status_parses():
     )
     assert status.status == "running"
     assert status.items[0].result_relative_path is None
+
+
+@pytest.mark.parametrize("good", [
+    "SpaceNet",
+    "test",
+    "0",
+    "000000",
+    "req_000000",
+    "run_a",
+    "batch_x",
+    "spacenet_14",
+    "zoomspec_yolo26n_aug_combined_frn_v3",
+    "1.0.0",
+])
+def test_safe_wire_identifier_accepted(good):
+    recording = _recording(dataset_name=good, dataset_split=good, dataset_key=good)
+    batch = _batch(batch_id=good, pipeline={"id": good, "version": "1.0.0"})
+    assert batch.batch_id == good
+    assert recording.dataset_key == good
+
+
+@pytest.mark.parametrize("bad", [
+    "../escape",
+    "./x",
+    "/x",
+    "a/b",
+    r"a\b",
+    "C:\\tmp",
+    "abc def",
+    " leading",
+    "trailing ",
+    "",
+])
+def test_unsafe_wire_identifier_rejected(bad):
+    with pytest.raises(ValidationError):
+        _batch(batch_id=bad)
+    with pytest.raises(ValidationError):
+        _item(item_key=bad)
+    with pytest.raises(ValidationError):
+        _recording(dataset_key=bad)
+
+
+def test_valid_relative_result_path_accepted():
+    status = RemoteItemStatusV1(
+        item_key="000000", status="completed",
+        result_relative_path="results/000000/analysis_result.zip",
+    )
+    assert status.result_relative_path == "results/000000/analysis_result.zip"
+
+
+@pytest.mark.parametrize("bad", [
+    "/tmp/a.zip",
+    r"\absolute",
+    r"C:\tmp\a.zip",
+    "C:/tmp/a.zip",
+    "../a.zip",
+    "results/../a.zip",
+    r"results\..\a.zip",
+    r".\result.zip",
+    "./result.zip",
+    "result.zip\x00junk",
+    " result.zip",
+    "result.zip ",
+])
+def test_unsafe_result_path_rejected(bad):
+    with pytest.raises(ValidationError):
+        RemoteItemStatusV1(item_key="000000", status="completed", result_relative_path=bad)
+
+
+def test_parse_remote_execution_batch_json_round_trips():
+    batch = _batch()
+    raw = batch.model_dump_json().encode("utf-8")
+    parsed = parse_remote_execution_batch_json(raw)
+    assert isinstance(parsed, RemoteExecutionBatchV1)
+    assert parsed.batch_id == batch.batch_id
+    assert parsed.request_sha256 == batch.request_sha256
+    assert parsed.items[0].item_key == "000000"
+
+
+def test_parse_duplicate_top_level_key_rejected():
+    batch = _batch()
+    data = batch.model_dump()
+    text = json.dumps(
+        {key: value for key, value in data.items() if key != "batch_id"},
+        separators=(",", ":"),
+    )
+    raw = (text[:-1] + ',"batch_id":"first","batch_id":"second"}').encode("utf-8")
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        parse_remote_execution_batch_json(raw)
+
+
+def test_parse_duplicate_nested_parameter_key_rejected():
+    batch = _batch()
+    text = json.dumps(batch.model_dump(), separators=(",", ":"))
+    raw = text.replace('"parameters":{}', '"parameters":{"dup":1,"dup":2}').encode("utf-8")
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        parse_remote_execution_batch_json(raw)
+
+
+def test_parse_non_finite_json_constant_rejected():
+    batch = _batch()
+    data = batch.model_dump()
+    data["items"][0]["parameters"] = {"x": float("nan")}
+    raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    assert "NaN" in raw.decode("utf-8")
+    with pytest.raises(ValueError):
+        parse_remote_execution_batch_json(raw)
+
+
+def test_parse_invalid_utf8_bytes_rejected():
+    with pytest.raises(ValueError):
+        parse_remote_execution_batch_json(b'{"schema_version":1,"batch_id":"\xff"}')
+
+
+def test_parse_top_level_must_be_object():
+    with pytest.raises(ValueError):
+        parse_remote_execution_batch_json(b"[1,2,3]")
+
+
+def test_parse_extra_field_rejected():
+    batch = _batch()
+    data = batch.model_dump()
+    data["extra_field"] = "nope"
+    raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    with pytest.raises(ValidationError):
+        parse_remote_execution_batch_json(raw)
+
+
+def test_parse_schema_version_string_rejected():
+    batch = _batch()
+    data = batch.model_dump()
+    data["schema_version"] = "1"
+    raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    with pytest.raises(ValidationError):
+        parse_remote_execution_batch_json(raw)

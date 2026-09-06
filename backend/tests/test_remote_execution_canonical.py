@@ -185,3 +185,8 @@ def test_canonical_bytes_are_utf8_json_without_insignificant_whitespace():
     text = raw.decode("utf-8")
     assert not text.startswith(" ")
     assert " : " not in text and ": " not in text
+
+
+def test_canonical_rejects_non_string_dict_key_with_intentional_error():
+    with pytest.raises(ValueError, match="non-string dict key"):
+        canonical_request_bytes({"x": {"a": 1, 2: "bad"}})
