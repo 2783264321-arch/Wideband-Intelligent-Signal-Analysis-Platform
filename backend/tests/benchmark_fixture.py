@@ -46,10 +46,10 @@ def add_ground_truth(session, *, gt_id, recording_id, class_id, class_name, t0, 
 
 
 def add_run(session, *, run_id, recording_id, pipeline_id="pipeline_x", pipeline_version="1.0",
-            executor="imported", status="completed", created_at=None):
+            executor="imported", status="completed", created_at=None, parameters_json=None):
     session.add(AnalysisRunModel(
         id=run_id, recording_id=recording_id, pipeline_id=pipeline_id, pipeline_version=pipeline_version,
-        executor=executor, status=status, parameters_json={}, created_at=created_at,
+        executor=executor, status=status, parameters_json=parameters_json or {}, created_at=created_at,
     ))
     return run_id
 

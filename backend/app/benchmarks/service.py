@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 from uuid import uuid4
 
 from sqlalchemy import func, select, update
@@ -84,6 +85,61 @@ class RunResolutionEntry:
     candidate_run_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ImportedBatchCatalogEntry:
+    import_fingerprint: str
+    pipeline_id: str | None
+    pipeline_version: str | None
+    dataset_name: str | None
+    dataset_split: str | None
+    label_space: str | None
+    run_count: int
+    detection_count: int
+    archive_sha256: str | None
+    result_provenance: dict
+    transport_provenance: dict
+    ready: bool
+    inconsistency_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ImportedBatchResolutionEntry:
+    manifest_order: int
+    recording_id: str
+    recording_name: str
+    analysis_run_id: str
+    item_key: str
+
+
+@dataclass(frozen=True)
+class ImportedBatchResolutionPreview:
+    import_fingerprint: str
+    dataset_name: str
+    dataset_split: str
+    label_space: str
+    pipeline_id: str
+    pipeline_version: str
+    recording_manifest_hash: str
+    expected_recordings: int
+    resolved_recordings: int
+    missing_recordings: int
+    conflict_count: int
+    entries: tuple[ImportedBatchResolutionEntry, ...]
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _batch_import_payload(run: AnalysisRunModel) -> dict:
+    payload = (run.parameters_json or {}).get("batch_import")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _only_or_none(values):
+    unique = set(values)
+    return next(iter(unique)) if len(unique) == 1 else None
+
+
 class DatasetBenchmarkService:
     def __init__(self, session: Session):
         self.session = session
@@ -140,6 +196,216 @@ class DatasetBenchmarkService:
     def _build_frozen_manifest(self, dataset_name: str, dataset_split: str, label_space: str) -> FrozenRecordingManifest:
         manifests = self._load_recording_manifests(dataset_name, dataset_split, label_space)
         return build_recording_manifest(dataset_name, dataset_split, label_space, manifests)
+
+    # ---------- imported-batch derived read model ----------
+
+    def _batch_runs(self, import_fingerprint: str | None = None) -> list[AnalysisRunModel]:
+        candidates = list(self.session.scalars(
+            select(AnalysisRunModel)
+            .where(
+                AnalysisRunModel.executor == "imported",
+                AnalysisRunModel.status == "completed",
+            )
+            .order_by(AnalysisRunModel.id)
+        ).all())
+        selected = []
+        for run in candidates:
+            fingerprint = _batch_import_payload(run).get("import_fingerprint")
+            if not isinstance(fingerprint, str) or _SHA256_RE.fullmatch(fingerprint) is None:
+                continue
+            if import_fingerprint is None or fingerprint == import_fingerprint:
+                selected.append(run)
+        return selected
+
+    def _detection_counts(self, run_ids: list[str]) -> dict[str, int]:
+        if not run_ids:
+            return {}
+        return {
+            run_id: int(count)
+            for run_id, count in self.session.execute(
+                select(DetectionResultModel.run_id, func.count(DetectionResultModel.id))
+                .where(DetectionResultModel.run_id.in_(run_ids))
+                .group_by(DetectionResultModel.run_id)
+            ).all()
+        }
+
+    def resolve_imported_batch(self, import_fingerprint: str) -> ImportedBatchResolutionPreview:
+        runs = self._batch_runs(import_fingerprint)
+        if not runs:
+            raise PlatformError("IMPORTED_BATCH_NOT_FOUND", "Imported batch was not found.", 404)
+
+        metas = [_batch_import_payload(run) for run in runs]
+        item_keys = [meta.get("item_key") for meta in metas]
+        if any(not isinstance(key, str) or not key for key in item_keys) or len(set(item_keys)) != len(item_keys):
+            raise PlatformError(
+                "IMPORTED_BATCH_STATE_INCONSISTENT",
+                "Imported batch has missing or duplicate item keys.",
+                409,
+            )
+
+        recording_ids = [run.recording_id for run in runs]
+        if len(set(recording_ids)) != len(recording_ids):
+            raise PlatformError(
+                "IMPORTED_BATCH_STATE_INCONSISTENT",
+                "Imported batch maps more than one completed run to a Recording.",
+                409,
+            )
+
+        pipeline_ids = {run.pipeline_id for run in runs}
+        pipeline_versions = {run.pipeline_version for run in runs}
+        if len(pipeline_ids) != 1 or len(pipeline_versions) != 1:
+            raise PlatformError(
+                "IMPORTED_BATCH_STATE_INCONSISTENT",
+                "Imported batch contains mixed pipeline id/version values.",
+                409,
+            )
+
+        recordings = {
+            recording.id: recording
+            for recording in self.session.scalars(
+                select(RecordingModel).where(RecordingModel.id.in_(recording_ids))
+            ).all()
+        }
+        if set(recordings) != set(recording_ids):
+            raise PlatformError(
+                "IMPORTED_BATCH_STATE_INCONSISTENT",
+                "Imported batch references a missing Recording.",
+                409,
+            )
+
+        dataset_keys = {
+            (recording.dataset_name, recording.dataset_split, recording.label_space)
+            for recording in recordings.values()
+        }
+        if len(dataset_keys) != 1 or any(value is None for value in next(iter(dataset_keys))):
+            raise PlatformError(
+                "IMPORTED_BATCH_STATE_INCONSISTENT",
+                "Imported batch Recordings do not share one dataset/split/label-space identity.",
+                409,
+            )
+        dataset_name, dataset_split, label_space = next(iter(dataset_keys))
+        frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
+        frozen_ids = {entry.recording_id for entry in frozen.entries}
+        if set(recording_ids) != frozen_ids:
+            raise PlatformError(
+                "IMPORTED_BATCH_DATASET_INCOMPLETE",
+                "Imported batch does not cover the current frozen Recording manifest exactly.",
+                422,
+            )
+
+        # M8.6B did not persist the outer manifest hash per run. Future provenance may.
+        # If present, it is a consistency assertion, not the source of truth.
+        persisted_manifest_hashes = {
+            meta.get("recording_manifest_hash")
+            for meta in metas
+            if meta.get("recording_manifest_hash") is not None
+        }
+        if persisted_manifest_hashes and persisted_manifest_hashes != {frozen.sha256}:
+            raise PlatformError(
+                "IMPORTED_BATCH_DATASET_INCOMPLETE",
+                "Imported batch manifest provenance does not match the current frozen Recording manifest.",
+                422,
+            )
+
+        run_by_recording = {run.recording_id: run for run in runs}
+        item_key_by_recording = {run.recording_id: _batch_import_payload(run)["item_key"] for run in runs}
+        entries = tuple(
+            ImportedBatchResolutionEntry(
+                manifest_order=index,
+                recording_id=entry.recording_id,
+                recording_name=entry.name,
+                analysis_run_id=run_by_recording[entry.recording_id].id,
+                item_key=item_key_by_recording[entry.recording_id],
+            )
+            for index, entry in enumerate(frozen.entries)
+        )
+        return ImportedBatchResolutionPreview(
+            import_fingerprint=import_fingerprint,
+            dataset_name=dataset_name,
+            dataset_split=dataset_split,
+            label_space=label_space,
+            pipeline_id=next(iter(pipeline_ids)),
+            pipeline_version=next(iter(pipeline_versions)),
+            recording_manifest_hash=frozen.sha256,
+            expected_recordings=len(frozen.entries),
+            resolved_recordings=len(entries),
+            missing_recordings=0,
+            conflict_count=0,
+            entries=entries,
+        )
+
+    def list_imported_batches(self) -> list[ImportedBatchCatalogEntry]:
+        runs = self._batch_runs()
+        groups: dict[str, list[AnalysisRunModel]] = {}
+        for run in runs:
+            fingerprint = _batch_import_payload(run)["import_fingerprint"]
+            groups.setdefault(fingerprint, []).append(run)
+
+        all_run_ids = [run.id for run in runs]
+        detection_counts = self._detection_counts(all_run_ids)
+        recording_ids = {run.recording_id for run in runs}
+        recordings = {
+            recording.id: recording
+            for recording in self.session.scalars(
+                select(RecordingModel).where(RecordingModel.id.in_(recording_ids))
+            ).all()
+        } if recording_ids else {}
+
+        entries = []
+        for fingerprint in sorted(groups):
+            group = sorted(groups[fingerprint], key=lambda run: run.id)
+            metas = [_batch_import_payload(run) for run in group]
+            group_recordings = [recordings.get(run.recording_id) for run in group]
+            valid_recordings = [recording for recording in group_recordings if recording is not None]
+
+            pipeline_id = _only_or_none(run.pipeline_id for run in group)
+            pipeline_version = _only_or_none(run.pipeline_version for run in group)
+            dataset_name = _only_or_none(recording.dataset_name for recording in valid_recordings)
+            dataset_split = _only_or_none(recording.dataset_split for recording in valid_recordings)
+            label_space = _only_or_none(recording.label_space for recording in valid_recordings)
+            archive_sha256 = _only_or_none(meta.get("archive_sha256") for meta in metas)
+
+            result_payloads = [meta.get("result_provenance") or {} for meta in metas]
+            transport_payloads = [meta.get("transport_provenance") or {} for meta in metas]
+            result_provenance = result_payloads[0] if all(x == result_payloads[0] for x in result_payloads) else {}
+            transport_provenance = transport_payloads[0] if all(x == transport_payloads[0] for x in transport_payloads) else {}
+
+            try:
+                resolved = self.resolve_imported_batch(fingerprint)
+                ready = True
+                reasons: tuple[str, ...] = ()
+                pipeline_id = resolved.pipeline_id
+                pipeline_version = resolved.pipeline_version
+                dataset_name = resolved.dataset_name
+                dataset_split = resolved.dataset_split
+                label_space = resolved.label_space
+            except PlatformError as exc:
+                ready = False
+                reasons = (exc.code,)
+
+            entries.append(ImportedBatchCatalogEntry(
+                import_fingerprint=fingerprint,
+                pipeline_id=pipeline_id,
+                pipeline_version=pipeline_version,
+                dataset_name=dataset_name,
+                dataset_split=dataset_split,
+                label_space=label_space,
+                run_count=len(group),
+                detection_count=sum(detection_counts.get(run.id, 0) for run in group),
+                archive_sha256=archive_sha256,
+                result_provenance=result_provenance,
+                transport_provenance=transport_provenance,
+                ready=ready,
+                inconsistency_reasons=reasons,
+            ))
+
+        return sorted(
+            entries,
+            key=lambda item: (
+                item.dataset_name or "", item.dataset_split or "",
+                item.pipeline_id or "", item.pipeline_version or "", item.import_fingerprint,
+            ),
+        )
 
     def prepare_manifest(self, dataset_name: str, dataset_split: str, label_space: str) -> ManifestPreview:
         frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
