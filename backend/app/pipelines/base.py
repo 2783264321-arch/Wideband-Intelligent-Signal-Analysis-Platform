@@ -17,6 +17,8 @@ class PipelineDefinition:
     stages: tuple[str, ...]
     inspectable_stages: tuple[str, ...]
     task_capability: str = "classification"
+    executors_supported: tuple[str, ...] = ("local_cpu",)
+    recommended_executor: str = "local_cpu"
 
 
 @dataclass(frozen=True)

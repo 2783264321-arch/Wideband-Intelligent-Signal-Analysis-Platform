@@ -41,3 +41,14 @@ class PipelineDefinitionRead(BaseModel):
     stages: list[str]
     inspectable_stages: list[str]
     task_capability: str
+    executors_supported: list[str]
+    recommended_executor: str
+
+
+class ExecutorAvailabilityRead(BaseModel):
+    executor: str
+    available: bool
+    reason_code: str | None = None
+    reason_message: str | None = None
+    remote_profile: str | None = None
+    recommended: bool = False

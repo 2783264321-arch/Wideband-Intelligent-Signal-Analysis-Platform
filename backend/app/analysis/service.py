@@ -8,9 +8,11 @@ from uuid import uuid4
 
 from app.analysis.job_manager import LocalJobManager
 from app.analysis.model import AnalysisRunModel
+from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.errors import PlatformError
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
+from app.remote_execution.executor import RemoteExecutorProbe
 
 
 def mark_stale_running_runs_interrupted(session: Session) -> int:
@@ -30,10 +32,17 @@ def mark_stale_running_runs_interrupted(session: Session) -> int:
 
 
 class AnalysisService:
-    def __init__(self, session: Session, registry: PipelineRegistry, job_manager: LocalJobManager):
+    def __init__(
+        self,
+        session: Session,
+        registry: PipelineRegistry,
+        job_manager: LocalJobManager,
+        remote_executor_probe: RemoteExecutorProbe | None = None,
+    ):
         self.session = session
         self.registry = registry
         self.job_manager = job_manager
+        self.remote_executor_probe = remote_executor_probe
 
     def get(self, run_id: str) -> AnalysisRunModel:
         run = self.session.get(AnalysisRunModel, run_id)
@@ -48,6 +57,66 @@ class AnalysisService:
         if status is not None:
             statement = statement.where(AnalysisRunModel.status == status)
         return list(self.session.scalars(statement.order_by(AnalysisRunModel.created_at, AnalysisRunModel.id)).all())
+
+    def executor_availability(self, recording_id: str, pipeline_id: str) -> ExecutorAvailabilityRead:
+        recording = self.session.get(RecordingModel, recording_id)
+        if recording is None:
+            raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+        pipeline = self.registry.get(pipeline_id)
+        definition = pipeline.definition
+
+        if "remote_gpu" not in definition.executors_supported:
+            return ExecutorAvailabilityRead(
+                executor="remote_gpu",
+                available=False,
+                reason_code="PIPELINE_NOT_REMOTE_CAPABLE",
+                reason_message="Pipeline does not support remote GPU execution.",
+                remote_profile=None,
+                recommended=False,
+            )
+
+        if recording.label_space != definition.label_space and definition.task_capability != "detection_localization":
+            return ExecutorAvailabilityRead(
+                executor="remote_gpu",
+                available=False,
+                reason_code="PIPELINE_INCOMPATIBLE",
+                reason_message="Pipeline cannot run for this recording label space.",
+                remote_profile=None,
+                recommended=False,
+            )
+
+        if self.remote_executor_probe is None:
+            return ExecutorAvailabilityRead(
+                executor="remote_gpu",
+                available=False,
+                reason_code="REMOTE_EXECUTOR_UNAVAILABLE",
+                reason_message="No remote executor profile is configured.",
+                remote_profile=None,
+                recommended=False,
+            )
+
+        result = self.remote_executor_probe.availability(
+            recording,
+            definition,
+            recording.source_data_sha256,
+        )
+        if result.available:
+            return ExecutorAvailabilityRead(
+                executor="remote_gpu",
+                available=True,
+                reason_code=None,
+                reason_message=None,
+                remote_profile=result.remote_profile,
+                recommended=(definition.recommended_executor == "remote_gpu"),
+            )
+        return ExecutorAvailabilityRead(
+            executor="remote_gpu",
+            available=False,
+            reason_code=result.reason_code or "REMOTE_EXECUTOR_UNAVAILABLE",
+            reason_message=result.reason_message,
+            remote_profile=result.remote_profile,
+            recommended=False,
+        )
 
     def create_run(
         self,
