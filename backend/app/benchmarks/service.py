@@ -77,6 +77,20 @@ class ManifestEntry:
 
 
 @dataclass(frozen=True)
+class DatasetEvaluationItemView:
+    id: str
+    evaluation_id: str
+    manifest_order: int
+    recording_id: str
+    recording_name: str
+    analysis_run_id: str | None
+    status: str
+    gt_count: int
+    prediction_count: int
+    error_reason: str | None
+
+
+@dataclass(frozen=True)
 class RunResolutionEntry:
     manifest_order: int
     recording_id: str
@@ -645,17 +659,29 @@ class DatasetBenchmarkService:
         )
     
     
-    def list_items(self, evaluation_id: str) -> list[DatasetEvaluationItemModel]:
-        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
-        if evaluation is None:
-            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
-        return list(
-            self.session.scalars(
-                select(DatasetEvaluationItemModel)
-                .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
-                .order_by(DatasetEvaluationItemModel.manifest_order)
-            ).all()
-        )
+    def list_items(self, evaluation_id: str) -> list[DatasetEvaluationItemView]:
+        self.get_evaluation(evaluation_id)
+        rows = self.session.execute(
+            select(DatasetEvaluationItemModel, RecordingModel.name)
+            .join(RecordingModel, DatasetEvaluationItemModel.recording_id == RecordingModel.id)
+            .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
+            .order_by(DatasetEvaluationItemModel.manifest_order)
+        ).all()
+        return [
+            DatasetEvaluationItemView(
+                id=item.id,
+                evaluation_id=item.evaluation_id,
+                manifest_order=item.manifest_order,
+                recording_id=item.recording_id,
+                recording_name=recording_name,
+                analysis_run_id=item.analysis_run_id,
+                status=item.status,
+                gt_count=item.gt_count,
+                prediction_count=item.prediction_count,
+                error_reason=item.error_reason,
+            )
+            for item, recording_name in rows
+        ]
     
     
     def compare_evaluations(self, evaluation_a_id: str, evaluation_b_id: str) -> dict:

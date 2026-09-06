@@ -109,6 +109,7 @@ class DatasetEvaluationItemRead(BaseModel):
     evaluation_id: str
     manifest_order: int
     recording_id: str
+    recording_name: str
     analysis_run_id: str | None
     status: str
     gt_count: int

@@ -84,9 +84,14 @@ def test_create_get_list_items_routes(client):
     assert detail["id"] == created["id"]
     assert detail["evaluation_protocol"] == "physical_tf_detection_ap_v2"
 
-    items = client.get(f"/api/dataset-benchmarks/{created['id']}/items").json()
+    items_response = client.get(f"/api/dataset-benchmarks/{created['id']}/items")
+    assert items_response.status_code == 200
+    items = items_response.json()
     assert len(items) == 2
-    assert items[0]["analysis_run_id"] == "run_a"
+    assert [(item["recording_id"], item["recording_name"], item["analysis_run_id"]) for item in items] == [
+        ("rec_a", "a", "run_a"),
+        ("rec_b", "b", "run_b"),
+    ]
 
 
 def test_stale_manifest_rejected(client):
