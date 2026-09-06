@@ -3,7 +3,7 @@ import pytest
 from benchmark_fixture import add_ground_truth, add_recording, add_run
 
 from app.benchmarks.manifest import ManifestGroundTruth, ManifestRecording, build_recording_manifest
-from app.benchmarks.schema import PHYSICAL_TF_PROTOCOL
+from app.benchmarks.schema import PHYSICAL_TF_PROTOCOL_V2
 from app.benchmarks.service import DatasetBenchmarkService
 from app.core.errors import PlatformError
 
@@ -107,7 +107,7 @@ def test_create_evaluation_freezes_exact_recording_to_run_mapping(client):
     assert evaluation.missing_recordings == 2
     assert evaluation.coverage == pytest.approx(1 / 3)
     assert evaluation.comparable is False
-    assert evaluation.evaluation_protocol == PHYSICAL_TF_PROTOCOL
+    assert evaluation.evaluation_protocol == PHYSICAL_TF_PROTOCOL_V2
     by_order = {item.manifest_order: item for item in evaluation.items}
     assert by_order[0].analysis_run_id == "run_a1"
     assert by_order[0].status == "included"
@@ -281,3 +281,54 @@ def test_capability_unknown_nonimported_run(client):
     result = classification_applicability(_run("mystery", executor="local_cpu"), _recording("spacenet_14"), None)
     assert result.applicable is False
     assert result.reason == "unknown_classification_semantics"
+
+
+def _seed_duplicate_gt_recording(client):
+    db = client.app.state.database
+    with db.session_factory() as session:
+        add_recording(session, recording_id="rec_a", name="a")
+        for gt_id in ("gt_1", "gt_2"):
+            add_ground_truth(
+                session, gt_id=gt_id, recording_id="rec_a", class_id=9, class_name="LoRa 250kHz",
+                t0=0.01, t1=0.02, f0=2_440_600_000.0, f1=2_440_700_000.0,
+            )
+        add_run(session, run_id="run_a", recording_id="rec_a")
+        session.commit()
+
+
+def test_create_defaults_to_v2_and_item_gt_count_is_canonical(client):
+    _seed_duplicate_gt_recording(client)
+    db = client.app.state.database
+    with db.session_factory() as session:
+        svc = DatasetBenchmarkService(session)
+        preview = svc.prepare_manifest("SpaceNet", "test", "spacenet_14")
+        evaluation = svc.create_evaluation(
+            name="v2", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+            recording_manifest_hash=preview.recording_manifest_hash,
+            items=[{"recording_id": "rec_a", "analysis_run_id": "run_a"}],
+        )
+        assert evaluation.evaluation_protocol == PHYSICAL_TF_PROTOCOL_V2
+        assert evaluation.protocol_config_json["gt_duplicate_policy"] == "exact_physical_class_dedup"
+        assert evaluation.items[0].gt_count == 1
+
+
+def test_v2_creation_does_not_change_raw_manifest_or_raw_gt_rows(client):
+    from sqlalchemy import func, select
+    from app.ground_truth.model import GroundTruthModel
+
+    _seed_duplicate_gt_recording(client)
+    db = client.app.state.database
+    with db.session_factory() as session:
+        svc = DatasetBenchmarkService(session)
+        before = svc.prepare_manifest("SpaceNet", "test", "spacenet_14")
+        raw_before = session.scalar(select(func.count(GroundTruthModel.id)))
+        evaluation = svc.create_evaluation(
+            name="v2", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+            recording_manifest_hash=before.recording_manifest_hash,
+            items=[{"recording_id": "rec_a", "analysis_run_id": "run_a"}],
+        )
+        after = svc.prepare_manifest("SpaceNet", "test", "spacenet_14")
+        raw_after = session.scalar(select(func.count(GroundTruthModel.id)))
+        assert raw_before == raw_after == 2
+        assert before.recording_manifest_hash == after.recording_manifest_hash
+        assert evaluation.items[0].gt_count == 1

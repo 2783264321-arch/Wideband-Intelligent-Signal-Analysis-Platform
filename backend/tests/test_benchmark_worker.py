@@ -1,12 +1,14 @@
+from copy import deepcopy
 import time
 
 import pytest
+from sqlalchemy import select
 
 from benchmark_fixture import add_detection, add_ground_truth, add_recording, add_run
 
-from app.benchmarks.model import DatasetEvaluationModel
+from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
 from app.benchmarks.service import DatasetBenchmarkService
-from app.benchmarks.schema import PHYSICAL_TF_PROTOCOL
+from app.benchmarks.schema import PHYSICAL_TF_PROTOCOL_V1, PHYSICAL_TF_PROTOCOL_V2
 from app.benchmarks.worker import execute_benchmark
 from app.db.base import Base, load_domain_models
 from app.db.session import Database
@@ -162,7 +164,7 @@ def test_retry_keeps_exact_membership(client, settings):
     assert evaluation.status == "running" or evaluation.status == "pending"
     item_run_ids = [item.analysis_run_id for item in sorted(evaluation.items, key=lambda i: i.manifest_order)]
     assert item_run_ids == ["run_a", "run_b"]
-    assert evaluation.evaluation_protocol == PHYSICAL_TF_PROTOCOL
+    assert evaluation.evaluation_protocol == PHYSICAL_TF_PROTOCOL_V2
 
 
 def test_completed_evaluation_cannot_rerun(client, settings):
@@ -282,3 +284,86 @@ def test_progress_stages_skip_class_aware_for_detection_only(client, settings, m
     assert class_aware_called["called"] is False  # detection-only never enters class_aware_ap stage
     evaluation = _get(client, evaluation_id)
     assert evaluation.progress_stage == "completed"
+
+
+def _build_duplicate_gt_evaluation(client, *, protocol=None):
+    db = client.app.state.database
+    with db.session_factory() as session:
+        add_recording(session, recording_id="rec_dup", name="dup")
+        for gt_id in ("gt_dup_1", "gt_dup_2"):
+            add_ground_truth(
+                session, gt_id=gt_id, recording_id="rec_dup", class_id=9, class_name="LoRa 250kHz",
+                t0=0.01, t1=0.02, f0=2_440_600_000.0, f1=2_440_700_000.0,
+            )
+        add_run(session, run_id="run_dup", recording_id="rec_dup", executor="imported")
+        add_detection(
+            session, detection_id="det_dup", run_id="run_dup", class_id=9, class_name="LoRa 250kHz",
+            confidence=0.9, t0=0.01, t1=0.02, f0=2_440_600_000.0, f1=2_440_700_000.0,
+        )
+        session.commit()
+
+    with db.session_factory() as session:
+        svc = DatasetBenchmarkService(session)
+        preview = svc.prepare_manifest("SpaceNet", "test", "spacenet_14")
+        kwargs = {} if protocol is None else {"evaluation_protocol": protocol}
+        evaluation = svc.create_evaluation(
+            name=f"dup-{protocol or 'default'}",
+            dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+            recording_manifest_hash=preview.recording_manifest_hash,
+            items=[{"recording_id": "rec_dup", "analysis_run_id": "run_dup"}],
+            **kwargs,
+        )
+        return evaluation.id
+
+
+def test_v2_worker_uses_one_canonical_gt_for_every_metric(client, settings):
+    evaluation_id = _build_duplicate_gt_evaluation(client)
+    execute_benchmark(evaluation_id, settings)
+    evaluation = _get(client, evaluation_id)
+    aggregate = evaluation.aggregate_metrics_json
+
+    assert aggregate["ground_truth"] == {
+        "raw_count": 2,
+        "canonical_count": 1,
+        "duplicates_removed": 1,
+        "duplicate_policy": "exact_physical_class_dedup",
+    }
+    assert aggregate["localization"]["operating"]["tp"] == 1
+    assert aggregate["localization"]["operating"]["fn"] == 0
+    assert aggregate["localization"]["ap50"] == 1.0
+    assert aggregate["classification_on_matched"]["matched_count"] == 1
+    assert aggregate["classification_on_matched"]["class_correct"] == 1
+    assert aggregate["class_aware"]["operating"]["tp"] == 1
+    assert aggregate["class_aware"]["operating"]["fn"] == 0
+    assert evaluation.per_class_metrics_json[0]["gt_count"] == 1
+    with client.app.state.database.session_factory() as session:
+        item = session.scalar(
+            select(DatasetEvaluationItemModel)
+            .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
+        )
+        assert item.gt_count == 1
+
+
+def test_old_v1_row_without_new_gt_policy_config_still_uses_raw_gt(client, settings):
+    evaluation_id = _build_duplicate_gt_evaluation(client, protocol=PHYSICAL_TF_PROTOCOL_V1)
+    db = client.app.state.database
+    with db.session_factory() as session:
+        evaluation = session.get(DatasetEvaluationModel, evaluation_id)
+        old_config = deepcopy(evaluation.protocol_config_json)
+        old_config.pop("gt_duplicate_policy", None)
+        old_config.pop("ground_truth_view", None)
+        evaluation.protocol_config_json = old_config
+        session.commit()
+
+    execute_benchmark(evaluation_id, settings)
+    evaluation = _get(client, evaluation_id)
+    aggregate = evaluation.aggregate_metrics_json
+    assert "ground_truth" not in aggregate
+    assert aggregate["localization"]["operating"]["tp"] == 1
+    assert aggregate["localization"]["operating"]["fn"] == 1
+    with client.app.state.database.session_factory() as session:
+        item = session.scalar(
+            select(DatasetEvaluationItemModel)
+            .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
+        )
+        assert item.gt_count == 2

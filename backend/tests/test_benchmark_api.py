@@ -82,7 +82,7 @@ def test_create_get_list_items_routes(client):
 
     detail = client.get(f"/api/dataset-benchmarks/{created['id']}").json()
     assert detail["id"] == created["id"]
-    assert detail["evaluation_protocol"] == "physical_tf_detection_ap_v1"
+    assert detail["evaluation_protocol"] == "physical_tf_detection_ap_v2"
 
     items = client.get(f"/api/dataset-benchmarks/{created['id']}/items").json()
     assert len(items) == 2
@@ -193,7 +193,7 @@ def test_tiny_end_to_end_benchmark_through_subprocess(client):
     assert detail["missing_recordings"] == 0
     assert detail["coverage"] == 1.0
     assert detail["comparable"] is True
-    assert detail["evaluation_protocol"] == "physical_tf_detection_ap_v1"
+    assert detail["evaluation_protocol"] == "physical_tf_detection_ap_v2"
     aggregate = detail["aggregate_metrics_json"]
     assert aggregate["localization"]["ap50"] == 1.0
     assert aggregate["classification_applicable"] is True
@@ -213,3 +213,4 @@ def test_tiny_end_to_end_benchmark_through_subprocess(client):
     assert refreshed["status"] == "completed"
     refreshed_items = client.get(f"/api/dataset-benchmarks/{created['id']}/items").json()
     assert [item["analysis_run_id"] for item in refreshed_items] == ["run_a", "run_b"]
+

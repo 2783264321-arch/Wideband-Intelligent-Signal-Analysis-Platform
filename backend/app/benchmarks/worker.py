@@ -9,6 +9,8 @@ from app.analysis.model import AnalysisRunModel
 from app.benchmarks.job_manager import LocalBenchmarkJobManager
 from app.benchmarks.loader import BenchmarkInputLoader, LoadedBenchmark
 from app.benchmarks.model import DatasetEvaluationModel
+from app.benchmarks.protocol import build_protocol_view
+from app.benchmarks.schema import PHYSICAL_TF_PROTOCOL_V2
 from app.core.config import Settings
 from app.core.errors import PlatformError
 from app.db.base import Base, load_domain_models
@@ -126,6 +128,7 @@ def execute_benchmark(evaluation_id: str, settings: Settings | None = None) -> N
 
             loader = BenchmarkInputLoader(session)
             loaded = loader.load(evaluation_id)
+            view = build_protocol_view(evaluation.evaluation_protocol, loaded)
             evaluation.progress_stage = "diagnostics"
             session.commit()
 
@@ -149,30 +152,38 @@ def execute_benchmark(evaluation_id: str, settings: Settings | None = None) -> N
 
             evaluation.progress_stage = "diagnostics"
             session.commit()
-            diagnostics = compute_dataset_diagnostics(list(loaded.samples), classification_applicable=applicable)
+            diagnostics = compute_dataset_diagnostics(list(view.samples), classification_applicable=applicable)
 
             evaluation.progress_stage = "localization_ap"
             session.commit()
-            localization_ap = localization_ap_summary(list(loaded.ground_truths), list(loaded.predictions))
+            localization_ap = localization_ap_summary(list(view.ground_truths), list(view.predictions))
 
             class_aware_ap = None
             if applicable:
                 evaluation.progress_stage = "class_aware_ap"
                 session.commit()
-                class_aware_ap = class_aware_ap_summary(list(loaded.ground_truths), list(loaded.predictions))
+                class_aware_ap = class_aware_ap_summary(list(view.ground_truths), list(view.predictions))
 
             aggregate, per_class, confusion = _build_result_jsons(
                 diagnostics, localization_ap, class_aware_ap, applicable, reason)
+            if evaluation.evaluation_protocol == PHYSICAL_TF_PROTOCOL_V2:
+                aggregate["ground_truth"] = {
+                    "raw_count": view.ground_truth_accounting.raw_count,
+                    "canonical_count": view.ground_truth_accounting.canonical_count,
+                    "duplicates_removed": view.ground_truth_accounting.removed_count,
+                    "duplicate_policy": "exact_physical_class_dedup",
+                }
             evaluation.progress_stage = "finalizing"
             session.commit()
 
             evaluation.aggregate_metrics_json = aggregate
             evaluation.per_class_metrics_json = per_class
             evaluation.confusion_json = confusion
+            sample_by_recording = {sample.recording_id: sample for sample in view.samples}
             for item in evaluation.items:
-                sample = next((s for s in loaded.samples if s.recording_id == item.recording_id), None)
+                sample = sample_by_recording.get(item.recording_id)
                 if sample is not None:
-                    item.gt_count = len(sample.ground_truths)
+                    assert item.gt_count == len(sample.ground_truths)
                     item.prediction_count = len(sample.predictions)
             evaluation.status = "completed"
             evaluation.progress_stage = "completed"

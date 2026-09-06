@@ -16,7 +16,14 @@ from app.benchmarks.manifest import (
     build_recording_manifest,
 )
 from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
-from app.benchmarks.schema import PHYSICAL_TF_PROTOCOL, PROTOCOL_CONFIG_V1
+from app.benchmarks.protocol import count_ground_truths_for_protocol
+from app.benchmarks.schema import (
+    DEFAULT_PHYSICAL_TF_PROTOCOL,
+    PHYSICAL_TF_PROTOCOL_V1,
+    PHYSICAL_TF_PROTOCOL_V2,
+    PROTOCOL_CONFIG_V1,
+    PROTOCOL_CONFIG_V2,
+)
 from app.core.errors import PlatformError
 from app.detections.model import DetectionResultModel
 from app.ground_truth.model import GroundTruthModel
@@ -44,6 +51,14 @@ def mark_stale_running_evaluations_interrupted(session: Session) -> int:
     result = session.execute(statement)
     session.commit()
     return int(result.rowcount or 0)
+
+
+def _protocol_config_for(protocol: str) -> dict:
+    if protocol == PHYSICAL_TF_PROTOCOL_V1:
+        return deepcopy(PROTOCOL_CONFIG_V1)
+    if protocol == PHYSICAL_TF_PROTOCOL_V2:
+        return deepcopy(PROTOCOL_CONFIG_V2)
+    raise PlatformError("UNSUPPORTED_EVALUATION_PROTOCOL", f"Unsupported evaluation protocol: {protocol}", 422)
 
 
 @dataclass(frozen=True)
@@ -199,6 +214,7 @@ class DatasetBenchmarkService:
         recording_manifest_hash: str,
         items: list[dict],
         allow_incomplete: bool = False,
+        evaluation_protocol: str = DEFAULT_PHYSICAL_TF_PROTOCOL,
     ) -> DatasetEvaluationModel:
         frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
         if frozen.sha256 != recording_manifest_hash:
@@ -269,8 +285,8 @@ class DatasetBenchmarkService:
             coverage=0.0,
             comparable=False,
             recording_manifest_hash=frozen.sha256,
-            evaluation_protocol=PHYSICAL_TF_PROTOCOL,
-            protocol_config_json=deepcopy(PROTOCOL_CONFIG_V1),
+            evaluation_protocol=evaluation_protocol,
+            protocol_config_json=_protocol_config_for(evaluation_protocol),
         )
         item_rows = []
         evaluated = 0
@@ -284,7 +300,10 @@ class DatasetBenchmarkService:
                 status = "included"
                 evaluated += 1
             recording_id = item["recording_id"]
-            gt_count = len(manifest_by_id[recording_id].ground_truth)
+            gt_count = count_ground_truths_for_protocol(
+                evaluation_protocol,
+                manifest_by_id[recording_id].ground_truth,
+            )
             item_rows.append(DatasetEvaluationItemModel(
                 id=f"evalitem_{uuid4().hex}",
                 evaluation_id=evaluation_id,
