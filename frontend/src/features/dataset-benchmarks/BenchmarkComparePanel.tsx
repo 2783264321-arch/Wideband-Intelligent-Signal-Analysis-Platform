@@ -1,7 +1,13 @@
 import { Alert, Button, Card, Select, Space, Spin, Table } from "antd";
 import { useEffect, useState } from "react";
-import { compareDatasetBenchmarks, listDatasetBenchmarkItems } from "../../api/client";
+import { compareDatasetBenchmarks, listDatasetBenchmarkItems, PlatformApiError } from "../../api/client";
 import type { DatasetBenchmarkCompareResult, DatasetEvaluationItem } from "../../api/types";
+
+function toErrorText(error: unknown): string {
+  if (error instanceof PlatformApiError) return error.display;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
 export interface BenchmarkComparePanelProps {
   evaluationAId: string;
@@ -30,7 +36,7 @@ export function BenchmarkComparePanel({ evaluationAId, evaluationBId, onOpenCase
       ]);
       if (!cancelled) { setItemsA(a); setItemsB(b); }
     };
-    void load().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    void load().catch((e: unknown) => setError(toErrorText(e)));
     return () => { cancelled = true; };
   }, [evaluationAId, evaluationBId]);
 

@@ -1,6 +1,6 @@
-import { Button, Space, Typography } from "antd";
+import { Alert, Button, Space, Typography } from "antd";
 import { useCallback, useEffect, useState } from "react";
-import { listDatasetBenchmarks, retryDatasetBenchmark, runDatasetBenchmark } from "../../api/client";
+import { listDatasetBenchmarks, PlatformApiError, retryDatasetBenchmark, runDatasetBenchmark } from "../../api/client";
 import type { DatasetEvaluation } from "../../api/types";
 import { BenchmarkComparePanel } from "./BenchmarkComparePanel";
 import { BenchmarkCreatePanel } from "./BenchmarkCreatePanel";
@@ -13,17 +13,52 @@ export interface DatasetBenchmarksViewProps {
   onOpenCase: (recordingId: string, runAId: string, runBId?: string) => void;
 }
 
+function toErrorText(error: unknown): string {
+  if (error instanceof PlatformApiError) return error.display;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, onOpenCase }: DatasetBenchmarksViewProps) {
   const [items, setItems] = useState<DatasetEvaluation[]>([]);
   const [creating, setCreating] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showCompare, setShowCompare] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => setItems(await listDatasetBenchmarks()), []);
+  const refresh = useCallback(async () => {
+    try {
+      setItems(await listDatasetBenchmarks());
+      setError(null);
+    } catch (reason) {
+      // Non-destructive: keep the current list and structure visible, only surface the error.
+      setError(toErrorText(reason));
+    }
+  }, []);
+
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const start = async (id: string) => { await runDatasetBenchmark(id); await refresh(); onBenchmarkOpen(id); };
-  const retry = async (id: string) => { await retryDatasetBenchmark(id); await runDatasetBenchmark(id); await refresh(); onBenchmarkOpen(id); };
+  const start = async (id: string) => {
+    try {
+      await runDatasetBenchmark(id);
+      await refresh();
+      onBenchmarkOpen(id);
+    } catch (reason) {
+      setError(toErrorText(reason));
+    }
+  };
+
+  const retry = async (id: string) => {
+    try {
+      await retryDatasetBenchmark(id);
+      await runDatasetBenchmark(id);
+      await refresh();
+      onBenchmarkOpen(id);
+    } catch (reason) {
+      // Never auto-switch benchmark or auto-recreate the evaluation.
+      setError(toErrorText(reason));
+    }
+  };
 
   if (selectedBenchmarkId) {
     return (
@@ -41,6 +76,7 @@ export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, on
         <Typography.Title level={3} style={{ margin: 0 }}>Dataset Benchmarks</Typography.Title>
         <Button onClick={() => setCreating(true)}>New Benchmark</Button>
       </Space>
+      {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError(null)} /> : null}
       {creating ? <BenchmarkCreatePanel onCreated={(id) => { setCreating(false); void refresh(); onBenchmarkOpen(id); }} /> : null}
       {selectedIds.length === 2 ? <Button onClick={() => setShowCompare(true)}>Compare Selected</Button> : null}
       {showCompare && selectedIds.length === 2 ? (

@@ -37,9 +37,11 @@ export function BenchmarkListTable(props: BenchmarkListTableProps) {
         { title: "Status", dataIndex: "status" },
         {
           title: "mAP50:95",
-          render: (_, row) => row.status === "completed" && row.aggregateMetrics?.classAware
-            ? row.aggregateMetrics.classAware.map50_95?.toFixed(4) ?? "N/A"
-            : "—",
+          render: (_, row) => {
+            if (row.status !== "completed") return "—";
+            if (!row.aggregateMetrics?.classAware) return "N/A";
+            return row.aggregateMetrics.classAware.map50_95?.toFixed(4) ?? "N/A";
+          },
         },
         {
           title: "Action",

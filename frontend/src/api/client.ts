@@ -19,20 +19,67 @@ export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path));
-  if (!response.ok) throw new Error(`API request failed: ${response.status}`);
+export interface PlatformApiErrorPayload {
+  status: number;
+  code: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
+/**
+ * Structured platform API error that preserves the backend error contract
+ * (`{ error: { code, message, details } }`). When the body is not a parseable
+ * JSON error, `code`/`message` fall back to a generic HTTP status description.
+ */
+export class PlatformApiError extends Error {
+  status: number;
+  code: string;
+  details: Record<string, unknown>;
+
+  constructor(payload: PlatformApiErrorPayload) {
+    super(payload.message);
+    this.name = "PlatformApiError";
+    this.status = payload.status;
+    this.code = payload.code;
+    this.details = payload.details;
+  }
+
+  get display(): string {
+    return `${this.code}: ${this.message}`;
+  }
+}
+
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(apiUrl(path), init);
+  if (!response.ok) {
+    let code = `HTTP_${response.status}`;
+    let message = `API request failed: ${response.status}`;
+    let details: Record<string, unknown> = {};
+    try {
+      const body = await response.json() as { error?: { code?: string; message?: string; details?: Record<string, unknown> } };
+      if (body.error && typeof body.error.code === "string" && typeof body.error.message === "string") {
+        code = body.error.code;
+        message = body.error.message;
+        details = body.error.details ?? {};
+      }
+    } catch {
+      // Non-JSON body: keep the generic HTTP fallback.
+    }
+    throw new PlatformApiError({ status: response.status, code, message, details });
+  }
   return response.json() as Promise<T>;
 }
 
+export async function apiGet<T>(path: string): Promise<T> {
+  return apiRequest<T>(path);
+}
+
 export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(apiUrl(path), {
+  return apiRequest<T>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`API request failed: ${response.status}`);
-  return response.json() as Promise<T>;
 }
 
 interface RecordingWire {

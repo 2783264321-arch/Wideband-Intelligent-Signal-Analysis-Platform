@@ -1,7 +1,13 @@
 import { Alert, Button, Descriptions, Input, Select, Space, Typography } from "antd";
 import { useEffect, useState } from "react";
-import { createDatasetBenchmark, listImportedBenchmarkBatches, resolveImportedBenchmarkBatch, runDatasetBenchmark } from "../../api/client";
+import { createDatasetBenchmark, listImportedBenchmarkBatches, PlatformApiError, resolveImportedBenchmarkBatch, runDatasetBenchmark } from "../../api/client";
 import type { ImportedBatchResolution, ImportedBenchmarkBatch } from "../../api/types";
+
+function toErrorText(error: unknown): string {
+  if (error instanceof PlatformApiError) return error.display;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
 export function BenchmarkCreatePanel({ onCreated }: { onCreated: (id: string) => void }) {
   const [batches, setBatches] = useState<ImportedBenchmarkBatch[]>([]);
@@ -19,7 +25,7 @@ export function BenchmarkCreatePanel({ onCreated }: { onCreated: (id: string) =>
   );
 
   useEffect(() => {
-    void listImportedBenchmarkBatches().then(setBatches).catch((e: unknown) => setError(String(e)));
+    void listImportedBenchmarkBatches().then(setBatches).catch((e: unknown) => setError(toErrorText(e)));
   }, []);
 
   const resolve = async () => {
@@ -29,7 +35,7 @@ export function BenchmarkCreatePanel({ onCreated }: { onCreated: (id: string) =>
     try {
       setResolution(await resolveImportedBenchmarkBatch(fingerprint));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toErrorText(e));
     } finally {
       setBusy(false);
     }
@@ -44,7 +50,7 @@ export function BenchmarkCreatePanel({ onCreated }: { onCreated: (id: string) =>
       const started = await runDatasetBenchmark(created.id);
       onCreated(started.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(toErrorText(e));
     } finally {
       setBusy(false);
     }

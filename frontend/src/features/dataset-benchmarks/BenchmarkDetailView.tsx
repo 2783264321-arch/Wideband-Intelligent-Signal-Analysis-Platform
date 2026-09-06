@@ -13,7 +13,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useState } from "react";
-import { getDatasetBenchmark, listDatasetBenchmarkItems, retryDatasetBenchmark, runDatasetBenchmark } from "../../api/client";
+import { getDatasetBenchmark, listDatasetBenchmarkItems, PlatformApiError, retryDatasetBenchmark, runDatasetBenchmark } from "../../api/client";
 import type {
   DatasetBenchmarkAggregateMetrics,
   DatasetBenchmarkConfusion,
@@ -22,6 +22,12 @@ import type {
   DatasetEvaluationItem,
   GroundTruthProvenance,
 } from "../../api/types";
+
+function toErrorText(error: unknown): string {
+  if (error instanceof PlatformApiError) return error.display;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
 export interface BenchmarkDetailViewProps {
   evaluationId: string;
@@ -165,18 +171,25 @@ export function BenchmarkDetailView({ evaluationId, onBack, onOpenCase }: Benchm
         return;
       }
       if (next.status === "pending" || next.status === "running") {
-        timer = setTimeout(() => void load().catch((e: unknown) => setError(String(e))), 1000);
+        timer = setTimeout(() => void load().catch((e: unknown) => setError(toErrorText(e))), 1000);
       }
     };
 
-    void load().catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    void load().catch((e: unknown) => setError(toErrorText(e)));
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
   }, [evaluationId, pollGeneration]);
 
-  if (error) return <Alert type="error" showIcon message={error} />;
+  if (error) {
+    return (
+      <Card title="Dataset Benchmark">
+        <Button onClick={onBack}>Back to list</Button>
+        <Alert type="error" showIcon message={error} />
+      </Card>
+    );
+  }
   if (!evaluation) return <Spin tip="Loading benchmark..." />;
 
   if (evaluation.status === "pending" || evaluation.status === "running") {
@@ -201,7 +214,7 @@ export function BenchmarkDetailView({ evaluationId, onBack, onOpenCase }: Benchm
         setEvaluation(restarted);
         setPollGeneration((value) => value + 1);
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(toErrorText(e));
       }
     };
     return (

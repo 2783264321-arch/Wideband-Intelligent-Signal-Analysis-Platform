@@ -276,3 +276,133 @@ test("shows lightweight comparable metrics and drills into the two frozen runs",
   fireEvent.click(screen.getByRole("button", { name: "Open Case Comparison" }));
   expect(onOpenCase).toHaveBeenCalledWith("rec_0", "run_a", "run_b");
 });
+
+const pendingWire = {
+  id: "eval_pending", name: "Pending benchmark", dataset_name: "SpaceNet", dataset_split: "test",
+  label_space: "spacenet_14", pipeline_id: "pipeline_x", pipeline_version: "1.0",
+  status: "pending", expected_recordings: 2, evaluated_recordings: 2, missing_recordings: 0,
+  coverage: 1, comparable: true, recording_manifest_hash: "b".repeat(64),
+  evaluation_protocol: "physical_tf_detection_ap_v2", protocol_config_json: {},
+  aggregate_metrics_json: null, per_class_metrics_json: null, confusion_json: null,
+  progress_stage: null, progress_current: null, progress_total: null, worker_pid: null,
+  error_type: null, error_message: null, created_at: "2026-09-06T00:00:00Z",
+  started_at: null, completed_at: null,
+};
+
+function wireError(code: string, message: string) {
+  return new Response(JSON.stringify({ error: { code, message, details: {} } }), { status: 409 });
+}
+
+test("shows backend error when the benchmark list load fails and keeps the page structure", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => wireError("IMPORTED_BATCH_DATASET_INCOMPLETE", "Imported batch does not cover the current frozen Recording manifest exactly.")));
+  render(
+    <MemoryRouter>
+      <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText(/IMPORTED_BATCH_DATASET_INCOMPLETE: Imported batch does not cover the current frozen Recording manifest exactly\./)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "New Benchmark" })).toBeInTheDocument();
+});
+
+test("shows backend error when Run is rejected and keeps the current list", async () => {
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.endsWith("/api/dataset-benchmarks") && method === "GET") return new Response(JSON.stringify([pendingWire]));
+    if (urlStr.endsWith("/api/dataset-benchmarks/eval_pending/run") && method === "POST") {
+      return wireError("INVALID_BENCHMARK_TRANSITION", "Only pending evaluations can be started.");
+    }
+    throw new Error(`Unexpected request: ${method} ${urlStr}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(
+    <MemoryRouter>
+      <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
+    </MemoryRouter>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+  expect(await screen.findByText(/INVALID_BENCHMARK_TRANSITION: Only pending evaluations can be started\./)).toBeInTheDocument();
+  // list still present and selected state not cleared
+  expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+  expect(screen.getByText("Pending benchmark")).toBeInTheDocument();
+});
+
+test("shows backend error when Retry fails and does not auto-switch benchmark", async () => {
+  const onBenchmarkOpen = vi.fn();
+  const failedWire = { ...pendingWire, id: "eval_failed", status: "failed", error_type: "RuntimeError", error_message: "boom" };
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    const urlStr = String(url);
+    const method = init?.method ?? "GET";
+    if (urlStr.endsWith("/api/dataset-benchmarks") && method === "GET") return new Response(JSON.stringify([failedWire]));
+    if (urlStr.endsWith("/api/dataset-benchmarks/eval_failed/retry") && method === "POST") {
+      return wireError("INVALID_BENCHMARK_TRANSITION", "Only failed/interrupted evaluations can be retried.");
+    }
+    throw new Error(`Unexpected request: ${method} ${urlStr}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(
+    <MemoryRouter>
+      <DatasetBenchmarksView onBenchmarkOpen={onBenchmarkOpen} onOpenCase={() => undefined} />
+    </MemoryRouter>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+  expect(await screen.findByText(/INVALID_BENCHMARK_TRANSITION: Only failed\/interrupted evaluations can be retried\./)).toBeInTheDocument();
+  expect(onBenchmarkOpen).not.toHaveBeenCalled();
+  // current list row (the failed benchmark) is still present and unchanged
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+});
+
+test("BenchmarkDetailView keeps Back to list when detail load fails", async () => {
+  const onBack = vi.fn();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "BENCHMARK_NOT_FOUND", message: "DatasetEvaluation was not found.", details: {} } }),
+    { status: 404 },
+  )));
+  render(<BenchmarkDetailView evaluationId="eval_missing" onBack={onBack} onOpenCase={() => undefined} />);
+  expect(await screen.findByText(/BENCHMARK_NOT_FOUND: DatasetEvaluation was not found\./)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Back to list" }));
+  expect(onBack).toHaveBeenCalled();
+});
+
+test("BenchmarkComparePanel surfaces backend error without auto-retry", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "INVALID_BENCHMARK_TRANSITION", message: "Only pending evaluations can be started.", details: {} } }),
+    { status: 409 },
+  )));
+  render(<BenchmarkComparePanel evaluationAId="eval_a" evaluationBId="eval_b" onOpenCase={() => undefined} />);
+  expect(await screen.findByText(/INVALID_BENCHMARK_TRANSITION: Only pending evaluations can be started\./)).toBeInTheDocument();
+});
+
+test("detection-only completed benchmark shows N/A for class-aware mAP50:95 in the list", async () => {
+  const detectionOnly = {
+    id: "eval_det", name: "Detection only", dataset_name: "SpaceNet", dataset_split: "test",
+    label_space: "spacenet_14", pipeline_id: "stft_energy_detector", pipeline_version: "1.0",
+    status: "completed", expected_recordings: 2, evaluated_recordings: 2, missing_recordings: 0,
+    coverage: 1, comparable: true, recording_manifest_hash: "b".repeat(64),
+    evaluation_protocol: "physical_tf_detection_ap_v2", protocol_config_json: {},
+    aggregate_metrics_json: {
+      ground_truth: { raw_count: 2, canonical_count: 2, duplicates_removed: 0, duplicate_policy: "exact_physical_class_dedup" },
+      classification_applicable: false, classification_reason: "detection_only_pipeline",
+      localization: { ap50: 0.6, ap50_95: 0.45, operating: { tp: 1, fp: 0, fn: 0, precision: 1, recall: 1, f1: 1 } },
+      classification_on_matched: null, class_aware: null,
+    },
+    per_class_metrics_json: [], confusion_json: null,
+    progress_stage: "completed", progress_current: null, progress_total: null, worker_pid: null,
+    error_type: null, error_message: null, created_at: "2026-09-06T00:00:00Z", started_at: null, completed_at: "2026-09-06T00:01:00Z",
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const urlStr = String(url);
+    if (urlStr.endsWith("/api/dataset-benchmarks") && !urlStr.includes("imported")) return new Response(JSON.stringify([detectionOnly]));
+    throw new Error(`Unexpected request: ${urlStr}`);
+  }));
+  render(
+    <MemoryRouter>
+      <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("Detection only")).toBeInTheDocument();
+  expect(screen.getByText("N/A")).toBeInTheDocument();
+  expect(screen.queryByText("—")).not.toBeInTheDocument();
+});
