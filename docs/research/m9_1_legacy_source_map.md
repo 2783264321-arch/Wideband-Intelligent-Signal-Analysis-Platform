@@ -102,7 +102,7 @@ SpaceNetAdapter (current platform) differences: platform uses `byte_size//4` for
 
 Source: `ZoomSpec/src/zoomspec_repro/spectral.py :: stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize`; Torch path `spectral_torch.py`.
 
-For the frozen test run, the image cache was built with `build_cpn_dataset.py` (`--representation ls_stft`). The builder's default backend is numpy, but the exact `--backend` flag used for the historical frozen TEST-cache invocation was not preserved; therefore the historical numpy-vs-torch backend for that cache remains unresolved. Task 12 must not infer the historical invocation from the builder default and must confirm parity at Gate 1. Inference in `evaluate_cpn.py` reads the cached PNGs and uses `make_spectrogram_geometry` (geometry only, no STFT recompute).
+`build_cpn_dataset.py` exposes `--backend {numpy, torch}` with numpy as only the builder default. Task 12 Gate 0 resolved the historical frozen TEST-cache build configuration as **Torch backend + CUDA**, supported by BOTH the surviving stage config hash and exact decoded-pixel parity on five historical cached images (see §22). Torch is therefore the Task 12A parity reference. Inference in `evaluate_cpn.py` reads the cached PNGs and uses `make_spectrogram_geometry` (geometry only, no STFT recompute).
 
 | Property | Historical value | Source |
 |---|---|---|
@@ -351,8 +351,8 @@ Inference-only path imports: `torch`, `numpy`, `ultralytics`, `PIL` (cache build
 |---|---|---|---|---|---|
 | IQ reader | `ZoomSpec/src/zoomspec_repro/data.py` | `read_interleaved_iq`, `load_observation` | `.bin`+`.json` path | `Observation` (complex64 IQ + metadata) | `preprocessing.py` |
 | metadata parse | `data.py` | `parse_metadata` | JSON meta | `(f_lo_hz,f_hi_hz), targets` | `preprocessing.py` (non-GT metadata only) |
-| LS-STFT | `spectral.py` | `stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize` (normalization values from verified asset `ls_stft_normalization`) | Observation | 640×640 log-magnitude spectrogram | `preprocessing.py` |
-| LS-STFT (torch) | `spectral_torch.py` | `build_spectrogram_torch` | Observation | same (Torch backend; historical test-cache backend unresolved) | `preprocessing.py` (optional) |
+| LS-STFT | `spectral.py` | `stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize` (normalization values from verified asset `ls_stft_normalization`) | Observation | 640×640 log-magnitude spectrogram | `preprocessing.py` (reference/alternate implementation; NOT the historical parity path) |
+| LS-STFT (torch) | `spectral_torch.py` | `build_spectrogram_torch` | Observation | 640×640 log-magnitude spectrogram (historical frozen TEST-cache parity reference) | `preprocessing.py` — Task 12A must reproduce the Torch/CUDA historical behavior |
 | geometry | `spectral.py` | `make_spectrogram_geometry` | metadata only | coordinate grids | `preprocessing.py` |
 | detector load | `scripts/evaluate_cpn.py` | `YOLO(model)` | checkpoint | YOLO model | `detector.py` |
 | detector inference | `evaluate_cpn.py` | `model.predict(...)` | cached PNGs | boxes xyxy/conf/cls | `detector.py` |
@@ -416,10 +416,12 @@ Proposed smallest code surface (no implementation in Task 11):
 
 Explicitly NOT ported: training loops, dataset/cache builders, GT label writing, evaluation AP logic, sweep scripts, D-FINE, RT-DETR, augmenters, plotting, alternative FRN/CPN checkpoints, CLI tooling.
 
+**Task 12A parity reference (LS-STFT):** Task 12A MUST use the historical Torch behavior as its parity reference. Formal reference: `ZoomSpec/src/zoomspec_repro/spectral_torch.py :: build_spectrogram_torch`. Runtime: `/root/miniconda3/bin/python`. GPU parity environment: NVIDIA GeForce RTX 5090, torch 2.8.0+cu128, CUDA available. Task 12A must NOT silently substitute the NumPy LS-STFT implementation merely because it is simpler or was the builder default. Production code must be independently ported into the platform and must NOT import legacy ZoomSpec source at runtime.
+
 ## 22. Unresolved items
 
 - UNRESOLVED (low risk): The exact `torch.autocast` state and whether any FRN shard ran CPU vs CUDA — the driver selects `cuda if available else cpu` (`run_frn_on_proposals.py` line 56); the historical GPU was RTX 5090, so CUDA+float16 autocast was active, but the per-shard device isn't logged. This affects numerics at 1e-7 scale only.
-- UNRESOLVED (low risk): The `--backend torch` vs numpy for the TEST cache build — the stage record `config_sha256` for `cpn_ls_stft_test` is `f356013b…` but the exact CLI flags are not stored; `build_test_cache.log` shows only per-sample progress. The numpy vs torch STFT paths are numerically equivalent (verified in legacy tests), so this does not change the semantic contract.
+- RESOLVED by Task 12 Gate 0: The `--backend torch` vs numpy question for the TEST cache build. The surviving stage record `config_sha256` for `cpn_ls_stft_test` is `f356013b…`; Gate 0 recomputed the stage-config hash against the actual builder config fields and found an exact match for `backend="torch"`, `device="cuda"`, `representation="ls_stft"`, `n_fft=2048`, `hop=1024`, `tier_edges_hz=[400000.0, 5000000.0]`, `limit_per_split=None`. Torch-generated decoded uint8 images matched the historical cached images 5/5 exactly (diff_pixels=0, identical_fraction=1.0, matching pixel-byte SHA256); the NumPy path differed by small ±1 uint8 rounding-boundary effects. Task 12A parity reference is the Torch path. Note: this proves the historical build *configuration*, not the literal command-line argv text, which was not preserved.
 - UNRESOLVED (parity detail): Exact float16 autocast rounding on the RTX 5090 for the FRN forward — must be confirmed by Task-12/Gate-1 runtime, not by reading.
 
 ## 23. Formal M9.1 remote inference runtime
