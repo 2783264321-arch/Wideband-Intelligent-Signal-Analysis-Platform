@@ -64,7 +64,7 @@ Mermaid form:
 ```mermaid
 graph TD
   A[.bin + .json] --> B[data.load_observation]
-  B --> C[spectral.build_spectrogram LS-STFT]
+  B --> C[spectral_torch.build_spectrogram_torch LS-STFT]
   C --> D[percentile_normalize + flipud + uint8 PNG cache]
   D --> E[ultralytics YOLO.predict]
   E --> F[coordinates.image_box_to_proposal]
@@ -92,15 +92,15 @@ Source: `ZoomSpec/src/zoomspec_repro/data.py :: read_interleaved_iq`, `load_obse
 | center freq | `0.5*(f_lo_hz + f_hi_hz)` | `schema.Observation.center_hz` |
 | duration | `iq.size / fs_hz` | `schema.Observation.duration_s` |
 | whole-recording processing | whole I/Q vector loaded at once, no segmentation | `load_observation`; STFT frames the whole vector |
-| normalization before STFT | none at IQ level (only after spectrogram) | `build_spectrogram` |
+| normalization before STFT | none at IQ level (only after spectrogram) | shared semantic (`build_spectrogram` / `build_spectrogram_torch`) |
 | padding/truncation | none on the raw recording | — |
-| chunking | STFT frame chunking is internal memory-bounding only (`block_frames=256`), not semantic | `stft_complex` line 30 |
+| chunking | STFT frame chunking is internal memory-bounding only (`block_frames=256`), not semantic (NumPy alternate path only) | `stft_complex` line 30 |
 
 SpaceNetAdapter (current platform) differences: platform uses `byte_size//4` for sample count and `(f_high-f_low)*1e6` for sample rate — numerically identical to legacy. Legacy reads `json_path.with_suffix(".json")`; platform loads via its own `SpaceNetAdapter.load`. Semantics match.
 
 ## 6. LS-STFT
 
-Source: `ZoomSpec/src/zoomspec_repro/spectral.py :: stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize`; Torch path `spectral_torch.py`.
+Source: historical parity path `ZoomSpec/src/zoomspec_repro/spectral_torch.py :: build_spectrogram_torch` (Torch + CUDA), plus shared helpers `make_ls_frequency_grid` and `percentile_normalize` from `spectral.py` (both used by the Torch path and by `build_cpn_dataset.py`). NumPy-only helpers (`stft_complex`, `build_spectrogram`, `_interp_complex_rows`, `_resize_time`) are the alternate/reference implementation and are NOT the historical parity path.
 
 `build_cpn_dataset.py` exposes `--backend {numpy, torch}` with numpy as only the builder default. Task 12 Gate 0 resolved the historical frozen TEST-cache build configuration as **Torch backend + CUDA**, supported by BOTH the surviving stage config hash and exact decoded-pixel parity on five historical cached images (see §22). Torch is therefore the Task 12A parity reference. Inference in `evaluate_cpn.py` reads the cached PNGs and uses `make_spectrogram_geometry` (geometry only, no STFT recompute).
 
@@ -115,15 +115,17 @@ Source: `ZoomSpec/src/zoomspec_repro/spectral.py :: stft_complex`, `make_ls_freq
 | FFT size | 2048 | `n_fft=2048` |
 | window length | 2048 | `win_length=2048` |
 | hop/stride | 1024 | `hop_length=1024` |
-| window function | Hann (`np.hanning`) | `stft_complex` line 41 |
-| per-subband bin allocation | even largest-remainder `_allocate_even_bins` | line 54-65 |
-| frequency grid formula | paper equations (8)-(12) with monotonic ULP repair | lines 88-114 |
-| magnitude/log | `log(|STFT| + epsilon)`, epsilon=1e-8 | `build_spectrogram` line 182 |
-| normalization | percentile `[1.0, 99.5]` → `value_low=0.1356358379125595`, `value_high=6.512740135192871` | verified asset `ls_stft_normalization` = `ZoomSpec/reports/normalization_ls_stft.json`; `percentile_normalize` |
-| resize/interpolation | time axis resized to 640 via linear interp; freq via complex linear interp | `_resize_time`, `_interp_complex_rows` |
+| Hann window | Hann, periodic=False | Torch parity path: `build_spectrogram_torch` → `torch.hann_window(win_length, periodic=False)` (NumPy alternate: `np.hanning` in `stft_complex`) |
+| STFT | `torch.stft(center=False, onesided=False, return_complex=True)` | Torch parity path: `build_spectrogram_torch` (NumPy alternate: `np.fft.fft` in `stft_complex`) |
+| fftshift | centered spectrum (DC at center); baseband freq grid | Torch parity path: `torch.fft.fftshift(spectrum, dim=0)`; `np.fft.fftshift(np.fft.fftfreq(...))` for the baseband grid |
+| per-subband bin allocation | even largest-remainder `_allocate_even_bins` | shared helper, used inside `make_ls_frequency_grid` (imported by Torch path) |
+| frequency grid formula | paper equations (8)-(12) with monotonic ULP repair | shared helper `make_ls_frequency_grid` (used by Torch path and NumPy path) |
+| magnitude/log | `log(|STFT| + epsilon)`, epsilon=1e-8 | Torch parity path: `build_spectrogram_torch` → `torch.log(torch.abs(resampled) + epsilon)`; shared semantic value |
+| normalization | percentile `[1.0, 99.5]` → `value_low=0.1356358379125595`, `value_high=6.512740135192871` | verified asset `ls_stft_normalization` = `ZoomSpec/reports/normalization_ls_stft.json`; shared `percentile_normalize` (called by `build_cpn_dataset.py` for both backends) |
+| resize/interpolation | freq: linear interp of complex spectrum; time: resized to 640 via linear interp | Torch parity path: `build_spectrogram_torch` — freq via `torch.searchsorted` weights, time via `functional.interpolate(mode="bilinear", align_corners=True)` (NumPy alternate: `_interp_complex_rows`, `_resize_time`) |
 | channel construction | 1 grayscale channel | `build_cpn_dataset.py` line 81 |
-| image dtype | uint8 (`round(normalized*255)`) | line 81 |
-| vertical flip | `np.flipud` (high freq becomes top of image, y-down) | line 83 |
+| image dtype | uint8 (`round(normalized*255)`) | `build_cpn_dataset.py` line 81 |
+| vertical flip | `np.flipud` (high freq becomes top of image, y-down) | `build_cpn_dataset.py` line 83 |
 | detector input dims | 640×640 (uint8 single channel) | config + `imgsz=640` |
 
 Frequency orientation: the LS-STFT grid is ascending frequency (low→high) in array row 0→639; the PNG is flipped with `np.flipud`, so image row 0 (top) = highest frequency. Coordinate mapping in §13 accounts for this.
@@ -408,7 +410,7 @@ Files under `Claude/` and `ZoomSpec/` that are historical/experimental and must 
 
 Proposed smallest code surface (no implementation in Task 11):
 
-- `preprocessing.py` — `read_interleaved_iq`, `parse_metadata` (non-GT), `stft_complex` + `make_ls_frequency_grid` + `build_spectrogram` + `percentile_normalize` (LS-STFT, paper_strict, 640×640), `make_spectrogram_geometry`. **LS-STFT normalization must come from the VERIFIED `ls_stft_normalization` asset identity** (`value_low=0.1356358379125595`, `value_high=6.512740135192871`); do not copy values from an unverified legacy path.
+- `preprocessing.py` — `read_interleaved_iq`, `parse_metadata` (non-GT), LS-STFT production port reproducing `spectral_torch.py :: build_spectrogram_torch` (Torch + CUDA historical parity behavior; paper_strict, 640×640, n_fft/win_length 2048, hop 1024) using only the shared helper semantics it requires (`make_ls_frequency_grid`, `percentile_normalize`), `make_spectrogram_geometry`. **LS-STFT normalization must come from the VERIFIED `ls_stft_normalization` asset identity** (`value_low=0.1356358379125595`, `value_high=6.512740135192871`); do not copy values from an unverified legacy path. Do NOT port the NumPy-only `stft_complex`/`build_spectrogram`/`_interp_complex_rows`/`_resize_time` path as the production parity path.
 - `detector.py` — `YOLO` loader + `predict(imgsz=640, conf=0.003, iou=0.7, max_det=300)` + `image_box_to_proposal` (normalized xyxy → Proposal).
 - `ahlp.py` — `design_hamming_lowpass`, `_fft_convolve_same`, `purify_candidate` with frozen params.
 - `frn.py` — `ZoomSpecFRN` model definition (channels=128, fusion_attention, bw_context, center_regression, no log_bw, no attn_pool), `load_frn` (weights_only=False), `make_frn_features` (global_resample, 4096), `bandwidth_context`, inference decode + geometric fusion + `physical_class_nms` (class-aware).
@@ -418,7 +420,7 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 
 **Task 12A parity reference (LS-STFT):** Task 12A MUST use the historical Torch behavior as its parity reference. Formal reference: `ZoomSpec/src/zoomspec_repro/spectral_torch.py :: build_spectrogram_torch`. Runtime: `/root/miniconda3/bin/python`. GPU parity environment: NVIDIA GeForce RTX 5090, torch 2.8.0+cu128, CUDA available. Task 12A must NOT silently substitute the NumPy LS-STFT implementation merely because it is simpler or was the builder default. Production code must be independently ported into the platform and must NOT import legacy ZoomSpec source at runtime.
 
-## 22. Unresolved items
+## 22. Resolved and unresolved provenance items
 
 - UNRESOLVED (low risk): The exact `torch.autocast` state and whether any FRN shard ran CPU vs CUDA — the driver selects `cuda if available else cpu` (`run_frn_on_proposals.py` line 56); the historical GPU was RTX 5090, so CUDA+float16 autocast was active, but the per-shard device isn't logged. This affects numerics at 1e-7 scale only.
 - RESOLVED by Task 12 Gate 0: The `--backend torch` vs numpy question for the TEST cache build. The surviving stage record `config_sha256` for `cpn_ls_stft_test` is `f356013b…`; Gate 0 recomputed the stage-config hash against the actual builder config fields and found an exact match for `backend="torch"`, `device="cuda"`, `representation="ls_stft"`, `n_fft=2048`, `hop=1024`, `tier_edges_hz=[400000.0, 5000000.0]`, `limit_per_split=None`. Torch-generated decoded uint8 images matched the historical cached images 5/5 exactly (diff_pixels=0, identical_fraction=1.0, matching pixel-byte SHA256); the NumPy path differed by small ±1 uint8 rounding-boundary effects. Task 12A parity reference is the Torch path. Note: this proves the historical build *configuration*, not the literal command-line argv text, which was not preserved.
