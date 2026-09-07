@@ -345,3 +345,154 @@ def test_composite_verifier_tampered_asset_fails(tmp_path: Path, monkeypatch):
     with pytest.raises(PlatformError) as exc:
         verify_asset_manifest(manifest_path, asset_paths, tmp_path, COMMIT_40)
     assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# Strict raw JSON schema type validation (no silent coercion)
+# ---------------------------------------------------------------------------
+
+
+def _write_raw(payload: object) -> str:
+    return json.dumps(payload)
+
+
+def _assert_loads_manifest_fails(tmp_path: Path, payload: object) -> None:
+    path = tmp_path / "asset_manifest.json"
+    path.write_text(_write_raw(payload), encoding="utf-8")
+    with pytest.raises(PlatformError) as exc:
+        load_pipeline_asset_manifest(path)
+    assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+def _base_payload(**overrides) -> dict:
+    payload = {
+        "pipeline_id": "pipeline_x",
+        "pipeline_version": "1.0.0",
+        "assets": {"detector_checkpoint": "a" * 64},
+        "asset_manifest_sha256": "0" * 64,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_strict_json_assets_array_fails_closed(tmp_path: Path):
+    _assert_loads_manifest_fails(tmp_path, _base_payload(assets=[]))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("pipeline_id", 123),
+    ("pipeline_id", None),
+    ("pipeline_version", 1),
+    ("assets", []),
+    ("assets", None),
+    ("assets", "abc"),
+    ("asset_manifest_sha256", 123),
+])
+def test_strict_json_malformed_field_type_fails_closed(tmp_path: Path, field, value):
+    _assert_loads_manifest_fails(tmp_path, _base_payload(**{field: value}))
+
+
+@pytest.mark.parametrize("asset_value", [123, None])
+def test_strict_json_asset_value_non_string_fails_closed(tmp_path: Path, asset_value):
+    _assert_loads_manifest_fails(
+        tmp_path,
+        _base_payload(assets={"detector_checkpoint": asset_value}),
+    )
+
+
+def test_strict_json_missing_field_fails_closed(tmp_path: Path):
+    payload = _base_payload()
+    del payload["asset_manifest_sha256"]
+    _assert_loads_manifest_fails(tmp_path, payload)
+
+
+# ---------------------------------------------------------------------------
+# No silent coercion: a non-string JSON type must not be accepted even when a
+# coerced-to-string manifest would otherwise match the supplied self-hash.
+# ---------------------------------------------------------------------------
+
+
+def test_no_silent_coercion_of_numeric_pipeline_id(tmp_path: Path):
+    # Build the canonical hash as if pipeline_id were the string "123".
+    canonical = PipelineAssetManifest(
+        pipeline_id="123",
+        pipeline_version="1.0.0",
+        assets={"detector_checkpoint": "a" * 64},
+        asset_manifest_sha256="0" * 64,
+    )
+    stored_hash = compute_asset_manifest_sha256(canonical)
+    payload = _base_payload(
+        pipeline_id=123,  # JSON integer, NOT the string "123"
+        asset_manifest_sha256=stored_hash,
+    )
+    _assert_loads_manifest_fails(tmp_path, payload)
+
+
+def test_no_silent_coercion_of_numeric_asset_value(tmp_path: Path):
+    canonical = PipelineAssetManifest(
+        pipeline_id="pipeline_x",
+        pipeline_version="1.0.0",
+        assets={"detector_checkpoint": "a" * 64},
+        asset_manifest_sha256="0" * 64,
+    )
+    stored_hash = compute_asset_manifest_sha256(canonical)
+    payload = _base_payload(
+        assets={"detector_checkpoint": 123},  # JSON integer, not the string
+        asset_manifest_sha256=stored_hash,
+    )
+    _assert_loads_manifest_fails(tmp_path, payload)
+
+
+# ---------------------------------------------------------------------------
+# Direct dataclass invalid types must fail closed.
+# ---------------------------------------------------------------------------
+
+
+def test_direct_invalid_assets_type_fails_closed(tmp_path: Path):
+    manifest = PipelineAssetManifest(
+        pipeline_id="x",
+        pipeline_version="1.0",
+        assets=[],  # invalid raw type (list, not dict)
+        asset_manifest_sha256="0" * 64,
+    )
+    with pytest.raises(PlatformError) as exc:
+        verify_assets(manifest, {})
+    assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+def test_direct_invalid_asset_value_type_fails_closed(tmp_path: Path):
+    asset_path = tmp_path / "a.pt"
+    asset_path.write_bytes(b"data")
+    manifest = PipelineAssetManifest(
+        pipeline_id="x",
+        pipeline_version="1.0",
+        assets={"detector_checkpoint": 123},  # invalid value type (int, not str)
+        asset_manifest_sha256="0" * 64,
+    )
+    with pytest.raises(PlatformError) as exc:
+        verify_assets(manifest, {"detector_checkpoint": asset_path})
+    assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# Asset hashing I/O failure must be structured fail-closed.
+# ---------------------------------------------------------------------------
+
+
+def test_asset_hashing_oserror_maps_to_asset_mismatch(tmp_path: Path, monkeypatch):
+    asset_path = tmp_path / "a.pt"
+    asset_path.write_bytes(b"data")
+    manifest = _build_manifest({"detector_checkpoint": hashlib.sha256(b"data").hexdigest()})
+
+    import app.remote_execution.assets as assets_module
+
+    def boom(_path):
+        raise OSError("synthetic read failure")
+
+    monkeypatch.setattr(assets_module, "compute_file_sha256", boom)
+    with pytest.raises(PlatformError) as exc:
+        verify_assets(manifest, {"detector_checkpoint": asset_path})
+    assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+    # No raw filesystem message / path leaks into the public error.
+    assert "synthetic read failure" not in exc.value.message
+    assert str(tmp_path) not in exc.value.message

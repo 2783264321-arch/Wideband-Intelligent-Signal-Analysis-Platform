@@ -71,11 +71,21 @@ def _validate_sha256(value: str, name: str) -> None:
 
 
 def _validate_manifest(manifest: PipelineAssetManifest) -> None:
+    if not isinstance(manifest.pipeline_id, str):
+        raise _asset_error("pipeline_id must be a string.")
+    if not isinstance(manifest.pipeline_version, str):
+        raise _asset_error("pipeline_version must be a string.")
+    if not isinstance(manifest.assets, dict):
+        raise _asset_error("assets must be an object.")
+    if not isinstance(manifest.asset_manifest_sha256, str):
+        raise _asset_error("asset_manifest_sha256 must be a string.")
     if not manifest.pipeline_id or not manifest.pipeline_version:
         raise _asset_error("pipeline id/version must be non-empty.")
     for key, value in manifest.assets.items():
-        if not key:
-            raise _asset_error("asset logical name must be non-empty.")
+        if not isinstance(key, str) or not key:
+            raise _asset_error("asset logical name must be a non-empty string.")
+        if not isinstance(value, str):
+            raise _asset_error(f"asset '{key}' SHA256 must be a string.")
         _validate_sha256(value, f"asset '{key}'")
     _validate_sha256(manifest.asset_manifest_sha256, "asset_manifest_sha256")
     computed = compute_asset_manifest_sha256(manifest)
@@ -100,18 +110,27 @@ def load_pipeline_asset_manifest(path: Path) -> PipelineAssetManifest:
         raise _asset_error("asset manifest JSON is invalid.")
     if not isinstance(payload, dict):
         raise _asset_error("asset manifest must be a JSON object.")
-    unknown = set(payload) - set(_MANIFEST_FIELDS)
-    if unknown:
-        raise _asset_error("asset manifest contains unknown fields.")
-    try:
-        manifest = PipelineAssetManifest(
-            pipeline_id=str(payload["pipeline_id"]),
-            pipeline_version=str(payload["pipeline_version"]),
-            assets={str(k): str(v) for k, v in payload["assets"].items()},
-            asset_manifest_sha256=str(payload["asset_manifest_sha256"]),
-        )
-    except (KeyError, TypeError, ValueError):
-        raise _asset_error("asset manifest schema is invalid.")
+    if set(payload) != set(_MANIFEST_FIELDS):
+        raise _asset_error("asset manifest contains unknown or missing fields.")
+    if not isinstance(payload["pipeline_id"], str):
+        raise _asset_error("pipeline_id must be a JSON string.")
+    if not isinstance(payload["pipeline_version"], str):
+        raise _asset_error("pipeline_version must be a JSON string.")
+    if not isinstance(payload["assets"], dict):
+        raise _asset_error("assets must be a JSON object.")
+    if not isinstance(payload["asset_manifest_sha256"], str):
+        raise _asset_error("asset_manifest_sha256 must be a JSON string.")
+    for key, value in payload["assets"].items():
+        if not isinstance(key, str):
+            raise _asset_error("asset logical names must be JSON strings.")
+        if not isinstance(value, str):
+            raise _asset_error(f"asset '{key}' SHA256 must be a JSON string.")
+    manifest = PipelineAssetManifest(
+        pipeline_id=payload["pipeline_id"],
+        pipeline_version=payload["pipeline_version"],
+        assets=dict(payload["assets"]),
+        asset_manifest_sha256=payload["asset_manifest_sha256"],
+    )
     _validate_manifest(manifest)
     return manifest
 
@@ -130,7 +149,10 @@ def verify_assets(
             raise _asset_error(f"asset path for '{logical_name}' does not exist.")
         if not path.is_file():
             raise _asset_error(f"asset path for '{logical_name}' is not a regular file.")
-        actual_sha = compute_file_sha256(path)
+        try:
+            actual_sha = compute_file_sha256(path)
+        except OSError as exc:
+            raise _asset_error(f"asset '{logical_name}' could not be read.") from exc
         if actual_sha != expected_sha:
             raise _asset_error(f"asset '{logical_name}' SHA256 does not match the manifest.")
 
