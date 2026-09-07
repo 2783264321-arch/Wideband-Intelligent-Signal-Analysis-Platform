@@ -496,3 +496,28 @@ def test_asset_hashing_oserror_maps_to_asset_mismatch(tmp_path: Path, monkeypatc
     # No raw filesystem message / path leaks into the public error.
     assert "synthetic read failure" not in exc.value.message
     assert str(tmp_path) not in exc.value.message
+
+
+# ---------------------------------------------------------------------------
+# Tracked manifest behavior-asset membership guard.
+# ---------------------------------------------------------------------------
+
+
+TRACKED_MANIFEST_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "backend"
+    / "app"
+    / "pipelines"
+    / "zoomspec_yolo26n_aug_combined_frn_v3"
+    / "asset_manifest.json"
+)
+
+
+def test_tracked_manifest_has_exact_four_behavior_assets():
+    manifest = load_pipeline_asset_manifest(TRACKED_MANIFEST_PATH)
+    assert set(manifest.assets) == {
+        "detector_checkpoint",
+        "frn_checkpoint",
+        "frozen_config",
+        "ls_stft_normalization",
+    }

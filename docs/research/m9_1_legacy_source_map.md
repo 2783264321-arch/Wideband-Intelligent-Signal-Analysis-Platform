@@ -31,8 +31,9 @@ Evidence convention: `file.py :: function` and optional line range. YAML evidenc
 | `detector_checkpoint` | `/root/autodl-tmp/Claude/runs/cpn/ls_stft_yolo26n_aug_warm/weights/best.pt` | `eba4fa4b112a0e61cc1013e96f99d1ae82b845f4be1e8b1f80bd2089d1f82311` |
 | `frn_checkpoint` | `/root/autodl-tmp/Claude/artifacts/frn_combined_v3_training/best.pt` | `da6087da2fbfbaa5ba0e2cb210d08c24ee8b2af8418329d32216f7c77253be67` |
 | `frozen_config` | `/root/autodl-tmp/Claude/configs/frozen_full_pipeline_v26_aug_combined.yaml` | `030dbfa77353f876728252c2f247b47816baf8921a7641bb8873ae9035d9d7ec` |
+| `ls_stft_normalization` | `/root/autodl-tmp/ZoomSpec/reports/normalization_ls_stft.json` | `9b994655a279352b835b96cb00cefde89410fc6130458665dca7070de146d72f` |
 
-The tracked asset manifest (Task 10) records these same logical names + SHAs; absolute paths are deployment config only.
+The tracked asset manifest (Task 10 / Task 11 corrective) records these same logical names + SHAs; absolute paths are deployment config only. The fourth asset `ls_stft_normalization` was added in the Task 11 final corrective because frozen LS-STFT detector input depends on its `value_low` / `value_high` percentile-normalization values.
 
 ## 4. End-to-end call graph
 
@@ -118,11 +119,11 @@ For the frozen test run, the image cache was built with `build_cpn_dataset.py` (
 | per-subband bin allocation | even largest-remainder `_allocate_even_bins` | line 54-65 |
 | frequency grid formula | paper equations (8)-(12) with monotonic ULP repair | lines 88-114 |
 | magnitude/log | `log(|STFT| + epsilon)`, epsilon=1e-8 | `build_spectrogram` line 182 |
-| normalization | percentile `[1.0, 99.5]` → `[value_low=0.13563584, value_high=6.51274014]` | `normalization_ls_stft.json`; `percentile_normalize` |
+| normalization | percentile `[1.0, 99.5]` → `value_low=0.1356358379125595`, `value_high=6.512740135192871` | verified asset `ls_stft_normalization` = `ZoomSpec/reports/normalization_ls_stft.json`; `percentile_normalize` |
 | resize/interpolation | time axis resized to 640 via linear interp; freq via complex linear interp | `_resize_time`, `_interp_complex_rows` |
 | channel construction | 1 grayscale channel | `build_cpn_dataset.py` line 81 |
 | image dtype | uint8 (`round(normalized*255)`) | line 81 |
-| vertical flip | `np.flipud` (low freq becomes top of image, y-down) | line 83 |
+| vertical flip | `np.flipud` (high freq becomes top of image, y-down) | line 83 |
 | detector input dims | 640×640 (uint8 single channel) | config + `imgsz=640` |
 
 Frequency orientation: the LS-STFT grid is ascending frequency (low→high) in array row 0→639; the PNG is flipped with `np.flipud`, so image row 0 (top) = highest frequency. Coordinate mapping in §13 accounts for this.
@@ -303,7 +304,7 @@ Config: `/root/autodl-tmp/Claude/configs/frozen_full_pipeline_v26_aug_combined.y
 | `cpn.representation.n_fft` | 2048 | cache build | FFT size |
 | `cpn.representation.win_length` | 2048 | cache build | window length |
 | `cpn.representation.hop_length` | 1024 | cache build | hop |
-| `cpn.representation.normalization_file` | `reports/normalization_ls_stft.json` | cache build | percentile normalize |
+| `cpn.representation.normalization_file` | `reports/normalization_ls_stft.json` (resolved to `/root/autodl-tmp/ZoomSpec/reports/normalization_ls_stft.json`, SHA `9b994655…`) | cache build | percentile normalize (behavior asset `ls_stft_normalization`) |
 | `cpn.model.architecture` | `yolo26n` | training (informational) | detector arch |
 | `cpn.model.classes` | `[narrow, mid, wide]` | cache build labels | 3 tiers |
 | `cpn.model.bandwidth_tier_edges_hz` | `[400000, 5000000]` | cache build + `evaluate_cpn --tier-edges-hz` | tier mapping |
@@ -350,7 +351,7 @@ Inference-only path imports: `torch`, `numpy`, `ultralytics`, `PIL` (cache build
 |---|---|---|---|---|---|
 | IQ reader | `ZoomSpec/src/zoomspec_repro/data.py` | `read_interleaved_iq`, `load_observation` | `.bin`+`.json` path | `Observation` (complex64 IQ + metadata) | `preprocessing.py` |
 | metadata parse | `data.py` | `parse_metadata` | JSON meta | `(f_lo_hz,f_hi_hz), targets` | `preprocessing.py` (non-GT metadata only) |
-| LS-STFT | `spectral.py` | `stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize` | Observation | 640×640 log-magnitude spectrogram | `preprocessing.py` |
+| LS-STFT | `spectral.py` | `stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize` (normalization values from verified asset `ls_stft_normalization`) | Observation | 640×640 log-magnitude spectrogram | `preprocessing.py` |
 | LS-STFT (torch) | `spectral_torch.py` | `build_spectrogram_torch` | Observation | same (Torch backend; cache used numpy) | `preprocessing.py` (optional) |
 | geometry | `spectral.py` | `make_spectrogram_geometry` | metadata only | coordinate grids | `preprocessing.py` |
 | detector load | `scripts/evaluate_cpn.py` | `YOLO(model)` | checkpoint | YOLO model | `detector.py` |
@@ -398,7 +399,7 @@ Files under `Claude/` and `ZoomSpec/` that are historical/experimental and must 
 | coordinate units | seconds + absolute Hz | same | direct |
 | class mapping | 14-class legacy order == platform spacenet_14 | canonical label space | reuse platform label space; verified identical |
 | confidence | `sqrt(proposal_score*signal_prob*class_prob)` | `confidence` in [0,1] | preserve exact geometric fusion |
-| asset paths | hardcoded absolute paths in configs | injected/configured, not in Git | asset manifest (Task 10) + deployment config |
+| asset paths | hardcoded absolute paths in configs | injected/configured, not in Git | asset manifest (Task 10) + deployment config; 4 assets including `ls_stft_normalization` |
 | checkpoint loading | `torch.load(..., weights_only=False)` | load via configured paths, verify hashes | use Task-10 verified paths |
 | config loading | YAML + embedded checkpoint config | explicit config params | port the frozen values as constants/defaults |
 | result serialization | JSONL rows (sample_id, t0/t1_s, f0/f1_hz, class_id, score) | Analysis Package v1 + DetectionResult rows | reuse M9 adapter/exporter patterns |
@@ -407,7 +408,7 @@ Files under `Claude/` and `ZoomSpec/` that are historical/experimental and must 
 
 Proposed smallest code surface (no implementation in Task 11):
 
-- `preprocessing.py` — `read_interleaved_iq`, `parse_metadata` (non-GT), `stft_complex` + `make_ls_frequency_grid` + `build_spectrogram` + `percentile_normalize` (LS-STFT, paper_strict, 640×640), `make_spectrogram_geometry`.
+- `preprocessing.py` — `read_interleaved_iq`, `parse_metadata` (non-GT), `stft_complex` + `make_ls_frequency_grid` + `build_spectrogram` + `percentile_normalize` (LS-STFT, paper_strict, 640×640), `make_spectrogram_geometry`. **LS-STFT normalization must come from the VERIFIED `ls_stft_normalization` asset identity** (`value_low=0.1356358379125595`, `value_high=6.512740135192871`); do not copy values from an unverified legacy path.
 - `detector.py` — `YOLO` loader + `predict(imgsz=640, conf=0.003, iou=0.7, max_det=300)` + `image_box_to_proposal` (normalized xyxy → Proposal).
 - `ahlp.py` — `design_hamming_lowpass`, `_fft_convolve_same`, `purify_candidate` with frozen params.
 - `frn.py` — `ZoomSpecFRN` model definition (channels=128, fusion_attention, bw_context, center_regression, no log_bw, no attn_pool), `load_frn` (weights_only=False), `make_frn_features` (global_resample, 4096), `bandwidth_context`, inference decode + geometric fusion + `physical_class_nms` (class-aware).
@@ -420,3 +421,19 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 - UNRESOLVED (low risk): The exact `torch.autocast` state and whether any FRN shard ran CPU vs CUDA — the driver selects `cuda if available else cpu` (`run_frn_on_proposals.py` line 56); the historical GPU was RTX 5090, so CUDA+float16 autocast was active, but the per-shard device isn't logged. This affects numerics at 1e-7 scale only.
 - UNRESOLVED (low risk): The `--backend torch` vs numpy for the TEST cache build — the stage record `config_sha256` for `cpn_ls_stft_test` is `f356013b…` but the exact CLI flags are not stored; `build_test_cache.log` shows only per-sample progress. The numpy vs torch STFT paths are numerically equivalent (verified in legacy tests), so this does not change the semantic contract.
 - UNRESOLVED (parity detail): Exact float16 autocast rounding on the RTX 5090 for the FRN forward — must be confirmed by Task-12/Gate-1 runtime, not by reading.
+
+## 23. Formal M9.1 remote inference runtime
+
+The Architect has locked the formal M9.1 server inference interpreter to:
+
+```text
+/root/miniconda3/bin/python
+```
+
+It is the historical ZoomSpec ML runtime (Python 3.12.3, torch 2.8.0+cu128 / CUDA build 12.8, ultralytics 8.4.114, numpy 2.3.2, scipy 1.18.0, Pillow 11.3.0, PyYAML 6.0.2) with the minimum platform Remote Runner dependencies added (pydantic 2.13.5, SQLAlchemy 2.0.52; typing-extensions remains 4.14.1). The scientific/model stack versions are unchanged from the historical environment; pydantic + SQLAlchemy were added for platform Remote Runner compatibility only.
+
+This environment was previously abandoned: the separate dedicated runtime `/root/autodl-tmp/wsp-runtime/m9-1-gpu` was created (then left incomplete) during an earlier runtime experiment and must NOT be used. The environment is NOT claimed to be byte-for-byte unchanged from the historical environment; scientific parity is verified later by the live inference parity gates (Task 12 / Gate 1), not by this document.
+
+Task 12 must use `/root/miniconda3/bin/python` and must not rely on `/root/autodl-tmp/wsp-runtime/m9-1-gpu`.
+
+Verified under this runtime (import-only / CLI smoke): `app.remote_execution.schema`, `canonical`, `runner`, `assets`, `resolver` all import; `runner --help` exit 0; `pip check` reports "No broken requirements found."
