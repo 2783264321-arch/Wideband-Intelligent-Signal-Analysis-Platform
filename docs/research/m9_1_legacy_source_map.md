@@ -102,7 +102,7 @@ SpaceNetAdapter (current platform) differences: platform uses `byte_size//4` for
 
 Source: `ZoomSpec/src/zoomspec_repro/spectral.py :: stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize`; Torch path `spectral_torch.py`.
 
-For the frozen test run, the image cache was built with `build_cpn_dataset.py` (`--representation ls_stft`, default `--backend numpy`); inference in `evaluate_cpn.py` reads the cached PNGs and uses `make_spectrogram_geometry` (geometry only, no STFT recompute).
+For the frozen test run, the image cache was built with `build_cpn_dataset.py` (`--representation ls_stft`). The builder's default backend is numpy, but the exact `--backend` flag used for the historical frozen TEST-cache invocation was not preserved; therefore the historical numpy-vs-torch backend for that cache remains unresolved. Task 12 must not infer the historical invocation from the builder default and must confirm parity at Gate 1. Inference in `evaluate_cpn.py` reads the cached PNGs and uses `make_spectrogram_geometry` (geometry only, no STFT recompute).
 
 | Property | Historical value | Source |
 |---|---|---|
@@ -352,7 +352,7 @@ Inference-only path imports: `torch`, `numpy`, `ultralytics`, `PIL` (cache build
 | IQ reader | `ZoomSpec/src/zoomspec_repro/data.py` | `read_interleaved_iq`, `load_observation` | `.bin`+`.json` path | `Observation` (complex64 IQ + metadata) | `preprocessing.py` |
 | metadata parse | `data.py` | `parse_metadata` | JSON meta | `(f_lo_hz,f_hi_hz), targets` | `preprocessing.py` (non-GT metadata only) |
 | LS-STFT | `spectral.py` | `stft_complex`, `make_ls_frequency_grid`, `build_spectrogram`, `percentile_normalize` (normalization values from verified asset `ls_stft_normalization`) | Observation | 640×640 log-magnitude spectrogram | `preprocessing.py` |
-| LS-STFT (torch) | `spectral_torch.py` | `build_spectrogram_torch` | Observation | same (Torch backend; cache used numpy) | `preprocessing.py` (optional) |
+| LS-STFT (torch) | `spectral_torch.py` | `build_spectrogram_torch` | Observation | same (Torch backend; historical test-cache backend unresolved) | `preprocessing.py` (optional) |
 | geometry | `spectral.py` | `make_spectrogram_geometry` | metadata only | coordinate grids | `preprocessing.py` |
 | detector load | `scripts/evaluate_cpn.py` | `YOLO(model)` | checkpoint | YOLO model | `detector.py` |
 | detector inference | `evaluate_cpn.py` | `model.predict(...)` | cached PNGs | boxes xyxy/conf/cls | `detector.py` |
@@ -432,7 +432,7 @@ The Architect has locked the formal M9.1 server inference interpreter to:
 
 It is the historical ZoomSpec ML runtime (Python 3.12.3, torch 2.8.0+cu128 / CUDA build 12.8, ultralytics 8.4.114, numpy 2.3.2, scipy 1.18.0, Pillow 11.3.0, PyYAML 6.0.2) with the minimum platform Remote Runner dependencies added (pydantic 2.13.5, SQLAlchemy 2.0.52; typing-extensions remains 4.14.1). The scientific/model stack versions are unchanged from the historical environment; pydantic + SQLAlchemy were added for platform Remote Runner compatibility only.
 
-This environment was previously abandoned: the separate dedicated runtime `/root/autodl-tmp/wsp-runtime/m9-1-gpu` was created (then left incomplete) during an earlier runtime experiment and must NOT be used. The environment is NOT claimed to be byte-for-byte unchanged from the historical environment; scientific parity is verified later by the live inference parity gates (Task 12 / Gate 1), not by this document.
+`/root/miniconda3/bin/python` IS the formal M9.1 server inference runtime and is the one that must be used. The abandoned experiment is only the separate dedicated runtime `/root/autodl-tmp/wsp-runtime/m9-1-gpu`, which was created (then left incomplete) during an earlier runtime experiment and must NOT be used. The environment is NOT claimed to be byte-for-byte unchanged from the historical environment; scientific parity is verified later by the live inference parity gates (Task 12 / Gate 1), not by this document.
 
 Task 12 must use `/root/miniconda3/bin/python` and must not rely on `/root/autodl-tmp/wsp-runtime/m9-1-gpu`.
 
