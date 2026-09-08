@@ -445,7 +445,7 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 - Historical exact parity: all five approved probes (`0`=17, `156`=14, `2121`=22, `435`=21, `999`=24) reproduce the frozen oracle **exactly** (count, tier, ordering, t_start/t_end/f_low/f_high/confidence diffs all 0.0) when run in their exact historical batch-16 chunk context on the AutoDL acceptance server (RTX 5090, torch 2.8.0+cu128, ultralytics 8.4.114).
 - Output is platform-owned physical `CPNProposal` (t_start_s, t_end_s, f_low_hz, f_high_hz, bandwidth_tier, confidence); no Ultralytics `Results` objects escape the public API.
 - Live batch=1 behavior: on the approved probes, batch=1 and historical batch=16 have **same proposal count, same bandwidth tiers, same NMS survival** but small numerical float drift in xyxy/confidence/physical coords. No dummy batch padding is used; batch=1 is NOT claimed to be bitwise historical parity.
-- AHLP, FRN, full pipeline, registry registration, frontend, API, database, evaluator, and remote transport remain **NOT STARTED**.
+- FRN, full pipeline, registry registration, frontend, API, database, evaluator, and remote transport remain **NOT STARTED** (AHLP subsequently completed in Task 12C; see below).
 
 **Task 12B corrective pass — COMPLETED (fail-closed batch contract + live drift evidence):**
 
@@ -453,6 +453,22 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 - Fail closed on Ultralytics result cardinality mismatch: each chunk's `len(results)` must equal `len(chunk)` (RuntimeError with expected/actual counts and chunk start); total `len(raw_results)` must equal `len(spectrograms)` before physical conversion (RuntimeError otherwise).
 - No silent zip/truncation geometry misalignment is permitted; a mismatched result is never associated with the wrong `SpectrogramGeometry`.
 - Live batch=1 physical-coordinate drift was measured on the five approved probes (max t_start/t_end diff ~1e-5 s, max f_low/f_high diff ~0.2–10 kHz, max xyxy diff ~1e-4–8e-4, max conf diff ~0.001–0.023); count, bandwidth-tier multiset, and NMS survival remain unchanged. These are diagnostic float-level deltas, not an acceptance tolerance; batch=1 is not historical bitwise parity.
+
+**Task 12C production port — COMPLETED (frozen AHLP purification):**
+
+- AHLP Gate 0 classification: `AHLP_STAGE_GATE0_SEMANTICS_AND_REFERENCE_CONFIRMED`; no surviving frozen complex-IQ AHLP intermediate oracle (`FROZEN_AHLP_INTERMEDIATE_ORACLE_NOT_FOUND`). Historical AHLP runtime is deterministic.
+- Production file/symbol: `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/ahlp.py :: purify_candidate` (plus `PurifiedCandidate`, `AHLPDiagnostics`, private helpers `_frequency_shift_hz`, `_oscillator`, `_beta`, `_design_hamming_lowpass`, `_fft_convolve_same`, `_decimation`).
+- Pure NumPy dependency boundary: only stdlib + NumPy + Task-12B `CPNProposal`; no Torch / Ultralytics / SciPy / FastAPI / SQLAlchemy / recording reader / filesystem / DB.
+- Input: **whole-recording complex64 IQ** + `sample_rate_hz` + `center_frequency_hz` + `CPNProposal`; oscillator mixing phase uses **absolute recording sample indices** (`np.arange(n0, n1)`), negative complex exponential sign.
+- Crop: floor start / ceil end, end index exclusive; returned `crop_t_start_s = n0/fs`, `crop_t_end_s = n1/fs` (sample-aligned).
+- Filter: exact Hamming FIR (`2*ratio*sinc(2*ratio*n)` × `np.hamming` ÷ sum, float64), odd repair (+1/−1), clamp [31,4095], max-numtaps branch reproduced; `_MIN_NUMTAPS=31` is a defensive lower bound unreachable under frozen normal-filter constraints and absent from the frozen TEST proposals.
+- Convolution: exact FFT "same" alignment (`fft_length = 1 << (full-1).bit_length()`, crop `start=(taps-1)//2`), final complex64; no scipy/np.convolve substitution.
+- Decimation: `max(1, floor(fs/(2*f_lp)))`, index-0 phase `filtered[::decimation]`, candidate `sample_rate_hz = fs/decimation`.
+- dtype trace: input complex64 → oscillator/mixed baseband **complex128** → filtered/purified **complex64**.
+- Identity/Nyquist branch: trigger `requested_lowpass_hz >= 0.5*fs`; taps `[1.0]`; effective `lowpass_hz = np.nextafter(0.5*fs, 0)`.
+- Seven approved real probes (`0/1`, `0/0`, `0/3`, `1002/0`, `0/10`, `1/3`, `10/5`) from the frozen CPN oracle: **7/7 production-vs-historical exact candidate-byte parity** (shape, complex64 dtype, `np.array_equal`, raw-byte SHA256 all exact), **7/7 exact tap-byte parity**, scalar parity (decimation, crop indices, candidate fs, crop times, beta, requested/effective f_lp, frequency shift, numtaps, input/output samples, identity flag) all exact.
+- No durable new AHLP golden complex-IQ artifact was created; historical source is invoked only from the external acceptance test.
+- FRN and the full pipeline remain **NOT STARTED**. FRN autocast/float16 device parity remains UNRESOLVED (see §22).
 
 ## 22. Resolved and unresolved provenance items
 
