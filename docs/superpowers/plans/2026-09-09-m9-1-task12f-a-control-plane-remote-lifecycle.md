@@ -130,7 +130,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 - `backend/app/remote_execution/transport.py` (`SshRunner`, `RemoteTransportError`, `_invoke`, `run_runner`, `_is_safe_runner_token`).
 - `backend/app/remote_execution/runner.py` `main()` (line ~692) — controlled `PlatformError` prints `f"{code}: {message}"` to stderr, returns 1. **Do not modify runner.py in 12F-A.**
 - `backend/app/remote_execution/executor.py` (`RemoteExecutorProbe` Protocol).
-- `backend/app/remote_execution/profile.py` (`RemoteProfile`) — Task 3 adds runtime commit; Task 2 may reference the field as present after Task 3.
+- `backend/app/remote_execution/profile.py` (`RemoteProfile`) — Task 2 does **not** depend on the Task-3 `required_remote_runtime_commit` field; Task 2 owns only the probe adapter and error channel. The expected identities are injected through the probe constructor (below) and are wired from Task 3's field by Task 6/bootstrap.
 - `backend/app/analysis/schema.py` (`ExecutorAvailabilityRead`).
 - `backend/app/core/errors.py` (`PlatformError`).
 
@@ -166,24 +166,32 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 
 - `backend/app/remote_execution/executor.py` (modify):
   ```python
+  # RemoteExecutorProbe Protocol is UNCHANGED (3-argument availability):
+  class RemoteExecutorProbe(Protocol):
+      def availability(self, recording, pipeline, source_data_sha256) -> ExecutorAvailabilityRead: ...
+
   def _probe_response_from_stdout(stdout: str) -> RemoteProbeResponseV1:
       # strict JSON parse + field validation; raise on malformed.
 
-  class SshRemoteExecutorProbe:
-      def __init__(self, profile: RemoteProfile, transport: SshRunner): ...
-      def availability(self, recording, pipeline, source_data_sha256, *, expected_runtime_commit, expected_manifest_sha256) -> ExecutorAvailabilityRead:
+  class SshRemoteExecutorProbe(RemoteExecutorProbe):
+      def __init__(self, profile: RemoteProfile, transport: SshRunner, *,
+                   expected_runtime_commit: str, expected_manifest_sha256: str): ...
+      def availability(self, recording, pipeline, source_data_sha256) -> ExecutorAvailabilityRead:
+          # keep the exact 3-argument Protocol signature (no extra kwargs).
           # invoke transport.run_runner("probe", ())
-          # success → parse RemoteProbeResponseV1 → validate identities == local expectations → available=True (mismatch → explicit reason)
+          # success → parse RemoteProbeResponseV1 → validate identities == self.expected_* → available=True (mismatch → explicit reason)
           # RemoteRunnerExit(code=...) → available=False + mapped reason
           # RemoteTransportError → available=False + REMOTE_TRANSPORT_UNAVAILABLE
+  ```
+  Expected identities are passed through the **constructor** (`expected_runtime_commit`, `expected_manifest_sha256`), so Task 2 is independent of Task 3's new `RemoteProfile` field. Task 6/bootstrap wires `profile.required_remote_runtime_commit` into `SshRemoteExecutorProbe(...)` after Task 3 adds it.
   ```
 
 **RED test (`backend/tests/test_remote_probe_error_channel.py`, new):** fake `run_process` returns controlled runner exits and generic transport failures.
 
 Tests:
-- `test_probe_success_maps_available_true`: fake zero exit, stdout = exact `RemoteProbeResponseV1` JSON → `available=True`, `reason_code is None`, and identity checks pass.
-- `test_probe_runtime_commit_mismatch_is_unavailable`: response `remote_runtime_commit != profile.required_remote_runtime_commit` → `available=False`, reason `REMOTE_IMPLEMENTATION_MISMATCH`.
-- `test_probe_manifest_mismatch_is_unavailable`: response `asset_manifest_sha256 != local` → `available=False`, reason `PIPELINE_ASSET_MISMATCH`.
+- `test_probe_success_maps_available_true`: fake zero exit, stdout = exact `RemoteProbeResponseV1` JSON, probe constructed with matching `expected_runtime_commit`/`expected_manifest_sha256` → `available=True`, `reason_code is None`, identity checks pass.
+- `test_probe_runtime_commit_mismatch_is_unavailable`: response `remote_runtime_commit != <expected_runtime_commit>` (injected via constructor) → `available=False`, reason `REMOTE_IMPLEMENTATION_MISMATCH`.
+- `test_probe_manifest_mismatch_is_unavailable`: response `asset_manifest_sha256 != <expected_manifest_sha256>` (injected via constructor) → `available=False`, reason `PIPELINE_ASSET_MISMATCH`.
 - `test_probe_structured_runner_failure_maps_explicit_unavailable`: stderr `REMOTE_IMPLEMENTATION_MISMATCH: <msg>` → `available=False`, `reason_code=="REMOTE_IMPLEMENTATION_MISMATCH"`.
 - `test_runner_error_requires_single_uppercase_code_line`: a two-line stderr or lowercase/freeform stderr → **generic `RemoteTransportError`** (not `RemoteRunnerExit`).
 - `test_generic_ssh_failure_stays_remote_transport_error`: nonzero with arbitrary ssh stderr (e.g. `Connection refused\n...`) → `RemoteTransportError`.
@@ -253,7 +261,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 - `backend/app/remote_execution/schema.py` (`RemoteExecutionBatchV1`, `RemoteExecutionRequestV1`, `RemoteExecutionItemV1` — note it requires `local_run_id`, `RemotePipelineRefV1`, `RemoteRecordingRefV1`, `GitCommitSha`/`WireIdentifier`/`Sha256Hex`/`LabelSpace`).
 - `backend/app/remote_execution/canonical.py` (`compute_request_sha256`, `canonical_request_payload`, `canonical_request_bytes`).
 - `backend/app/remote_execution/assets.py` (`load_pipeline_asset_manifest` — strict loader that validates the self-hash `asset_manifest_sha256`).
-- `backend/app/remote_execution/source_hash.py` (`resolve_source_data_sha256(session, recording, data_root)`), `backend/app/remote_execution/resolver.py`, `backend/app/recordings/model.py`, `backend/app/imported_runs/fingerprint.py` (`build_recording_fingerprint`) and `backend/app/imported_runs/batch_validation.py` (`_manifest_recording_for(recording, gt_rows)`).
+- `backend/app/remote_execution/source_hash.py` (`resolve_source_data_sha256(session, recording, data_root)`), `backend/app/remote_execution/resolver.py`, `backend/app/recordings/model.py`, `backend/app/imported_runs/fingerprint.py` (`build_recording_fingerprint`; also hosts the pinned public `manifest_recording_for` helper) and `backend/app/imported_runs/batch_validation.py` (the current private `_manifest_recording_for` that is promoted to `manifest_recording_for`).
 - `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/asset_manifest.json` (assets + `asset_manifest_sha256`).
 
 **Decision (LOCKED):** `remote_execution/request_builder.py` is **construction-only** — no file/DB/GT I/O. It accepts **already-resolved** identities:
@@ -288,7 +296,7 @@ class RemoteRecordingIdentity:
 def resolve_remote_recording_identity(session, recording, data_root, local_run_id) -> RemoteRecordingIdentity:
     source = resolve_source_data_sha256(session, recording, data_root)          # exact raw-IQ bytes
     gt_rows = list(session.scalars(select(GroundTruthModel).where(GroundTruthModel.recording_id == recording.id)))
-    manifest_recording = _manifest_recording_for(recording, gt_rows)            # records + GT semantics
+    manifest_recording = manifest_recording_for(recording, gt_rows)             # public shared helper (records + GT semantics)
     fingerprint = build_recording_fingerprint(recording.dataset_name, recording.dataset_split, recording.label_space, manifest_recording).sha256
     return RemoteRecordingIdentity(..., dataset_key=recording.name, ...)
 
@@ -299,21 +307,64 @@ def resolve_asset_manifest_sha256(asset_manifest_path) -> str:
     manifest = load_pipeline_asset_manifest(asset_manifest_path)                # strict loader + validated self-hash
     return manifest.asset_manifest_sha256
 ```
-No second fingerprint/hash scheme; reuses `build_recording_fingerprint`, `resolve_source_data_sha256`, `load_pipeline_asset_manifest`. `_manifest_recording_for` is the exact existing Recording→ManifestRecording builder (used by `batch_validation`); promate/reuse it (not reinvent). `resolve_local_orchestrator_commit` runs `git rev-parse HEAD` read-only and validates exactly 40 lowercase hex.
+No second fingerprint/hash scheme; reuses `build_recording_fingerprint`, `resolve_source_data_sha256`, `load_pipeline_asset_manifest`.
+
+**Shared manifest helper (LOCKED — pinned):** extract the existing Recording→ManifestRecording builder from `batch_validation._manifest_recording_for` into a **public** shared helper so `remote_execution` does not import a private symbol indefinitely:
+
+```python
+# backend/app/imported_runs/fingerprint.py  (add public helper)
+def manifest_recording_for(recording: RecordingModel, gt_rows: list[GroundTruthModel]) -> ManifestRecording:
+    """Build a ManifestRecording from a RecordingModel + its GroundTruth rows (public,
+    shared by batch validation and remote identity resolution)."""
+    ...
+```
+
+- Promote the existing `_manifest_recording_for(recording, gt_rows)` behavior to `manifest_recording_for(...)` in `app.imported_runs.fingerprint` (the natural home beside `build_recording_fingerprint`). Use `TYPE_CHECKING`-guarded `RecordingModel`/`GroundTruthModel` imports for annotations to avoid a runtime import cycle (`recordings.model` does not import `fingerprint`).
+- `batch_validation.py` updates to call the **same** public `manifest_recording_for` (remove its private copy; no semantic change).
+- `remote_execution/identity.py` calls the same public helper.
+- No duplicate implementation. Existing batch/fingerprint tests must remain green.
+
+`resolve_local_orchestrator_commit` runs `git rev-parse HEAD` read-only and validates exactly 40 lowercase hex.
 
 **Builder (file):**
 
 `backend/app/remote_execution/request_builder.py` (new):
 
 ```python
-def freeze_request_provenance(*, local_run_id, recording_fingerprint, source_data_sha256,
-                              dataset_name, dataset_split, dataset_key, label_space,
-                              pipeline_id, pipeline_version, required_remote_runtime_commit,
-                              orchestrator_commit, asset_manifest_sha256, remote_profile,
-                              *, id_factory=None) -> dict:
+def freeze_request_provenance(*,
+                              local_run_id,
+                              recording_fingerprint,
+                              source_data_sha256,
+                              dataset_name,
+                              dataset_split,
+                              dataset_key,
+                              label_space,
+                              pipeline_id,
+                              pipeline_version,
+                              required_remote_runtime_commit,
+                              orchestrator_commit,
+                              asset_manifest_sha256,
+                              remote_profile,
+                              id_factory=None) -> dict:
     """Pure provenance construction. ID factory injectable for deterministic tests;
-    production uses fresh safe UUIDs (default). Returns the exact metadata dict."""
+    production uses fresh safe UUIDs (default). Returns the FROZEN REQUEST METADATA dict
+    (see the frozen-request key list below; it does NOT include coordinator_token)."""
+```
 
+`freeze_request_provenance` generates `request_id`/`batch_id`/`item_key` via the (injected) id factory (default fresh safe IDs), builds the batch (one item, `parameters={}`), computes `request_sha256 = compute_request_sha256(batch)`, returns the **frozen request metadata** including `local_run_id`. `build_batch` reconstructs the full item from metadata alone (request_id/batch_id/item_key/local_run_id/pipeline/recording/parameters) and recomputes `request_sha256`.
+
+**Two metadata layers are distinct — do not conflate them:**
+
+**FROZEN REQUEST METADATA (Task 4 output):**
+```
+request_id, batch_id, item_key, local_run_id, request_sha256, orchestrator_commit,
+required_remote_runtime_commit, asset_manifest_sha256, pipeline_id, pipeline_version,
+remote_profile, recording_fingerprint, source_data_sha256, dataset_name, dataset_split,
+dataset_key, label_space, parameters
+```
+
+Also (members of the builder module):
+```python
 def build_batch(metadata: dict) -> RemoteExecutionBatchV1:
     """Reconstruct an identical RemoteExecutionBatchV1 from metadata alone."""
 
@@ -321,30 +372,30 @@ def verify_request_sha256(batch: RemoteExecutionBatchV1, metadata: dict) -> bool
     return compute_request_sha256(batch) == metadata["request_sha256"]
 ```
 
-`freeze_request_provenance` generates `request_id`/`batch_id`/`item_key` via the (injected) id factory (default fresh safe IDs), builds the batch (one item, `parameters={}`), computes `request_sha256 = compute_request_sha256(batch)`, returns metadata including `local_run_id`. `build_batch` reconstructs the full item from metadata alone (request_id/batch_id/item_key/local_run_id/pipeline/recording/parameters) and recomputes `request_sha256`.
+**FINAL LOCAL EXECUTION METADATA (before coordinator launch, Task 5/6 adds):**
+```
+<all frozen request metadata above> + coordinator_token
+```
 
-**`execution_metadata_json` keys (exact, ordered):**
-```
-request_id, batch_id, item_key, local_run_id, request_sha256, orchestrator_commit,
-required_remote_runtime_commit, asset_manifest_sha256, pipeline_id, pipeline_version,
-remote_profile, recording_fingerprint, source_data_sha256, dataset_name, dataset_split,
-dataset_key, label_space, parameters, coordinator_token
-```
-**Initial metadata does NOT contain `payload_sha256`** — `payload_sha256` is appended only after successful ingest (by `result_ingestor`, unchanged). `coordinator_token` is set by Task 5/7 (Task 5 sets on first launch; Task 7 rotates).
+**Rules:**
+
+- `payload_sha256` is **absent** until successful ingest (appended only by `result_ingestor`, unchanged). It is not part of either layer above.
+- `coordinator_token` is added by `build_coordinator_metadata` (Task 5/6) and is **EXCLUDED** from `RemoteExecutionBatchV1` and from `request_sha256` — changing/adding it must not change `build_batch()` or `request_sha256`.
+- Task 4 tests assert the **frozen-request keys** only (no `coordinator_token`). Task 6 tests assert the **final local metadata** contains `coordinator_token`.
 
 **RED test (`backend/tests/test_remote_request_freeze.py`, new):**
 
-Tests:
-- `test_freeze_produces_all_required_provenance_keys`: metadata has every locked key.
+Tests (assert the **frozen-request metadata** keys only):
+- `test_freeze_produces_all_frozen_request_keys`: metadata has exactly the frozen-request key list and **no** `coordinator_token`.
 - `test_freeze_has_no_payload_sha256_initially`: `payload_sha256` absent before ingest.
 - `test_freeze_parameters_is_empty_dict`.
 - `test_batch_has_one_item_per_run_and_requires_local_run_id`: `len(batch.items)==1`; `batch.items[0].local_run_id == metadata["local_run_id"] == local_run_id`.
-- `test_request_sha_reconstructs_from_persisted_metadata`: freeze once → persist metadata → `build_batch(metadata)` → `compute_request_sha256(...) == metadata["request_sha256"]` and `verify_request_sha256(...) is True`.
+- `test_request_sha_reconstructs_from_persisted_metadata`: freeze once → persist frozen metadata → `build_batch(metadata)` → `compute_request_sha256(...) == metadata["request_sha256"]` and `verify_request_sha256(...) is True`.
 - `test_two_fresh_freezes_generate_distinct_ids_and_shas`: two freezes with default (random) id factory differ in request_id/batch_id/item_key and normally differ in request_sha256.
 - `test_deterministic_id_factory_produces_reproducible_sha`: with an injected deterministic id factory, two freezes of identical resolved identities produce the same request_sha256.
 - `test_ids_are_system_generated_and_format_validated`: ids match `WireIdentifier`, not free text.
 - `test_batch_parameters_empty_and_no_host_provenance_in_parameters`.
-- `test_identity_resolution_reuses_existing_primitives`: `resolve_remote_recording_identity` calls `resolve_source_data_sha256`, `build_recording_fingerprint`, `_manifest_recording_for` (assert via mocks/spies), no new hash scheme.
+- `test_identity_resolution_reuses_existing_primitives`: `resolve_remote_recording_identity` calls `resolve_source_data_sha256`, `build_recording_fingerprint`, and the shared public `manifest_recording_for` (assert via mocks/spies), no new hash scheme and no private helper import.
 - `test_orchestrator_commit_from_local_git_validated_40hex`: `resolve_local_orchestrator_commit` returns a valid 40-hex; test with a real `git rev-parse HEAD` in a fixture repo.
 - `test_asset_manifest_sha256_not_hardcoded`: `resolve_asset_manifest_sha256` uses `load_pipeline_asset_manifest` self-hash (no literal `16cc053…` in the builder).
 
@@ -394,21 +445,41 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 - `backend/app/remote_execution/coordinator.py` (new):
   ```python
   class Coordinator:
-      def __init__(self, *, job_manager, ingestor, metadata, coordinator_token, sleep_fn=None, poll_interval=1.0, logger=None): ...
+      def __init__(self, *,
+                   session_factory,                 # explicit DB/session dependency (ContextManager/SessionFactory)
+                   job_manager,                     # RemoteGpuJobManager
+                   metadata,                        # FINAL LOCAL EXECUTION METADATA (frozen request + coordinator_token)
+                   coordinator_token,
+                   sleep_fn,
+                   poll_interval,
+                   logger=None): ...
+      def _open_current_session(self): ...          # opens a NEW short-lived session (never held across sleeps)
+      def _require_current_fence(self, session) -> AnalysisRunModel:
+          # opens/uses the current DB session and verifies:
+          #   run exists; run.executor == "remote_gpu"; run.execution_metadata_json["coordinator_token"] == self.coordinator_token
+          # raise/exit cleanly on any mismatch (NO further mutation).
       def run(self) -> str:  # terminal status
-          # 1) verify coordinator_token == DB token, else exit
-          # 2) rebuild batch via build_batch(metadata); verify request_sha256
-          # 3) submit-or-attach: submit the SAME immutable batch every start (server create-or-attach idempotent)
-          # 4) poll: RemoteBatchStatusV1
+          # For EVERY reachable remote side effect and terminal mutation:
+          #   BEFORE submit/poll side effect, download, ingest, failed/interrupted/completed mutation,
+          #   the coordinator opens a current DB session, runs _require_current_fence, and acts.
+          # 1) fence check -> rebuild batch via build_batch(metadata); verify request_sha256
+          # 2) submit-or-attach: submit the SAME immutable batch every start (server create-or-attach idempotent)
+          # 3) poll: RemoteBatchStatusV1
           #    - queued/running -> pending/running; set started_at once on running; bounded poll delay (sleep_fn)
           #    - completed -> download envelope+zip -> strict envelope parse -> ingest_remote_result once -> completed
           #    - failed -> failed
           #    - interrupted / unrecoverable remote job -> interrupted
           #    - uncertain generic submit/status transport failure -> re-query SAME batch before terminal decision
           #    - transient status unavailable -> remain recoverable, retry with bounded delay
-          # 5) terminal states set finished_at; completed only after local ingest transaction commits
+          # 4) terminal states set finished_at; completed only after local ingest transaction commits
   def main(argv=None) -> int:  # python -m app.remote_execution.coordinator <run_id> --coordinator-token <token>
   ```
+
+  Fencing + transaction rules (LOCKED):
+  - The coordinator never holds one DB transaction open across a polling sleep. It opens a fresh short-lived session per action (`_open_current_session`).
+  - For **completed** ingest, the fence check + `ingest_remote_result` + the status commit must occur in the **same** DB transaction/session — token cannot be verified in one transaction and mutated in another. On token mismatch the coordinator exits before any download/ingest/terminal mutation.
+  - For **failed**/**interrupted** mutations, the coordinator re-checks the fence in the same transaction that flips the state.
+
   Local AnalysisRun lifecycle mapping: remote `queued`→`pending`; `running`→`running` (`started_at` once); `completed`→`completed` only after local ingest transaction; `failed`/`interrupted`→terminal with `finished_at`. `ingest_remote_result` stays the only persistence path (no direct output writes).
 
 - `backend/app/remote_execution/job_manager.py` (modify): `RemoteGpuJobManager` must preserve `RemoteRunnerExit` codes/messages for `submit`/`status` (currently catches `RemoteTransportError` and collapses them). Generic transport remains generic. Map: `RemoteRunnerExit` → `PlatformError(REMOTE_SUBMIT_FAILED / REMOTE_STATUS_UNAVAILABLE ...)` carrying the runner code; `RemoteTransportError` → generic transport error. This preserves safe runner diagnostics for the coordinator to interpret.
@@ -416,18 +487,21 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 **RED test (`backend/tests/test_remote_coordinator.py`, new):** fake job-manager transport responses (fake `RemoteGpuJobManager`/`SshRunner`) + call-through fake ingestor; inject `sleep_fn` so tests never hang.
 
 Tests:
-- `test_coordinator_rejects_stale_fencing_token`: DB token != coordinator token → exits without download/ingest/terminal mutation.
+Tests (inject `sleep_fn`; use a DB session factory; fake job-manager transport responses and a call-through fake ingestor; no SSH/GPU):
+- `test_coordinator_rejects_stale_fencing_token_before_poll`: DB token != coordinator token → exits with **no** remote submit/poll side effect.
+- `test_coordinator_token_stale_before_completed_download_ingest`: token becomes stale between `running` and `completed` → **no** download/ingest.
+- `test_coordinator_token_stale_before_terminal_failed_mutation`: token stale before `failed` mutation → no mutation.
+- `test_coordinator_valid_token_completed_ingests_once_same_transaction`: valid token → single `_require_current_fence` + `ingest_remote_result` + status commit in the same transaction/session → run `completed`, exactly once.
 - `test_coordinator_request_sha_reconstructs_from_persisted_metadata`.
 - `test_coordinator_submits_same_batch_every_start`: two starts submit the same immutable batch (idempotent create-or-attach), no duplicate.
 - `test_coordinator_queued_running_completed_sequence`: `queued→running→completed`; started_at set once; download+ingest once; terminal `completed`.
-- `test_coordinator_ingests_once_on_completion`.
 - `test_coordinator_repeated_completion_is_idempotent`: re-run → no second ingest.
-- `test_coordinator_failed_marks_failed` (terminal, finished_at set).
-- `test_coordinator_interrupted_marks_interrupted`.
+- `test_coordinator_interrupted_marks_interrupted` (terminal, finished_at set).
 - `test_coordinator_transient_status_unavailable_retries_with_bounded_delay`: sleep_fn records calls; run stays recoverable, no terminal.
 - `test_coordinator_uncertain_submit_transport_failure_reconciles_same_batch_before_terminal`.
+- `test_coordinator_does_not_hold_transaction_across_sleep`: each poll/sleep uses a fresh session; no single session spans a sleep.
 - `test_coordinator_never_invokes_local_worker`: launched module is `app.remote_execution.coordinator`, not `app.analysis.worker`.
-- `test_coordinator_token_excluded_from_request_sha`: changing only the token in metadata does not change `request_sha256`.
+- `test_coordinator_token_excluded_from_request_sha`: adding/rotating only `coordinator_token` in metadata does not change `build_batch()`/`request_sha256`.
 
 **Expected failure (RED):** `coordinator.py`/`coordinator_job_manager.py` missing; `job_manager` collapses runner exits.
 
@@ -446,7 +520,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 **First: read before editing**
 
-- `backend/app/analysis/service.py` (`create_run`, `executor_availability`), `analysis/job_manager.py` (`LocalJobManager`), `analysis/router.py`, `remote_execution/identity.py`/`request_builder.py` (Tasks 4), `coordinator_job_manager.py` (Task 5), `remote_execution/executor.py` (probe).
+- `backend/app/analysis/service.py` (`create_run`, `executor_availability`), `analysis/job_manager.py` (`LocalJobManager`), `analysis/router.py`, `remote_execution/identity.py`/`request_builder.py` (Tasks 4), `remote_execution/startup.py`/`coordinator_job_manager.py` (Task 5), `remote_execution/executor.py` (probe).
 
 **Decision (LOCKED) — `create_run(remote_gpu)` semantics:**
 - Generate the AnalysisRun id **BEFORE** freezing provenance.
@@ -455,7 +529,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 - **do NOT reject merely because `cpu_supported=True`** (ZoomSpec is `cpu_supported=False`, but the gate must not couple to it);
 - the frozen ZoomSpec path **MUST explicitly reject any non-empty parameters** (`PIPELINE_INCOMPATIBLE` / `PARAMETERS_NOT_SUPPORTED`), never silently discard them;
 - consult the same remote availability/probe service **before** creating/dispatching; unavailable → explicit `EXECUTOR_UNAVAILABLE` before any coordinator launch;
-- on success, freeze provenance (with `local_run_id`), create `AnalysisRun(executor="remote_gpu", status="pending", execution_metadata_json=metadata)`, set `coordinator_token`, launch the coordinator via `CoordinatorJobManager`.
+- on success, freeze provenance (with `local_run_id`) → obtains the **frozen request metadata** → builds the **final local execution metadata** via `build_coordinator_metadata(metadata, coordinator_token=...)` → creates `AnalysisRun(executor="remote_gpu", status="pending", execution_metadata_json=final_metadata)` → launches the coordinator via `CoordinatorJobManager` with that `coordinator_token`.
 - `local_cpu` behavior unchanged.
 
 **Interfaces (file):**
@@ -478,7 +552,8 @@ Tests:
 - `test_remote_create_run_does_not_reject_cpu_supported_true`: a remote-capable pipeline with `cpu_supported=True` is **not** rejected on that basis (only capability + label-space drive the gate).
 - `test_remote_create_run_rejects_non_empty_frozen_parameters`: non-empty `parameters` → rejected; empty `{}` accepted.
 - `test_remote_create_run_consults_probe_before_dispatch`: unavailable probe → `EXECUTOR_UNAVAILABLE`, coordinator launch **not** called.
-- `test_remote_create_run_freezes_provenance_with_local_run_id`: `execution_metadata_json["local_run_id"] == run.id`, all locked keys present, `payload_sha256` absent.
+- `test_remote_create_run_freezes_provenance_with_local_run_id`: `execution_metadata_json["local_run_id"] == run.id`, all **frozen-request** keys present, `payload_sha256` absent.
+- `test_remote_create_run_final_metadata_contains_coordinator_token`: final local `execution_metadata_json` contains `coordinator_token` (frozen-request metadata does not).
 - `test_remote_create_run_launches_coordinator_not_local_worker`: fake launcher receives run id + token; `LocalJobManager` never invoked; `worker_pid` set only from launcher.
 - `test_remote_create_run_failed_launch_marks_failed`.
 - `test_local_cpu_path_unchanged`.
@@ -502,7 +577,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 **First: read before editing**
 
-- `backend/app/analysis/service.py` (`mark_stale_running_runs_interrupted`), `analysis/model.py`, `main.py`, `remote_execution/coordinator_job_manager.py`, `remote_execution/startup.py`.
+- `backend/app/analysis/service.py` (`mark_stale_running_runs_interrupted`), `analysis/model.py`, `main.py`, `remote_execution/coordinator_job_manager.py`, `remote_execution/startup.py`, `remote_execution/request_builder.py`, `remote_execution/identity.py`, `remote_execution/executor.py` (probe availability), `remote_execution/profile.py` (runtime-commit config).
 
 **Decision (LOCKED):**
 - `mark_stale_running_runs_interrupted` marks **`local_cpu`** `running` runs `interrupted` only; `remote_gpu` pending/running is **never** blindly interrupted.
@@ -516,11 +591,12 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
   ```python
   def mark_stale_local_cpu_runs_interrupted(session) -> int:  # status==running AND executor=="local_cpu"
   def find_orphaned_remote_runs(session) -> list[str]:          # remote_gpu pending/running
-  def rotate_coordinator_token(metadata: dict) -> dict:         # replace coordinator_token
+  def rotate_coordinator_token(metadata: dict) -> dict:         # replace coordinator_token on the FINAL LOCAL metadata layer
   def coordinate_orphaned_remote_runs(session, *, launcher, remote_config_available: bool, seen_run_ids: set[str]) -> int:
-      # for each orphaned run: if remote_config_available: rotate token, persist, launch once (dedup within pass).
+      # for each orphaned run: if remote_config_available: rotate token (final local metadata), persist, launch once (dedup within pass).
       # if not remote_config_available: leave runs untouched, launch nothing.
   ```
+  `rotate_coordinator_token` operates on the final local execution metadata (frozen request + `coordinator_token`); it must not alter any frozen-request field, and it must not change `build_batch()`/`request_sha256`.
 
 - `backend/app/main.py` (modify): in `create_app` recovery block, replace the blanket `mark_stale_running_runs_interrupted` with `mark_stale_local_cpu_runs_interrupted` + `coordinate_orphaned_remote_runs(..., remote_config_available=<bool>)`.
 
@@ -593,6 +669,8 @@ backend/app/remote_execution/coordinator_job_manager.py                        (
 backend/app/remote_execution/startup.py                                        (new: coordinator_token helper)
 backend/app/remote_execution/recovery.py                                       (new)
 backend/app/remote_execution/job_manager.py                                    (modify: preserve runner exits)
+backend/app/imported_runs/fingerprint.py                                       (modify: shared manifest_recording_for)
+backend/app/imported_runs/batch_validation.py                                  (modify: call shared manifest_recording_for)
 backend/app/analysis/service.py                                                (modify)
 backend/app/analysis/router.py                                                 (modify: wiring + availability route)
 backend/app/main.py                                                            (modify: bootstrap + recovery)
@@ -605,16 +683,19 @@ backend/tests/test_remote_create_run.py                                        (
 backend/tests/test_remote_startup_recovery.py                                  (new)
 ```
 
-**Explicitly NOT modified:** `remote_execution/runner.py` (12F-B producer; no change), no `frn.py`/`detector.py`/`preprocessing.py`/`ahlp.py`/`postprocess.py` scientific change, no `recordings`, no `imported_runs`, no frontend, no new ORM entity.
+**Explicitly NOT modified:** `remote_execution/runner.py` (12F-B producer; no change), no `frn.py`/`detector.py`/`preprocessing.py`/`ahlp.py`/`postprocess.py` scientific change, no `recordings`, no new ORM entity, no frontend. `imported_runs/fingerprint.py` and `imported_runs/batch_validation.py` are touched **only** to host/call the shared public `manifest_recording_for` (pure refactor, no semantic change; existing batch/fingerprint tests must stay green).
 
 ---
 
 ## Self-Review
 
 - **Schema reconstruction:** `RemoteExecutionItemV1` requires `local_run_id`; Task 4 generates the AnalysisRun id before freeze, persists `local_run_id`, and `build_batch(metadata)` reconstructs the full item (request_id/batch_id/item_key/local_run_id/pipeline/recording/parameters) from metadata alone. Every schema-required field is reconstructible.
-- **No forward dependency:** Task 3 adds `required_remote_runtime_commit` to profile; Task 2 only references it after Task 3; Task 4/6 do the hardcoded-SHA source scans and builder/orchestrator separation; Task 5 adds fencing; Task 6 wires create_run + availability route; Task 7 startup. Each RED fails only for that task's missing behavior.
+- **No forward dependency:** Task 2 ships `SshRemoteExecutorProbe(profile, transport, *, expected_runtime_commit, expected_manifest_sha256)` with no need for Task 3's new `RemoteProfile` field (expected identities injected via the constructor); Task 3 adds `profile.required_remote_runtime_commit`; Task 6/bootstrap wires that field into the probe constructor; Task 4/6 own the builder/orchestrator separation + hardcoded-SHA scans; Task 5 adds fencing; Task 6 wires create_run + availability route; Task 7 startup. Each RED fails only for that task's missing behavior. Execution order 1→2→3→4→5→6→7→8 has no forward dependency.
+- **Probe Protocol conformance:** `SshRemoteExecutorProbe.availability(recording, pipeline, source_data_sha256)` keeps the exact 3-argument `RemoteExecutorProbe` Protocol signature (no extra kwargs); expected identities are constructor-injected.
 - **Identity semantics:** the deterministic-id test uses an injected `id_factory`; two fresh freezes produce distinct random IDs and normally distinct SHAs (never asserted equal). No test contradicts UUID/request-identity semantics.
-- **Fencing:** an old surviving coordinator, after token rotation, sees a mismatch and exits without download/ingest/terminal mutation; only the token rotates `request_sha256` unchanged (tested). `seen_run_ids` is per-pass convenience only.
+- **Metadata layering:** Task 4 produces frozen request metadata (no `coordinator_token`); Task 6 produces final local metadata (frozen request + `coordinator_token`); `coordinator_token`/`payload_sha256` are excluded from `build_batch()`/`request_sha256`; `payload_sha256` is absent until ingest. The two layers are never conflated.
+- **Fencing has a real DB/session path:** `Coordinator(..., session_factory, ...)` opens a short-lived session via `_open_current_session` and calls `_require_current_fence(session)` before every remote side effect and terminal mutation. For completed ingest the fence check + `ingest_remote_result` + status commit occur in the **same** transaction/session; no single transaction spans a polling sleep. A stale coordinator cannot ingest or mutate (tested).
+- **Shared manifest helper:** `manifest_recording_for(recording, gt_rows)` is the single public helper in `app.imported_runs.fingerprint`, used by both `batch_validation` and `remote_execution/identity.py`; no private helper duplication or import remains.
 - **Frozen parameters:** non-empty ZoomSpec parameters are explicitly rejected, never silently ignored.
 - **Probe error channel:** generic SSH/SCP failure stays `RemoteTransportError`; only a single bounded `CODE: message` stderr line becomes `RemoteRunnerExit`. No arbitrary stderr/traceback reaches API users.
 - **12F-A boundary:** no real SSH/GPU/runner-body implementation enters 12F-A; the probe adapter works with deterministic fake transport responses; `runner.py` is untouched. Availability is consulted before coordinator dispatch, and remote_gpu unavailable yields explicit `EXECUTOR_UNAVAILABLE`.
