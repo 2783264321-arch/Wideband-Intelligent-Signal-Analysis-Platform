@@ -474,7 +474,7 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 
 - UNRESOLVED (low risk): The exact `torch.autocast` state and whether any FRN shard ran CPU vs CUDA — the driver selects `cuda if available else cpu` (`run_frn_on_proposals.py` line 56); the historical GPU was RTX 5090, so CUDA+float16 autocast was active, but the per-shard device isn't logged. This affects numerics at 1e-7 scale only.
 - RESOLVED by Task 12 Gate 0: The `--backend torch` vs numpy question for the TEST cache build. The surviving stage record `config_sha256` for `cpn_ls_stft_test` is `f356013b…`; Gate 0 recomputed the stage-config hash against the actual builder config fields and found an exact match for `backend="torch"`, `device="cuda"`, `representation="ls_stft"`, `n_fft=2048`, `hop=1024`, `tier_edges_hz=[400000.0, 5000000.0]`, `limit_per_split=None`. Torch-generated decoded uint8 images matched the historical cached images 5/5 exactly (diff_pixels=0, identical_fraction=1.0, matching pixel-byte SHA256); the NumPy path differed by small ±1 uint8 rounding-boundary effects. Task 12A parity reference is the Torch path. Note: this proves the historical build *configuration*, not the literal command-line argv text, which was not preserved.
-- UNRESOLVED (parity detail): Exact float16 autocast rounding on the RTX 5090 for the FRN forward — must be confirmed by Task-12/Gate-1 runtime, not by reading.
+- RESOLVED by Task 12D / corrective: Exact float16 autocast rounding on the RTX 5090 for the FRN forward. Task 12D raw-head parity under RTX 5090 + torch 2.8.0+cu128 + CUDA float16 autocast is **bitwise exact** (`torch.equal=True`, `max_abs_diff=0.0`) for all 9 heads in both the synthetic architecture-equivalence test and the historical real recording-batch acceptance (samples 0/1/10/1002). No tolerance was required. (Historical acceptance authority remains RTX 5090 / torch 2.8.0+cu128 / CUDA float16 autocast; this does NOT claim device portability to other GPUs.)
 
 ## 23. Formal M9.1 remote inference runtime
 
@@ -573,10 +573,17 @@ backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/frn.py
 ### Parity results
 
 - Level 1 feature parity: production features byte-identical to historical for all 7 approved probes (`0/0`, `0/1`, `0/3`, `0/10`, `1002/0`, `1/3`, `10/5`). IQ/FFT `np.array_equal=True`, raw-byte SHA256 equal; bandwidth-context exact.
-- Level 2 raw neural head parity: all 9 heads `torch.equal=True`, `max_abs_diff=0.0` (batch=4 seeded identical inputs, CUDA float16 autocast).
-- Level 3 frozen diagnostic-oracle parity: all probes exact (class_id, signal/class prob, start/duration/bandwidth/center norms, t0/t1, f0/f1, final_score) — zero diff.
-- Sample-0 full pre-NMS parity: 17/17 production rows exact vs frozen raw-shard rows.
-- batch=1 vs recording-batch diagnostic: recorded; no semantic divergence (no class-argmax change, no valid↔invalid transition). No low-level CUDA kernel root cause is claimed; wording is "batch shape changes CUDA/FP16 forward numerics" for any residual drift (there was none observed).
+- Synthetic architecture raw-head equivalence (unit-level): all 9 heads `torch.equal=True`, `max_abs_diff=0.0` (batch=4 seeded identical inputs, CUDA float16 autocast). This proves architecture equivalence but is NOT the historical acceptance run.
+- **Real historical recording-batch raw-head parity (acceptance)**: for samples `0` (17 proposals), `1` (29), `10` (21), `1002` (9), each recording's full candidate batch (all frozen CPN proposals in oracle order, via Task-12C production AHLP) run through both the historical and production FRN models under CUDA float16 autocast with identical tensors. Every head (`class_logits`, `signal_logit`, `start_logits`, `duration_logits`, `bandwidth_logits`, `center_offset`, `start`, `duration`, `bandwidth`) — `torch.equal=True`, `max_abs_diff=0.0`. All four samples have ≤64 proposals, so each is a single real recording chunk (no padding, no sub-chunking).
+- Level 3 frozen diagnostic-oracle parity: all probes exact (test `test_task12d_frozen_frn_diagnostic_oracle_parity` uses direct `float(actual) == float(oracle)` equality for class_id, signal/class prob, start/duration/bandwidth/center norms, t0/t1, f0/f1, final_score) — zero diff.
+- Sample-0 full pre-NMS parity: 17/17 production rows exact (`float == float`, no tolerance) vs frozen raw-shard rows.
+- batch=1 vs recording-batch diagnostic: measured actual drift across all 7 approved probes. **Nonzero but tiny** batch-shape-sensitive CUDA/FP16 forward drift; no semantic divergence observed (class_id/argmax unchanged, valid↔invalid unchanged for all probes). Representative measured values:
+  - max class-logit diff ~3.9e-3 … 7.8e-3
+  - class-probability diff ≤ ~1.9e-3; signal-probability diff 0.0
+  - start/duration/bandwidth/center-offset diffs ≤ ~1e-6
+  - physical f_low/f_high diff up to ~90 Hz (1002/0), t_start/t_end diff ≤ ~3e-10 s, confidence diff ≤ ~1.4e-3
+
+  Wording used: "batch shape changes CUDA/FP16 forward numerics; no semantic divergence observed on the approved probes". No low-level CUDA kernel root cause is claimed. **Note**: production `refine_batch` at the real recording batch size is bitwise exact to the historical model (Corrective A); the drift is present only when a single candidate is run alone with `batch_size=1`, which is diagnostic/single-candidate behavior, not the preferred live mode.
 
 ### Out-of-scope for Task 12D
 

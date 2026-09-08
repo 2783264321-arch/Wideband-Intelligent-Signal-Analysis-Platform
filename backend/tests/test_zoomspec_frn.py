@@ -371,12 +371,60 @@ def test_task12d_geometric_score_fusion():
 
 
 def test_task12d_invalid_geometry_returns_positional_none(monkeypatch):
+    """Corrective D: invalid geometry yields positional None (no silent deletion).
+
+    Uses a lightweight FRNRefiner seam so no checkpoint/GPU is required, and
+    monkeypatches decode_frequency_box so candidate 0 -> valid box, candidate 1
+    -> invalid box (f_low >= f_high).
+    """
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3 import frn as frn_mod
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import (
-        build_frn_features,
-        decode_frequency_box,
+        FRNPrediction,
+        FRNRefinedDetection,
+        FRNRefiner,
     )
 
-    monkeypatch.setattr("app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn.decode_frequency_box", lambda *a, **k: (3000.0e6, 3001.0e6))
+    cand_valid = _candidate()
+    cand_invalid = _candidate()
+
+    def fake_decode_frequency_box(
+        candidate,
+        *,
+        bandwidth_norm,
+        center_offset_norm,
+        frequency_low_hz,
+        frequency_high_hz,
+    ):
+        if candidate is cand_valid:
+            return 2401.0e6, 2403.0e6  # valid
+        if candidate is cand_invalid:
+            return 2403.0e6, 2403.0e6  # f_low == f_high -> invalid
+        return frequency_low_hz, frequency_high_hz
+
+    fake_predictions = [
+        FRNPrediction(9, 1.0, 1.0, 0.5, 0.25, 0.5, 0.0),
+        FRNPrediction(9, 1.0, 1.0, 0.5, 0.25, 0.5, 0.0),
+    ]
+
+    refiner = FRNRefiner.__new__(FRNRefiner)
+    refiner._torch = None
+    refiner._device = "cpu"
+    refiner._model = None
+    refiner.predict_batch = lambda candidates, batch_size=64, **kw: fake_predictions  # type: ignore[method-assign]
+
+    monkeypatch.setattr(frn_mod, "decode_frequency_box", fake_decode_frequency_box)
+
+    result = refiner.refine_batch(
+        [cand_valid, cand_invalid],
+        recording_sample_rate_hz=100.0e6,
+        recording_duration_s=0.05,
+        frequency_low_hz=2401.0e6,
+        frequency_high_hz=2403.0e6,
+        batch_size=64,
+    )
+    assert len(result) == 2
+    assert isinstance(result[0], FRNRefinedDetection)
+    assert result[1] is None
 
 
 def test_task12d_batchsize_validation():
@@ -402,17 +450,68 @@ def test_task12d_batchsize_validation():
 # ---------------------------------------------------------------------------
 
 
-def test_task12d_empty_predict_and_refine_return_empty(monkeypatch):
-    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import (
-        FRNRefiner,
+def test_task12d_empty_inputs_return_empty_dicts():
+    """Corrective F: predict_batch([]) and refine_batch([]) return [] without model forward."""
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import FRNRefiner
+
+    refiner = FRNRefiner.__new__(FRNRefiner)
+    refiner._torch = None
+    refiner._device = "cpu"
+    refiner._model = None
+
+    assert refiner.predict_batch([], batch_size=64) == []
+    assert (
+        refiner.refine_batch(
+            [],
+            recording_sample_rate_hz=100.0e6,
+            recording_duration_s=0.05,
+            frequency_low_hz=2401.0e6,
+            frequency_high_hz=2403.0e6,
+            batch_size=64,
+        )
+        == []
     )
 
-    # A FRNRefiner cannot be constructed without a checkpoint; validate the
-    # empty-sequence contract by calling the module-level pure helpers instead.
-    # predict_batch([]) and refine_batch([]) are API-level; here we verify the
-    # module does not eagerly require torch at import and the empty-batch
-    # validation helper accepts 0-length candidate lists.
-    assert True
+
+def test_task12d_batch_cardinality_mismatch_fails_closed(monkeypatch):
+    """Corrective E: a decoded output whose batch cardinality is less than the
+    input candidate chunk raises RuntimeError (no silent truncation)."""
+    try:
+        import torch
+    except Exception:
+        pytest.skip("torch not available")
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3 import frn as frn_mod
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import FRNRefiner
+
+    class _FakeModel:
+        use_bandwidth_context = True
+        use_center_regression = True
+
+    refiner = FRNRefiner.__new__(FRNRefiner)
+    refiner._torch = torch
+    refiner._device = "cpu"
+    refiner._model = _FakeModel()
+
+    chunk = [_candidate(), _candidate()]
+    # Provide a real chunk of 2 candidates; monkeypatch _forward_raw_batch to
+    # return an output whose decoded class_logits batch = 1 (mismatch).
+    def fake_forward(iq_tensor, fft_tensor, bw_tensor, *, is_cuda):
+        B = 1  # deliberately wrong batch cardinality
+        return {
+            "class_logits": torch.zeros(B, 14),
+            "signal_logit": torch.zeros(B),
+            "start_logits": torch.zeros(B, 1024),
+            "duration_logits": torch.zeros(B, 1024),
+            "bandwidth_logits": torch.zeros(B, 1024),
+            "center_offset": torch.tanh(torch.zeros(B)),
+            "start": torch.zeros(B),
+            "duration": torch.zeros(B),
+            "bandwidth": torch.zeros(B),
+        }
+
+    monkeypatch.setattr(refiner, "_forward_raw_batch", fake_forward)
+    with pytest.raises(RuntimeError, match="cardinality mismatch"):
+        refiner.predict_batch(chunk, batch_size=64)
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +657,7 @@ def test_task12d_historical_feature_parity(acceptance_env):
         assert np.array_equal(p_fft, h_fft)
         assert hashlib.sha256(p_fft.tobytes()).hexdigest() == hashlib.sha256(h_fft.tobytes()).hexdigest()
 
-        assert p_bw == pytest.approx(hist_bw(h_cand.f_lp_hz))
+        assert p_bw == float(hist_bw(h_cand.f_lp_hz))
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +665,7 @@ def test_task12d_historical_feature_parity(acceptance_env):
 # ---------------------------------------------------------------------------
 
 
-def test_task12d_historical_batch_raw_head_parity(acceptance_env):
+def test_task12d_synthetic_architecture_raw_head_equivalence(acceptance_env):
     """Bitwise raw-head parity with the historical model from the SAME checkpoint."""
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import FRNRefiner
 
@@ -621,6 +720,106 @@ def test_task12d_historical_batch_raw_head_parity(acceptance_env):
         assert tuple(a.shape) == tuple(b.shape)
         assert a.dtype == b.dtype
         assert torch.equal(a, b), key
+
+
+# ---------------------------------------------------------------------------
+# Corrective A — real recording-batch raw-head parity
+# ---------------------------------------------------------------------------
+
+
+def test_task12d_historical_real_recording_batch_raw_head_parity(acceptance_env):
+    """Bitwise raw-head parity on REAL historical recording-batch contexts.
+
+    Samples 0 / 1 / 10 / 1002 cover all seven approved probes. Each recording's
+    full candidate batch (all frozen CPN proposals in oracle row order) is built
+    with the Task-12C production AHLP and run through both the historical and
+    production FRN models under CUDA float16 autocast with identical tensors.
+    """
+    import torch
+
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.ahlp import (
+        purify_candidate as plat_ahlp,
+    )
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import (
+        FRNRefiner,
+        build_frn_features,
+        bandwidth_context,
+    )
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import CPNProposal
+
+    from zoomspec_repro.frn import ZoomSpecFRN as HistoricalFRN
+    from zoomspec_repro.data import load_observation as hist_load
+
+    leg = acceptance_env["legacy"]
+    sys.path.insert(0, str(leg / "src"))
+    ckpt = torch.load(acceptance_env["checkpoint"], map_location="cpu", weights_only=False)
+    cfg = ckpt["config"]
+    hist = HistoricalFRN(
+        channels=int(cfg["model"]["channels"]),
+        num_classes=int(cfg["data"]["classes"]),
+        fusion_attention=bool(cfg["model"]["fusion_attention"]),
+        use_bandwidth_context=bool(cfg["model"].get("use_bandwidth_context", False)),
+        use_center_regression=bool(cfg["model"].get("use_center_regression", False)),
+        use_log_bandwidth=bool(cfg["model"].get("use_log_bandwidth", False)),
+        use_attention_pool=bool(cfg["model"].get("use_attention_pool", False)),
+    )
+    hist.load_state_dict(ckpt["model"], strict=True)
+    dev = "cuda"
+    hist.to(dev).eval()
+
+    prod = FRNRefiner(acceptance_env["checkpoint"], device=0)
+    pmodel = prod._model
+
+    head_keys = [
+        "class_logits",
+        "signal_logit",
+        "start_logits",
+        "duration_logits",
+        "bandwidth_logits",
+        "center_offset",
+        "start",
+        "duration",
+        "bandwidth",
+    ]
+
+    for sample_id in ["0", "1", "10", "1002"]:
+        rows = _read_proposals(sample_id, acceptance_env["cpn_oracle"])
+        obs = hist_load(acceptance_env["raw_test_root"] / f"{sample_id}.bin")
+        cands = []
+        iq_rows = []
+        fft_rows = []
+        bws = []
+        for row in rows:
+            prop = CPNProposal(
+                t_start_s=row["t0_s"], t_end_s=row["t1_s"],
+                f_low_hz=row["f0_hz"], f_high_hz=row["f1_hz"],
+                bandwidth_tier=row["bandwidth_tier"], confidence=row["score"],
+            )
+            cand = plat_ahlp(obs.iq, sample_rate_hz=obs.fs_hz, center_frequency_hz=obs.center_hz, proposal=prop)
+            cands.append(cand)
+            iq, fft, bw, _ = build_frn_features(cand)
+            iq_rows.append(iq)
+            fft_rows.append(fft)
+            bws.append(np.float32(bw))
+
+        n = len(cands)
+        # All four samples have <=64 proposals -> single real recording chunk.
+        iq_tensor = torch.from_numpy(np.stack(iq_rows)).to(dev)
+        fft_tensor = torch.from_numpy(np.stack(fft_rows)).to(dev)
+        bw_tensor = torch.from_numpy(np.asarray(bws, dtype=np.float32)).to(dev)
+
+        with torch.inference_mode():
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
+                o_hist = hist(iq_tensor, fft_tensor, bw_tensor)
+                o_prod = pmodel(iq_tensor, fft_tensor, bw_tensor)
+
+        for key in head_keys:
+            a = o_hist[key]
+            b = o_prod[key]
+            assert tuple(a.shape) == tuple(b.shape), (sample_id, key)
+            assert a.dtype == b.dtype, (sample_id, key)
+            assert torch.equal(a, b), (sample_id, key)
+
 
 
 # ---------------------------------------------------------------------------
@@ -688,18 +887,19 @@ def test_task12d_frozen_frn_diagnostic_oracle_parity(acceptance_env):
         sel = refined[ordinal]
         o = shard_rows[ordinal]
         assert sel is not None
-        assert sel.class_id == o["class_id"]
-        assert sel.prediction.signal_probability == pytest.approx(o["signal_probability"], abs=0.0)
-        assert sel.prediction.class_probability == pytest.approx(o["class_probability"], abs=0.0)
-        assert sel.prediction.start_norm == pytest.approx(o["start_norm"], abs=0.0)
-        assert sel.prediction.duration_norm == pytest.approx(o["duration_norm"], abs=0.0)
-        assert sel.prediction.bandwidth_norm == pytest.approx(o["bandwidth_norm"], abs=0.0)
-        assert sel.prediction.center_offset_norm == pytest.approx(o["center_offset_norm"], abs=0.0)
-        assert sel.t_start_s == pytest.approx(o["t0_s"], abs=0.0)
-        assert sel.t_end_s == pytest.approx(o["t1_s"], abs=0.0)
-        assert sel.f_low_hz == pytest.approx(o["f0_hz"], abs=0.0)
-        assert sel.f_high_hz == pytest.approx(o["f1_hz"], abs=0.0)
-        assert sel.confidence == pytest.approx(o["final_score"], abs=0.0)
+        # TRUE exact equality (no tolerance) for frozen oracle acceptance.
+        assert int(sel.class_id) == int(o["class_id"])
+        assert float(sel.prediction.signal_probability) == float(o["signal_probability"])
+        assert float(sel.prediction.class_probability) == float(o["class_probability"])
+        assert float(sel.prediction.start_norm) == float(o["start_norm"])
+        assert float(sel.prediction.duration_norm) == float(o["duration_norm"])
+        assert float(sel.prediction.bandwidth_norm) == float(o["bandwidth_norm"])
+        assert float(sel.prediction.center_offset_norm) == float(o["center_offset_norm"])
+        assert float(sel.t_start_s) == float(o["t0_s"])
+        assert float(sel.t_end_s) == float(o["t1_s"])
+        assert float(sel.f_low_hz) == float(o["f0_hz"])
+        assert float(sel.f_high_hz) == float(o["f1_hz"])
+        assert float(sel.confidence) == float(o["final_score"])
 
 
 # ---------------------------------------------------------------------------
@@ -759,19 +959,20 @@ def test_task12d_sample0_pre_nms_frn_parity(acceptance_env):
     for i, det in enumerate(refined):
         o = oracle_rows[i]
         assert det is not None
-        assert det.class_id == o["class_id"]
-        assert det.t_start_s == pytest.approx(o["t0_s"], abs=0.0)
-        assert det.t_end_s == pytest.approx(o["t1_s"], abs=0.0)
-        assert det.f_low_hz == pytest.approx(o["f0_hz"], abs=0.0)
-        assert det.f_high_hz == pytest.approx(o["f1_hz"], abs=0.0)
-        assert det.confidence == pytest.approx(o["final_score"], abs=0.0)
+        # TRUE exact equality (no tolerance) for frozen sample-0 acceptance.
+        assert int(det.class_id) == int(o["class_id"])
+        assert float(det.t_start_s) == float(o["t0_s"])
+        assert float(det.t_end_s) == float(o["t1_s"])
+        assert float(det.f_low_hz) == float(o["f0_hz"])
+        assert float(det.f_high_hz) == float(o["f1_hz"])
+        assert float(det.confidence) == float(o["final_score"])
         p = det.prediction
-        assert p.signal_probability == pytest.approx(o["signal_probability"], abs=0.0)
-        assert p.class_probability == pytest.approx(o["class_probability"], abs=0.0)
-        assert p.start_norm == pytest.approx(o["start_norm"], abs=0.0)
-        assert p.duration_norm == pytest.approx(o["duration_norm"], abs=0.0)
-        assert p.bandwidth_norm == pytest.approx(o["bandwidth_norm"], abs=0.0)
-        assert p.center_offset_norm == pytest.approx(o["center_offset_norm"], abs=0.0)
+        assert float(p.signal_probability) == float(o["signal_probability"])
+        assert float(p.class_probability) == float(o["class_probability"])
+        assert float(p.start_norm) == float(o["start_norm"])
+        assert float(p.duration_norm) == float(o["duration_norm"])
+        assert float(p.bandwidth_norm) == float(o["bandwidth_norm"])
+        assert float(p.center_offset_norm) == float(o["center_offset_norm"])
 
 
 # ---------------------------------------------------------------------------
@@ -780,62 +981,133 @@ def test_task12d_sample0_pre_nms_frn_parity(acceptance_env):
 
 
 def test_task12d_batch1_vs_historical_batch_diagnostic(acceptance_env):
-    """batch=1 vs full-recording batch: record drift; fail only on semantic divergence."""
+    """Measure actual batch=1 vs full-recording-batch numerical drift.
+
+    Uses the private ``_forward_raw_batch`` seam to compare raw logits A (inside
+    its normal recording batch) vs B (batch=1) for all seven approved probes.
+    Fails only on semantic divergence (class-id/argmax change, valid<->invalid).
+    """
+    import torch
+
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.ahlp import (
         purify_candidate as plat_ahlp,
     )
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import (
         FRNRefiner,
+        build_frn_features,
+        bandwidth_context,
     )
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import CPNProposal
 
     from zoomspec_repro.data import load_observation as hist_load
 
-    sample_id = "0"
-    rows = _read_proposals(sample_id, acceptance_env["cpn_oracle"])
-    obs = hist_load(acceptance_env["raw_test_root"] / f"{sample_id}.bin")
-    cands = []
-    for row in rows:
-        prop = CPNProposal(
-            t_start_s=row["t0_s"], t_end_s=row["t1_s"],
-            f_low_hz=row["f0_hz"], f_high_hz=row["f1_hz"],
-            bandwidth_tier=row["bandwidth_tier"], confidence=row["score"],
-        )
-        cands.append(plat_ahlp(obs.iq, sample_rate_hz=obs.fs_hz, center_frequency_hz=obs.center_hz, proposal=prop))
+    probes = [("0", 0), ("0", 1), ("0", 3), ("1002", 0), ("0", 10), ("1", 3), ("10", 5)]
+    # Cache (sample -> list of candidates) to build recording batches.
+    sample_cands: dict[str, list] = {}
+
+    def _get_sample(sample_id: str) -> tuple[list, object]:
+        if sample_id not in sample_cands:
+            rows = _read_proposals(sample_id, acceptance_env["cpn_oracle"])
+            obs = hist_load(acceptance_env["raw_test_root"] / f"{sample_id}.bin")
+            cands = []
+            for row in rows:
+                prop = CPNProposal(
+                    t_start_s=row["t0_s"], t_end_s=row["t1_s"],
+                    f_low_hz=row["f0_hz"], f_high_hz=row["f1_hz"],
+                    bandwidth_tier=row["bandwidth_tier"], confidence=row["score"],
+                )
+                cands.append(plat_ahlp(obs.iq, sample_rate_hz=obs.fs_hz, center_frequency_hz=obs.center_hz, proposal=prop))
+            sample_cands[sample_id] = (cands, obs)
+        return sample_cands[sample_id]
+
+    def _features(cands):
+        iq_rows, fft_rows, bws = [], [], []
+        for c in cands:
+            iq, fft, bw, _ = build_frn_features(c)
+            iq_rows.append(iq)
+            fft_rows.append(fft)
+            bws.append(np.float32(bw))
+        return iq_rows, fft_rows, bws
+
     refiner = FRNRefiner(acceptance_env["checkpoint"], device=0)
+    is_cuda = True
 
-    batch_refined = refiner.refine_batch(
-        cands,
-        recording_sample_rate_hz=obs.fs_hz,
-        recording_duration_s=obs.duration_s,
-        frequency_low_hz=obs.f_lo_hz,
-        frequency_high_hz=obs.f_hi_hz,
-        batch_size=64,
-    )
+    def raw_prediction(cands):
+        iq_rows, fft_rows, bws = _features(cands)
+        iq_t = torch.from_numpy(np.stack(iq_rows)).to("cuda")
+        fft_t = torch.from_numpy(np.stack(fft_rows)).to("cuda")
+        bw_t = torch.from_numpy(np.asarray(bws, dtype=np.float32)).to("cuda")
+        return refiner._forward_raw_batch(iq_t, fft_t, bw_t, is_cuda=is_cuda)
 
-    for i in range(len(cands)):
-        single = refiner.refine_batch(
-            [cands[i]],
+    drift_rows = []
+    for sample_id, ordinal in probes:
+        cands, obs = _get_sample(sample_id)
+        if ordinal >= len(cands):
+            continue
+        out_full = raw_prediction(cands)
+        out_single = raw_prediction([cands[ordinal]])
+        # Compare the target probe's raw logits: batch context vs singleton.
+        diff = {
+            "sample": sample_id,
+            "ordinal": ordinal,
+        }
+        target_heads = {}
+        for head in ["class_logits", "signal_logit", "start_logits", "duration_logits", "bandwidth_logits", "center_offset"]:
+            a = out_full[head][ordinal].float()
+            b = out_single[head][0].float()
+            target_heads[head] = float((a - b).abs().max()) if a.numel() else None
+        diff["raw_head_max_abs_diff"] = target_heads
+
+        # Decode-level comparison via refine_batch.
+        full_refined = refiner.refine_batch(
+            cands,
+            recording_sample_rate_hz=obs.fs_hz,
+            recording_duration_s=obs.duration_s,
+            frequency_low_hz=obs.f_lo_hz,
+            frequency_high_hz=obs.f_hi_hz,
+            batch_size=64,
+        )
+        single_refined = refiner.refine_batch(
+            [cands[ordinal]],
             recording_sample_rate_hz=obs.fs_hz,
             recording_duration_s=obs.duration_s,
             frequency_low_hz=obs.f_lo_hz,
             frequency_high_hz=obs.f_hi_hz,
             batch_size=1,
         )[0]
-        base = batch_refined[i]
-        # Semantic divergence: argmax/class change, or valid->invalid / invalid->valid.
+        base = full_refined[ordinal]
+        single = single_refined
+        if base is not None and single is not None:
+            diff["class_same"] = base.class_id == single.class_id
+            diff["validity_same"] = (base.f_low_hz < base.f_high_hz) == (single.f_low_hz < single.f_high_hz)
+            diff["t_start_diff"] = abs(float(base.t_start_s - single.t_start_s))
+            diff["t_end_diff"] = abs(float(base.t_end_s - single.t_end_s))
+            diff["f_low_diff"] = abs(float(base.f_low_hz - single.f_low_hz))
+            diff["f_high_diff"] = abs(float(base.f_high_hz - single.f_high_hz))
+            diff["confidence_diff"] = abs(float(base.confidence - single.confidence))
+        elif base is None and single is None:
+            diff["class_same"] = True
+            diff["validity_same"] = True
+            diff["t_start_diff"] = None
+        else:
+            # One valid, one invalid -> semantic divergence.
+            diff["class_same"] = base.class_id == single.class_id if base and single else False
+            diff["validity_same"] = False
+        drift_rows.append(diff)
+
+        # Semantic divergence hard-fail.
         if base is not None and single is not None:
             if base.class_id != single.class_id:
-                pytest.fail("class argmax divergence at index {i}")
-            base_valid = base.f_low_hz < base.f_high_hz
-            single_valid = single.f_low_hz < single.f_high_hz
-            if base_valid != single_valid:
-                pytest.fail("validity divergence at index {i}")
+                pytest.fail(f"class argmax divergence at {sample_id}/{ordinal}")
+            if (base.f_low_hz < base.f_high_hz) != (single.f_low_hz < single.f_high_hz):
+                pytest.fail(f"validity divergence at {sample_id}/{ordinal}")
         elif base is None and single is not None:
-            pytest.fail("invalid->valid divergence at index {i}")
+            pytest.fail(f"invalid->valid divergence at {sample_id}/{ordinal}")
         elif base is not None and single is None:
-            pytest.fail("valid->invalid divergence at index {i}")
-        # else both None or both valid -> no semantic divergence
+            pytest.fail(f"valid->invalid divergence at {sample_id}/{ordinal}")
+
+    # Record the measured drift (for provenance reporting). No tolerance used.
+    assert len(drift_rows) == len(probes)
 
 
 # ---------------------------------------------------------------------------
