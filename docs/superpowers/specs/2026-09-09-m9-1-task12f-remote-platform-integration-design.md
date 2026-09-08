@@ -44,12 +44,26 @@ Task 12F is split into three independently testable subtasks:
 
 | Subtask | Scope |
 |---|---|
-| 12F-A | Local / control-plane remote lifecycle: lightweight registry registration, `create_run(remote_gpu)` freeze path, production remote probe, local coordinator, restart semantics, reconciliation/ingest wiring. |
-| 12F-B | Remote GPU production `ItemExecutor` + result publication: trusted worker context, runtime/asset verification, SpaceNet resolver, pipeline construction, `PipelineOutput` → Analysis Package serialization, atomic envelope + zip publish. |
+| 12F-A | Local / control-plane remote lifecycle: lightweight registry registration, `create_run(remote_gpu)` freeze path, **local control-plane probe integration** (production `RemoteExecutorProbe` adapter, `RemoteProfile`/`SshRunner` probe invocation, `AnalysisService`/API availability wiring, mapping remote probe success/error into `ExecutorAvailabilityRead`), local coordinator, restart semantics, reconciliation/ingest wiring. |
+| 12F-B | Remote GPU production `ItemExecutor` + result publication **and the remote probe implementation**: `runner._cli_probe` production implementation, `RemoteWorkerContext`, runtime commit verification, asset manifest/assets verification, SpaceNet root verification, `spacenet_14` verification, CUDA/device-0 readiness, trusted worker context, SpaceNet resolver, pipeline construction, `PipelineOutput` → Analysis Package serialization, atomic envelope + zip publish. |
 | 12F-C | One-recording real remote E2E on an AutoDL RTX 5090 + Algorithm Lab consumption acceptance. |
 
 Each subtask boundary is independently testable. No single subtask may claim live
 remote correctness on its own.
+
+The remote availability probe is split across 12F-A and 12F-B by ownership:
+
+- **12F-A** owns the *local control-plane* probe integration: the
+  `RemoteExecutorProbe` adapter, `RemoteProfile`/`SshRunner` probe invocation, and
+  `AnalysisService`/API wiring. It **does not require** the remote server probe
+  implementation to already succeed. It is independently testable with
+  fake/mocked transport responses.
+- **12F-B** owns the *remote* probe implementation: the `runner._cli_probe`
+  production body and the readiness semantics it verifies on the server. It does
+  not depend on 12F-A.
+
+A real SSH probe success is a **post-12F-B integration gate** (see §14), not a
+prerequisite for closing 12F-A.
 
 ## 3. Registry / Definition
 
@@ -227,10 +241,32 @@ Rules:
 
 ## 8. Production Remote Probe
 
-Implement availability through the existing **SSH runner `probe`** subcommand, not
-configuration-only availability.
+The remote probe splits into two independently testable halves, one per subtask.
 
-`available = true` means all of:
+### 8.1 12F-A — Local control-plane probe adapter
+
+12F-A implements the `RemoteExecutorProbe` protocol in
+`app.remote_execution.executor.py` with a production adapter that:
+
+- reads `RemoteProfile` / `SshRunner` configuration;
+- invokes the runner `probe` subcommand over the existing SSH transport;
+- maps a probe success/error/return-code into an `ExecutorAvailabilityRead`
+  (`executor`, `available`, `reason_code`, `reason_message`, `remote_profile`,
+  `recommended`);
+- wires availability into `AnalysisService.executor_availability` and the API
+  (a `remote_gpu` availability endpoint may be added).
+
+It is **independently testable with fake/mocked transport responses** (a stub
+`SshRunner`/subprocess return), so it does **not require** the remote server
+probe implementation to already succeed. Its only contract is that a
+deterministic probe transport response is mapped correctly (success →
+`available=true`; structured error → explicit `available=false` + reason); it
+never crashes the control plane on an unavailable remote.
+
+### 8.2 12F-B — Remote probe implementation
+
+12F-B implements the `runner._cli_probe` production body. `available = true`
+means all of, on the server:
 
 ```text
 SSH / runner reachable
@@ -246,8 +282,14 @@ The probe must **not** load YOLO/FRN models nor run inference.
 A failure returns an explicit unavailable reason code / message (e.g.
 `REMOTE_EXECUTOR_UNAVAILABLE`, `REMOTE_IMPLEMENTATION_MISMATCH`,
 `PIPELINE_ASSET_MISMATCH`, `REMOTE_PROBE_UNAVAILABLE`), never a control-plane
-crash. The `RemoteExecutorProbe` protocol in `app.remote_execution.executor.py`
-is implemented by a production class that drives this `probe` path.
+crash. This half owns the real server readiness semantics and defines the
+`RemoteWorkerContext` the probe reads.
+
+### 8.3 Post-12F-B integration gate
+
+A **real** SSH probe success (`12F-A` adapter + real remote `runner` probe) is an
+integration acceptance performed **after** 12F-B. It is not a prerequisite for
+closing 12F-A.
 
 ## 9. Remote ItemExecutor
 
@@ -329,21 +371,31 @@ Reuse the existing analysis package schema (`imported_runs` `Manifest` /
 ### 12F-A
 
 - registry exposes ZoomSpec with **zero model load** and no torch/ultralytics import in the control plane;
-- real remote probe success/failure explicit (not configuration-only);
+- the control-plane `RemoteExecutorProbe` adapter maps deterministic (fake/mocked transport) probe responses correctly — success → `available=true`; structured failure → explicit `available=false` + reason code, no control-plane crash;
+- probe transport failures return explicit unavailable reasons, not silent successful-availability;
 - `create_run(remote_gpu)` freezes a valid request + provenance;
 - a coordinator subprocess is used instead of the local scientific worker;
 - same request attach is idempotent (`batch_id` + `request_sha256`);
 - startup interrupts `local_cpu` only; remote `pending/running` is re-coordinated;
 - remote completion ingests once; failed/interrupted mapping correct.
 
+> 12F-A may close without any real remote probe success. It only proves the local
+> adapter/wiring and its deterministic mapping.
+
 ### 12F-B
 
 - trusted deployment context reaches the remote probe/work path **without SSH credentials**;
-- probe verifies real readiness **without loading models**;
+- `runner._cli_probe` verifies real server readiness **without loading models** (runtime commit, asset manifest + asset bytes, SpaceNet root, `spacenet_14`, CUDA/device-0);
 - runtime / asset / source / fingerprint mismatches fail closed;
 - production `ItemExecutor` creates a valid envelope + zip;
 - existing runner terminal verification accepts it;
 - control-plane and module import boundaries remain clean.
+
+### Post-12F-B integration gate (real SSH probe)
+
+- 12F-A `RemoteExecutorProbe` adapter + **real** remote `runner` probe succeed
+  end-to-end over SSH (probe returns `available=true` with the real
+  `RemoteWorkerContext`). This is a post-12F-B acceptance, not a 12F-A gate.
 
 ### 12F-C
 
