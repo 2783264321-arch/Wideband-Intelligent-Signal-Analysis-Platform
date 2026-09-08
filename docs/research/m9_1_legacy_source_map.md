@@ -423,14 +423,29 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 **Task 12A production port — COMPLETED (Torch LS-STFT preprocessing):**
 
 - Production file/symbol: `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/preprocessing.py :: build_ls_stft_spectrogram` (plus `LSSTFTNormalization`, `SpectrogramGeometry`, `LSSTFTSpectrogram`).
-- The platform implementation independently reproduces the historical Torch behavior (`build_spectrogram_torch`) and the builder's final image construction: `torch.stft` (Hann periodic=False, center=False, onesided=False, return_complex) → fftshift(dim=0) → paper_strict LS frequency resampling via `torch.searchsorted` interpolation → bilinear time resize (align_corners=True) → `log(|·|+1e-8)` → percentile normalize → `round(norm*255)` → uint8 → one vertical flip. No legacy ZoomSpec runtime import; Torch imported lazily.
+- The platform implementation independently reproduces the historical Torch behavior (`build_spectrogram_torch`) and the builder's final image construction: `torch.stft` (Hann periodic=False, center=False, onesided=False, return_complex) → fftshift(dim=0) → paper_strict LS frequency resampling via `torch.searchsorted` interpolation → `log(|resampled| + epsilon)` → bilinear time resize (align_corners=True) → percentile normalize → `round(norm*255)` → uint8 → one vertical flip. No legacy ZoomSpec runtime import; Torch imported lazily. (Correction: the actual numerical order is frequency interpolation → log-magnitude → time resize, not time resize before log.)
 - Frozen constants internal: ls_stft / paper_strict, n_fft=win_length=2048, hop=1024, 640×640, subband_hz=1e6, epsilon=1e-8.
 - 5/5 approved samples (`0`, `156`, `2121`, `435`, `999`) exact decoded-pixel parity on the AutoDL acceptance server: diff_pixels=0, identical_fraction=1.0, max_abs_diff=0, mean_abs_diff=0.0, pixel-byte SHA256 equal. Actual GPU: NVIDIA GeForce RTX 5090; torch 2.8.0+cu128; CUDA available.
 - Runtime bootstrap fact: the historical scientific/model stack remained unchanged (torch 2.8.0+cu128, ultralytics 8.4.114, numpy 2.3.2, scipy 1.18.0, Pillow 11.3.0, PyYAML 6.0.2, pydantic 2.13.5, SQLAlchemy 2.0.52, typing-extensions 4.14.1) while minimum platform/test dependencies were added (`pytest 9.1.1`, `fastapi 0.141.1`, `starlette 1.6.0`, `pydantic-settings 2.15.0`, `python-multipart 0.0.32`).
 - Canonical test-interpreter split: `repo/.venv/bin/python` for ordinary backend full regression; `/root/miniconda3/bin/python` for ML numerical parity, Torch/CUDA focused Task-12A tests, and the formal inference runtime.
 - Older NumPy/CPU-safe planning language (e.g. plan wording "NumPy/CPU-safe core") is superseded by the Torch parity path confirmed at Gate 0 and by this port.
-- CPN/detector, AHLP, FRN, full pipeline, frontend, API, database, evaluator, and remote-transport work remain NOT STARTED.
+- At Task-12A completion, CPN/detector, AHLP, FRN, full pipeline, frontend, API, database, evaluator, and remote-transport work were NOT STARTED (CPN/detector subsequently completed in Task 12B; see below).
 - FRN autocast/float16 device parity remains UNRESOLVED (see §22); the RTX 4090/5090 equivalence decision for Task-12A five-sample pixel parity is NOT extended to FRN numeric parity.
+
+**Task 12B production port — COMPLETED (frozen CPN detector):**
+
+- CPN Gate 0 classification: `CPN_STAGE_GATE0_PARITY_CONFIRMED`.
+- Frozen row-level oracle: `/root/autodl-tmp/Claude/reports_claude/test_cpn_proposals_augv3.jsonl`, SHA256 `021bc47e604303a2711c2b860d681ecc698b2bbcc464c0d10679e1b5e9fd1c79`, aggregate **49,825** proposals (≈19.93/image).
+- Production file/symbols: `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/detector.py :: CPNDetector`, `CPNRawDetection`, `CPNProposal`, `image_box_to_cpn_proposal`, `_grid_edges`, `_normalized_to_value`, `_clip_and_reject`, `_detect_raw_batch`.
+- Checkpoint identity: `/root/autodl-tmp/Claude/runs/cpn/ls_stft_yolo26n_aug_warm/weights/best.pt`, SHA256 `eba4fa4b112a0e61cc1013e96f99d1ae82b845f4be1e8b1f80bd2089d1f82311`; YOLOv26n; classes 0=narrow, 1=mid, 2=wide (bandwidth tiers, NOT the 14 SpaceNet signal classes).
+- Production detector input: `LSSTFTSpectrogram.image` as an **H×W (640×640) uint8 in-memory ndarray**; Gate 0 proved this equals historical PNG-path behavior. **Temporary PNG serialization is NOT required.**
+- Predict semantics: `conf=0.003`, `iou=0.7`, `max_det=300`, `imgsz=640`, `batch=len(chunk)`, `device=<configured>`, `stream=False`, `verbose=False`; TTA/augment disabled; `boxes.xyxyn` / `boxes.conf` / `boxes.cls`; output ordering preserved (no sorting).
+- Batching: `detect_batch(..., batch_size=16)` chunks input in order (16/16/1 for 33 inputs); no dummy batch padding. Historical exact-reproduction mode uses `batch_size=16` with the exact manifest chunk boundaries.
+- Geometry/pixel-edge parity: production `image_box_to_cpn_proposal` (pixel-edge midpoints, extent override, y-down frequency inversion) reproduces historical `image_box_to_proposal(image_y_down=True)` exactly — synthetic boxes and real detector boxes all 0.0 diff on t0/t1/f0/f1. The LS frequency grid is NOT recreated in detector.py; it consumes `spectrogram.geometry.frequency_grid_hz` from Task 12A.
+- Historical exact parity: all five approved probes (`0`=17, `156`=14, `2121`=22, `435`=21, `999`=24) reproduce the frozen oracle **exactly** (count, tier, ordering, t_start/t_end/f_low/f_high/confidence diffs all 0.0) when run in their exact historical batch-16 chunk context on the AutoDL acceptance server (RTX 5090, torch 2.8.0+cu128, ultralytics 8.4.114).
+- Output is platform-owned physical `CPNProposal` (t_start_s, t_end_s, f_low_hz, f_high_hz, bandwidth_tier, confidence); no Ultralytics `Results` objects escape the public API.
+- Live batch=1 behavior: on the approved probes, batch=1 and historical batch=16 have **same proposal count, same bandwidth tiers, same NMS survival** but small numerical float drift in xyxy/confidence/physical coords. No dummy batch padding is used; batch=1 is NOT claimed to be bitwise historical parity.
+- AHLP, FRN, full pipeline, registry registration, frontend, API, database, evaluator, and remote transport remain **NOT STARTED**.
 
 ## 22. Resolved and unresolved provenance items
 
