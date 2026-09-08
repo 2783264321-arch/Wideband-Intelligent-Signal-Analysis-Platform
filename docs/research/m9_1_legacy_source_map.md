@@ -597,3 +597,63 @@ Checkpoint loaded once per `FRNRefiner` instance; repeated `predict_batch`/`refi
 ### Task 12 boundary
 
 Task 12 must use `/root/miniconda3/bin/python` and must not rely on `/root/autodl-tmp/wsp-runtime/m9-1-gpu`. Importing `app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn` works under the `.venv` (no torch) and under the ML runtime (torch).
+## 25. Task 12E — frozen full pipeline composition
+
+Task 12E Stage Gate 0 was accepted: `TASK12E_GATE0_POSTPROCESS_AND_COMPOSITION_CONTRACT_CONFIRMED`. This section records the Task 12E production composition.
+
+### Postprocess / composition semantics (Gate 0 evidence, now produced)
+
+- Order: valid FRN detection -> `confidence >= 0.001` threshold -> class-aware greedy TF NMS.
+- TF IoU: `dt=max(0,min(t1a,t1b)-max(t0a,t0b))`, `df=max(0,min(f1a,f1b)-max(f0a,f0b))`, `intersection=dt*df`, `union=area_a+area_b-intersection`, `IoU=0 if union<=0 else intersection/union`. Physical (seconds x Hz), no pixel `+1`.
+- NMS suppresses when `tf_iou(best, item) >= 0.7` (survival predicate `IoU < 0.7`).
+- Grouping is by `class_id` for one Recording; different classes never suppress.
+- Within class: stable Python score-descending sort, greedy keep.
+- Final kept detections: stable global score-descending sort.
+- The actual historical post-NMS det shards are `test_det_shard_augv3_{00..15}` (**16 shards**), not the stale 4-shard wording. Aggregate 33,373 rows = final merged oracle.
+- Full Gate 0 postprocess reconstruction: 49,825 FRN diagnostic rows -> (threshold >= 0.001) 49,810 survivors -> class-aware NMS -> **33,373 final detections, exactly matching the frozen final oracle** (row set, all scores, per-sample order; verified for all 2,500 samples).
+
+### Production files / symbols
+
+```
+backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/postprocess.py
+  _SCORE_THRESHOLD = 0.001
+  _NMS_IOU = 0.7
+  tf_iou(a, b) -> float
+  physical_class_nms(detections) -> list[FRNRefinedDetection]
+  postprocess_detections(detections) -> list[FRNRefinedDetection]
+
+backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/pipeline.py
+  ZoomSpecFrozenPipeline(Pipeline)
+    definition: id=zoomspec_yolo26n_aug_combined_frn_v3, version=1.0.0,
+                label_space=spacenet_14, recommended_device=GPU, cpu_supported=False,
+                task_capability=detection_classification,
+                executors_supported=("remote_gpu",), recommended_executor=remote_gpu
+    __init__(detector_checkpoint_path, frn_checkpoint_path, normalization,
+             label_space, device)
+    run(recording, parameters, workspace)  # rejects non-empty parameters
+    _refine_from_proposals(iq, recording, proposals)  # private test seam
+```
+
+Frozen scientific parameters are internal constants and are NOT caller-configurable; any non-empty `parameters` raises.
+
+### Pipeline data flow (live)
+
+`RecordingInput -> read_segment_from_path (whole complex64 IQ) -> build_ls_stft_spectrogram (device) -> CPNDetector.detect_batch([spectrogram], live batch=1) -> for each CPNProposal: AHLP purify_candidate -> FRNRefiner.refine_batch(all candidates, batch_size=64) -> remove positional None -> postprocess_detections -> class_id -> class_name (injected LabelSpace spacenet_14) -> DetectionPayload[] -> PipelineOutput`.
+
+- No dummy CPN padding to batch 16; no FRN batch=1 forcing; FRN normal live mode = all recording candidates chunked <=64.
+
+### Level 1 — historical postprocess parity
+
+Production `tf_iou` / `physical_class_nms` match the historical `tf_iou` / `physical_class_nms` exactly on synthetic and random detections (all IoU pairs and full NMS output identical).
+
+### Level 2 — exact scientific composition (frozen CPN oracle)
+
+Production `_refine_from_proposals` fed the frozen CPN proposals reproduces the frozen final oracle **exactly** for the 8 acceptance recordings `{0, 1, 6, 10, 22, 151, 1127, 2294}`: count, order, class_id, confidence/score, t_start/t_end/f_low/f_high, and class_name (via injected spacenet_14) all exact. Covers suppression-heavy, no-suppression, threshold-removal, and multi-class ordering branches.
+
+### Level 3 — true live full-chain diagnostic (sample 0)
+
+Live `run()` (raw IQ -> LS-STFT -> live CPN batch=1 -> AHLP -> FRN -> postprocess) runs cleanly and produces finite, valid physical output. It is a diagnostic, NOT frozen bitwise acceptance, because the historical CPN oracle was produced in a batch=16 context; live CPN batch=1 introduces small documented drift. No dummy padding or oracle tuning.
+
+### Task 12F boundary
+
+Registry registration, remote execution, AnalysisRun/DB persistence, frontend, Algorithm Lab wiring, and asset/runtime resolution remain **NOT STARTED** (Task 12F).
