@@ -133,6 +133,8 @@ def _detect_raw_batch(
     batch_size: int,
 ) -> list[list[CPNRawDetection]]:
     """Raw detection without physical conversion; never exposed publicly."""
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size}")
     images = [spec.image for spec in spectrograms]
     for img in images:
         _validate_image(img)
@@ -152,6 +154,12 @@ def _detect_raw_batch(
             stream=False,
             verbose=False,
         )
+        if len(results) != len(chunk):
+            raise RuntimeError(
+                "CPN detector returned a result-count mismatch: "
+                f"expected {len(chunk)} results for chunk at start={start}, "
+                f"got {len(results)}"
+            )
         for result in results:
             batch_raw: list[CPNRawDetection] = []
             if result.boxes is not None:
@@ -170,6 +178,11 @@ def _detect_raw_batch(
                         )
                     )
             results_all.append(batch_raw)
+    if len(results_all) != len(spectrograms):
+        raise RuntimeError(
+            "CPN detector raw result count does not match input count: "
+            f"expected {len(spectrograms)} raw results, got {len(results_all)}"
+        )
     return results_all
 
 

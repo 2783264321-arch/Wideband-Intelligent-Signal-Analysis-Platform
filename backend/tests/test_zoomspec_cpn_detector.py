@@ -41,6 +41,36 @@ def _geometry() -> SpectrogramGeometry:
     )
 
 
+def _match_proposals(
+    baseline: list,
+    candidate: list,
+) -> list[tuple[int, int]]:
+    """Match candidate items to baseline by nearest normalized time center.
+
+    Returns aligned (baseline_index, candidate_index) pairs. Matching uses
+    normalized-xyxy space when available; otherwise physical t_start.
+    """
+    matched = []
+    used = set()
+    for b_idx, b in enumerate(baseline):
+        best_idx = None
+        best_dist = float("inf")
+        for c_idx, c in enumerate(candidate):
+            if c_idx in used:
+                continue
+            if hasattr(b, "normalized_xyxy") and hasattr(c, "normalized_xyxy"):
+                dist = sum(abs(b.normalized_xyxy[j] - c.normalized_xyxy[j]) for j in range(4))
+            else:
+                dist = abs(b.t_start_s - c.t_start_s)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = c_idx
+        if best_idx is not None:
+            used.add(best_idx)
+            matched.append((b_idx, best_idx))
+    return matched
+
+
 def _ml_or_skip():
     try:
         import torch  # noqa: F401
@@ -399,3 +429,149 @@ class TestTask12bLiveBatch1:
             tiers_b = sorted(r.bandwidth_tier for r in raw_batch16)
             tiers_l = sorted(r.bandwidth_tier for r in raw_live1)
             assert tiers_b == tiers_l
+
+            proposals_batch16 = detector.detect_batch(chunk_specs, batch_size=batch_size)[pos]
+            proposals_live1 = detector.detect_batch([target_spec], batch_size=1)[0]
+            assert len(proposals_batch16) == len(proposals_live1)
+            matched_idx = _match_proposals(raw_batch16, raw_live1)
+            assert len(matched_idx) == len(raw_batch16)
+            max_xyxy = 0.0
+            max_conf = 0.0
+            max_t_start = 0.0
+            max_t_end = 0.0
+            max_f_low = 0.0
+            max_f_high = 0.0
+            for b_idx, l_idx in matched_idx:
+                rb = raw_batch16[b_idx]
+                rl = raw_live1[l_idx]
+                for j in range(4):
+                    max_xyxy = max(max_xyxy, abs(rb.normalized_xyxy[j] - rl.normalized_xyxy[j]))
+                max_conf = max(max_conf, abs(rb.confidence - rl.confidence))
+                pb = proposals_batch16[b_idx]
+                pl = proposals_live1[l_idx]
+                max_t_start = max(max_t_start, abs(pb.t_start_s - pl.t_start_s))
+                max_t_end = max(max_t_end, abs(pb.t_end_s - pl.t_end_s))
+                max_f_low = max(max_f_low, abs(pb.f_low_hz - pl.f_low_hz))
+                max_f_high = max(max_f_high, abs(pb.f_high_hz - pl.f_high_hz))
+
+            evidence = {
+                "probe": stem,
+                "count_equal": True,
+                "tiers_equal": True,
+                "max_xyxy_diff": max_xyxy,
+                "max_conf_diff": max_conf,
+                "max_t_start_diff_s": max_t_start,
+                "max_t_end_diff_s": max_t_end,
+                "max_f_low_diff_hz": max_f_low,
+                "max_f_high_diff_hz": max_f_high,
+            }
+            print(f"TASK12B_LIVE_DRIFT {json.dumps(evidence)}")
+
+
+class _FakeBoxes:
+    def __init__(self, count: int):
+        self.xyxyn = np.zeros((count, 4), dtype=np.float32)
+        self.conf = np.zeros(count, dtype=np.float32)
+        self.cls = np.zeros(count, dtype=np.float32)
+
+
+class _FakeResult:
+    def __init__(self, boxes: _FakeBoxes | None):
+        self.boxes = boxes
+
+
+class _FakeModel:
+    """Configurable fake Ultralytics model for fail-closed boundary tests."""
+
+    def __init__(self, results_per_call: list[int] | int):
+        if isinstance(results_per_call, int):
+            results_per_call = [results_per_call]
+        self._results_per_call = list(results_per_call)
+        self._call = 0
+        self.predict_calls = []
+
+    def predict(self, source, **kwargs):
+        call_index = min(self._call, len(self._results_per_call) - 1)
+        self._call += 1
+        self.predict_calls.append({"source_len": len(source), "kwargs": kwargs})
+        n = self._results_per_call[call_index]
+        return [_FakeResult(None) for _ in range(n)]
+
+
+class _FakeDetector:
+    def __init__(self, model: _FakeModel):
+        self._model = model
+        self._device = 0
+
+
+def _fake_spec() -> LSSTFTSpectrogram:
+    return LSSTFTSpectrogram(image=np.zeros((640, 640), dtype=np.uint8), geometry=_geometry())
+
+
+class TestTask12bFailClosedBatch:
+    def test_task12b_batch_size_zero_raises_valueerror(self):
+        from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import _detect_raw_batch
+
+        detector = _FakeDetector(_FakeModel(1))
+        with pytest.raises(ValueError):
+            _detect_raw_batch(detector, [_fake_spec()], batch_size=0)
+
+    def test_task12b_batch_size_negative_raises_valueerror(self):
+        from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import _detect_raw_batch
+
+        detector = _FakeDetector(_FakeModel(1))
+        with pytest.raises(ValueError):
+            _detect_raw_batch(detector, [_fake_spec()], batch_size=-1)
+
+    def test_task12b_short_result_count_raises_runtimeerror(self):
+        from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import _detect_raw_batch
+
+        model = _FakeModel(results_per_call=[1])
+        detector = _FakeDetector(model)
+        specs = [_fake_spec(), _fake_spec()]
+        with pytest.raises(RuntimeError):
+            _detect_raw_batch(detector, specs, batch_size=2)
+
+    def test_task12b_excess_result_count_raises_runtimeerror(self):
+        from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import _detect_raw_batch
+
+        model = _FakeModel(results_per_call=[2])
+        detector = _FakeDetector(model)
+        specs = [_fake_spec()]
+        with pytest.raises(RuntimeError):
+            _detect_raw_batch(detector, specs, batch_size=1)
+
+    def test_task12b_total_cardinality_mismatch_raises_runtimeerror(self):
+        from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import _detect_raw_batch
+
+        model = _FakeModel(results_per_call=[1, 2])
+        detector = _FakeDetector(model)
+        specs = [_fake_spec(), _fake_spec(), _fake_spec()]
+        with pytest.raises(RuntimeError):
+            _detect_raw_batch(detector, specs, batch_size=1)
+
+    def test_task12b_no_physical_conversion_after_cardinality_mismatch(self):
+        from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import (
+            _detect_raw_batch,
+            image_box_to_cpn_proposal,
+        )
+
+        original = image_box_to_cpn_proposal
+        calls = []
+
+        def _spy(*args, **kwargs):
+            calls.append(args)
+            return original(*args, **kwargs)
+
+        import app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector as detector_module
+
+        detector_module.image_box_to_cpn_proposal = _spy
+        try:
+            model = _FakeModel(results_per_call=[1])
+            detector = _FakeDetector(model)
+            specs = [_fake_spec(), _fake_spec()]
+            with pytest.raises(RuntimeError):
+                _detect_raw_batch(detector, specs, batch_size=2)
+            assert not calls
+        finally:
+            detector_module.image_box_to_cpn_proposal = original

@@ -447,6 +447,13 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 - Live batch=1 behavior: on the approved probes, batch=1 and historical batch=16 have **same proposal count, same bandwidth tiers, same NMS survival** but small numerical float drift in xyxy/confidence/physical coords. No dummy batch padding is used; batch=1 is NOT claimed to be bitwise historical parity.
 - AHLP, FRN, full pipeline, registry registration, frontend, API, database, evaluator, and remote transport remain **NOT STARTED**.
 
+**Task 12B corrective pass — COMPLETED (fail-closed batch contract + live drift evidence):**
+
+- `CPNDetector` / `_detect_raw_batch` now fail closed on invalid batch size: `batch_size <= 0` raises `ValueError` (no silent normalization, no `range` step edge case returning empty output).
+- Fail closed on Ultralytics result cardinality mismatch: each chunk's `len(results)` must equal `len(chunk)` (RuntimeError with expected/actual counts and chunk start); total `len(raw_results)` must equal `len(spectrograms)` before physical conversion (RuntimeError otherwise).
+- No silent zip/truncation geometry misalignment is permitted; a mismatched result is never associated with the wrong `SpectrogramGeometry`.
+- Live batch=1 physical-coordinate drift was measured on the five approved probes (max t_start/t_end diff ~1e-5 s, max f_low/f_high diff ~0.2–10 kHz, max xyxy diff ~1e-4–8e-4, max conf diff ~0.001–0.023); count, bandwidth-tier multiset, and NMS survival remain unchanged. These are diagnostic float-level deltas, not an acceptance tolerance; batch=1 is not historical bitwise parity.
+
 ## 22. Resolved and unresolved provenance items
 
 - UNRESOLVED (low risk): The exact `torch.autocast` state and whether any FRN shard ran CPU vs CUDA — the driver selects `cuda if available else cpu` (`run_frn_on_proposals.py` line 56); the historical GPU was RTX 5090, so CUDA+float16 autocast was active, but the per-shard device isn't logged. This affects numerics at 1e-7 scale only.
