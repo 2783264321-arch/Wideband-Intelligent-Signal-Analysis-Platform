@@ -491,3 +491,102 @@ It is the historical ZoomSpec ML runtime (Python 3.12.3, torch 2.8.0+cu128 / CUD
 Task 12 must use `/root/miniconda3/bin/python` and must not rely on `/root/autodl-tmp/wsp-runtime/m9-1-gpu`.
 
 Verified under this runtime (import-only / CLI smoke): `app.remote_execution.schema`, `canonical`, `runner`, `assets`, `resolver` all import; `runner --help` exit 0; `pip check` reports "No broken requirements found."
+
+## 24. Task 12D — frozen Combined FRN V3 production port
+
+FRN Stage Gate 0 was accepted: `FRN_STAGE_GATE0_SEMANTICS_AND_RAW_REFERENCE_CONFIRMED`. This section records the Task 12D production port.
+
+### Frozen asset identities verified
+
+| Asset | Path | SHA256 |
+|---|---|---|
+| FRN checkpoint | `/root/autodl-tmp/Claude/artifacts/frn_combined_v3_training/best.pt` | `da6087da2fbfbaa5ba0e2cb210d08c24ee8b2af8418329d32216f7c77253be67` |
+| frozen config | `/root/autodl-tmp/Claude/configs/frozen_full_pipeline_v26_aug_combined.yaml` | `030dbfa77353f876728252c2f247b47816baf8921a7641bb8873ae9035d9d7ec` |
+| CPN oracle (49,825 rows) | `/root/autodl-tmp/Claude/reports_claude/test_cpn_proposals_augv3.jsonl` | `021bc47e604303a2711c2b860d681ecc698b2bbcc464c0d10679e1b5e9fd1c79` |
+| 16 FRN raw diagnostic shards (49,825 total rows) | `Claude/reports_claude/test_raw_shard_augv3_{00..15}.jsonl` | full SHAs recorded in §35 audit |
+| final merged detection oracle (33,373 rows) | `/root/autodl-tmp/Claude/reports_claude/test_val_detections_augv3.jsonl` | `950ad87ec355169b1904da4364f296ade5854926d4e02dc83049d9585859efcd` |
+
+Platform asset manifest semantic SHA: `16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08`; it declares the FRN checkpoint SHA `da6087da…`.
+
+The `test_raw_shard_augv3_*` files are **FRN diagnostic/raw-shard oracles** (post-FRN, pre-NMS per-recording diagnostics). They are NOT full logit oracles — the complete 14-D class_logits / signal_logit / 1024-D start/duration/bandwidth_logits must be compared against the test-only historical runtime, which is what Task 12D does.
+
+### Embedded architecture config (from checkpoint)
+
+```
+channels = 128
+fusion_attention = True
+use_bandwidth_context = True
+use_center_regression = True
+use_log_bandwidth = False
+attention_pool = False
+input_length = 4096
+num_classes = 14
+parameter count = 586,692
+parameter dtype = float32
+class_head input features = 129
+center_head present, pool_attn absent
+```
+
+### Temporal decode sample-rate resolution (Gate 0 → Task 12D)
+
+`minimum_duration = 1.0 / observation.fs_hz` uses the **original Recording / Observation sample rate** (recording observation bandwidth), NOT the candidate post-decimation `sample_rate_hz`. Source: `ZoomSpec/src/zoomspec_repro/pipeline.py` line 103; `observation.fs_hz` is set in `data.py` `Observation` = `f_hi_hz - f_lo_hz`. Post-decimation `candidate.sample_rate_hz = observation.fs_hz / decimation` differs whenever decimation > 1.
+
+Therefore Task-12D production `refine_batch` signature is:
+
+```python
+def refine_batch(
+    self,
+    candidates,
+    *,
+    recording_sample_rate_hz: float,
+    recording_duration_s: float,
+    frequency_low_hz: float,
+    frequency_high_hz: float,
+    batch_size: int = 64,
+) -> list[FRNRefinedDetection | None]:
+```
+
+### Production file / symbols
+
+```
+backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/frn.py
+  FRNPrediction            (public dataclass)
+  FRNRefinedDetection      (public dataclass)
+  FRNRefiner               (public class: __init__, predict_batch, refine_batch)
+  build_frn_features       (pure NumPy; global_resample; input_length 4096)
+  bandwidth_context        (log2(max(lowpass_hz,1e-6)/1e6))
+  decode_classification    (numpy-only helper; historical-parity path uses torch softmax)
+  regression_expectation   (numpy-only softmax-expectation over [0,1] grid)
+  decode_temporal_box      (recording_sample_rate based minimum-duration)
+  decode_frequency_box     (bandwidth_norm * 2 * lowpass_hz; center offset residual)
+  geometric_fusion         (sqrt(score * signal_prob * class_prob))
+  _build_model_module      (LAZY torch import; returns ZoomSpecFRN + torch)
+  _FRNRawHeads             (private raw-head container)
+```
+
+### Feature and model contract
+
+- Feature mode: `global_resample`; `input_length = 4096`; RMS normalization with `1e-8` epsilon floor; IQ channels stacked `[real, imag]`; FFT `fftshift(fft(normalized))/sqrt(N)` → `log1p|.|` → mean/std standardize → resample to (1,4096).
+- Model weights float32; inputs transferred as float32; CUDA float16 autocast; raw neural heads float16, decoded start/duration/bandwidth float32.
+- Lazy-Torch boundary: importing `frn` never requires torch; `FRNRefiner.__init__` performs the lazy torch import + strict state-dict load (missing=[], unexpected=[]).
+
+### Parity results
+
+- Level 1 feature parity: production features byte-identical to historical for all 7 approved probes (`0/0`, `0/1`, `0/3`, `0/10`, `1002/0`, `1/3`, `10/5`). IQ/FFT `np.array_equal=True`, raw-byte SHA256 equal; bandwidth-context exact.
+- Level 2 raw neural head parity: all 9 heads `torch.equal=True`, `max_abs_diff=0.0` (batch=4 seeded identical inputs, CUDA float16 autocast).
+- Level 3 frozen diagnostic-oracle parity: all probes exact (class_id, signal/class prob, start/duration/bandwidth/center norms, t0/t1, f0/f1, final_score) — zero diff.
+- Sample-0 full pre-NMS parity: 17/17 production rows exact vs frozen raw-shard rows.
+- batch=1 vs recording-batch diagnostic: recorded; no semantic divergence (no class-argmax change, no valid↔invalid transition). No low-level CUDA kernel root cause is claimed; wording is "batch shape changes CUDA/FP16 forward numerics" for any residual drift (there was none observed).
+
+### Out-of-scope for Task 12D
+
+- score threshold filtering (0.001), physical class-aware NMS (`physical_class_nms`/`tf_iou`), `DetectionPayload` assembly, full `pipeline.py` orchestration, registry registration, remote runner integration. These belong to the subsequent full-pipeline composition task.
+- final frozen detection oracle exists (33,373 rows) but Task 12D does not implement NMS/postprocess.
+
+### Model lifetime
+
+Checkpoint loaded once per `FRNRefiner` instance; repeated `predict_batch`/`refine_batch` reuse the same model (verified).
+
+### Task 12 boundary
+
+Task 12 must use `/root/miniconda3/bin/python` and must not rely on `/root/autodl-tmp/wsp-runtime/m9-1-gpu`. Importing `app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn` works under the `.venv` (no torch) and under the ML runtime (torch).
