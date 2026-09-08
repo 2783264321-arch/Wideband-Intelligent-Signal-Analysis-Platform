@@ -19,7 +19,7 @@ from app.remote_execution.schema import (
     RemoteExecutionBatchV1,
     parse_remote_execution_batch_json,
 )
-from app.remote_execution.transport import RemoteTransportError, SshRunner
+from app.remote_execution.transport import RemoteRunnerExit, RemoteTransportError, SshRunner
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 
@@ -72,6 +72,12 @@ class RemoteGpuJobManager:
         try:
             self.transport.upload_file(request_json_path, remote_request_path)
             self.transport.run_runner("submit", ("--request-path", remote_request_path.as_posix()))
+        except RemoteRunnerExit as exc:
+            raise PlatformError(
+                "REMOTE_SUBMIT_FAILED",
+                exc.message or "Remote submit failed.",
+                details={"runner_code": exc.code},
+            ) from exc
         except RemoteTransportError:
             raise PlatformError("REMOTE_SUBMIT_FAILED", "Remote submit transport failed.")
 
@@ -79,6 +85,12 @@ class RemoteGpuJobManager:
         _require_identifier(batch_id, "batch_id", "REMOTE_STATUS_UNAVAILABLE")
         try:
             result = self.transport.run_runner("status", ("--batch-id", batch_id))
+        except RemoteRunnerExit as exc:
+            raise PlatformError(
+                "REMOTE_STATUS_UNAVAILABLE",
+                exc.message or "Remote status failed.",
+                details={"runner_code": exc.code},
+            ) from exc
         except RemoteTransportError:
             raise PlatformError("REMOTE_STATUS_UNAVAILABLE", "Remote status transport failed.")
         status = _parse_status_json(result.stdout)
