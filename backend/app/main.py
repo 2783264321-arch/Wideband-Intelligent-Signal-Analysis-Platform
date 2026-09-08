@@ -17,13 +17,12 @@ from app.ground_truth.router import router as ground_truth_router
 from app.detections.router import router as detections_router
 from app.analysis.job_manager import LocalJobManager
 from app.analysis.router import router as analysis_router
-from app.analysis.service import mark_stale_running_runs_interrupted
 from app.benchmarks.job_manager import LocalBenchmarkJobManager
 from app.benchmarks.router import router as benchmarks_router
 from app.benchmarks.service import mark_stale_running_evaluations_interrupted
 from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
-
+from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
@@ -39,8 +38,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Base.metadata.create_all(app.state.database.engine)
     run_additive_migrations(app.state.database.engine)
     with app.state.database.session_factory() as recovery_session:
-        mark_stale_running_runs_interrupted(recovery_session)
+        from app.remote_execution.recovery import (
+            coordinate_orphaned_remote_runs,
+            mark_stale_local_cpu_runs_interrupted,
+            remote_config_available,
+        )
+
+        mark_stale_local_cpu_runs_interrupted(recovery_session)
         mark_stale_running_evaluations_interrupted(recovery_session)
+        remote_config = remote_config_available()
+        app.state.remote_config_available = remote_config
+        if remote_config:
+            launcher = CoordinatorJobManager(settings)
+            app.state.remote_coordinator_launcher = launcher
+            coordinate_orphaned_remote_runs(
+                recovery_session,
+                launcher=launcher,
+                remote_config_available=True,
+                seen_run_ids=set(),
+            )
 
     app.add_middleware(
         CORSMiddleware,
