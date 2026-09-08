@@ -420,6 +420,18 @@ Explicitly NOT ported: training loops, dataset/cache builders, GT label writing,
 
 **Task 12A parity reference (LS-STFT):** Task 12A MUST use the historical Torch behavior as its parity reference. Formal reference: `ZoomSpec/src/zoomspec_repro/spectral_torch.py :: build_spectrogram_torch`. Runtime: `/root/miniconda3/bin/python`. GPU parity environment: NVIDIA GeForce RTX 5090, torch 2.8.0+cu128, CUDA available. Task 12A must NOT silently substitute the NumPy LS-STFT implementation merely because it is simpler or was the builder default. Production code must be independently ported into the platform and must NOT import legacy ZoomSpec source at runtime.
 
+**Task 12A production port — COMPLETED (Torch LS-STFT preprocessing):**
+
+- Production file/symbol: `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/preprocessing.py :: build_ls_stft_spectrogram` (plus `LSSTFTNormalization`, `SpectrogramGeometry`, `LSSTFTSpectrogram`).
+- The platform implementation independently reproduces the historical Torch behavior (`build_spectrogram_torch`) and the builder's final image construction: `torch.stft` (Hann periodic=False, center=False, onesided=False, return_complex) → fftshift(dim=0) → paper_strict LS frequency resampling via `torch.searchsorted` interpolation → bilinear time resize (align_corners=True) → `log(|·|+1e-8)` → percentile normalize → `round(norm*255)` → uint8 → one vertical flip. No legacy ZoomSpec runtime import; Torch imported lazily.
+- Frozen constants internal: ls_stft / paper_strict, n_fft=win_length=2048, hop=1024, 640×640, subband_hz=1e6, epsilon=1e-8.
+- 5/5 approved samples (`0`, `156`, `2121`, `435`, `999`) exact decoded-pixel parity on the AutoDL acceptance server: diff_pixels=0, identical_fraction=1.0, max_abs_diff=0, mean_abs_diff=0.0, pixel-byte SHA256 equal. Actual GPU: NVIDIA GeForce RTX 5090; torch 2.8.0+cu128; CUDA available.
+- Runtime bootstrap fact: the historical scientific/model stack remained unchanged (torch 2.8.0+cu128, ultralytics 8.4.114, numpy 2.3.2, scipy 1.18.0, Pillow 11.3.0, PyYAML 6.0.2, pydantic 2.13.5, SQLAlchemy 2.0.52, typing-extensions 4.14.1) while minimum platform/test dependencies were added (`pytest 9.1.1`, `fastapi 0.141.1`, `starlette 1.6.0`, `pydantic-settings 2.15.0`, `python-multipart 0.0.32`).
+- Canonical test-interpreter split: `repo/.venv/bin/python` for ordinary backend full regression; `/root/miniconda3/bin/python` for ML numerical parity, Torch/CUDA focused Task-12A tests, and the formal inference runtime.
+- Older NumPy/CPU-safe planning language (e.g. plan wording "NumPy/CPU-safe core") is superseded by the Torch parity path confirmed at Gate 0 and by this port.
+- CPN/detector, AHLP, FRN, full pipeline, frontend, API, database, evaluator, and remote-transport work remain NOT STARTED.
+- FRN autocast/float16 device parity remains UNRESOLVED (see §22); the RTX 4090/5090 equivalence decision for Task-12A five-sample pixel parity is NOT extended to FRN numeric parity.
+
 ## 22. Resolved and unresolved provenance items
 
 - UNRESOLVED (low risk): The exact `torch.autocast` state and whether any FRN shard ran CPU vs CUDA — the driver selects `cuda if available else cpu` (`run_frn_on_proposals.py` line 56); the historical GPU was RTX 5090, so CUDA+float16 autocast was active, but the per-shard device isn't logged. This affects numerics at 1e-7 scale only.
