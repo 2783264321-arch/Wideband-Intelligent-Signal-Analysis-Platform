@@ -17,10 +17,54 @@ from app.remote_execution.profile import RemoteProfile, is_safe_remote_posix_pat
 _RUNNER_COMMANDS = ("probe", "submit", "status", "work")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _FLAG_RE = re.compile(r"^--[A-Za-z0-9_-]+$")
+_RUNNER_ERROR_RE = re.compile(r"^([A-Z][A-Z0-9_]{1,63}): (.+)$")
+_MAX_RUNNER_MESSAGE_LEN = 500
+
+
+def _coerce_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _parse_runner_error_line(stderr: str | bytes | None) -> tuple[str, str] | None:
+    """Return (code, message) iff stderr is exactly one bounded runner-error
+    line 'CODE: message'. Arbitrary SSH/traceback stderr returns None."""
+    line = _coerce_text(stderr).strip()
+    if not line or "\n" in line or "\r" in line:
+        return None
+    match = _RUNNER_ERROR_RE.fullmatch(line)
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _sanitize_runner_message(message: str | bytes | None) -> str:
+    """Bounded, control-char-stripped message. Never includes tracebacks/paths."""
+    if message is None:
+        return ""
+    cleaned = "".join(ch for ch in _coerce_text(message) if ch.isprintable() or ch in "\t")
+    return cleaned[:_MAX_RUNNER_MESSAGE_LEN]
 
 
 class RemoteTransportError(RuntimeError):
+    """Remote transport command failed (SSH/SCP-level). No server stderr leaked."""
     pass
+
+
+class RemoteRunnerExit(RemoteTransportError):
+    """A runner subprocess returned nonzero with a single controlled stderr
+    line 'CODE: message'. Only a validated uppercase error code + bounded
+    sanitized message are retained; arbitrary stderr is never exposed."""
+
+    def __init__(self, returncode: int, code: str | None, message: str | None, stdout: str):
+        super().__init__(f"Remote runner exited with code {returncode}.")
+        self.returncode = returncode
+        self.code = code
+        self.message = message
+        self.stdout = stdout
 
 
 def _is_safe_remote_posix_path(value: str) -> bool:
@@ -68,6 +112,16 @@ class SshRunner:
             raise RemoteTransportError("Remote transport command exited nonzero.")
         return result
 
+    def _invoke_runner(self, argv: list[str]) -> subprocess.CompletedProcess:
+        result = self._run_process(argv, shell=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            parsed = _parse_runner_error_line(result.stderr)
+            if parsed is not None:
+                code, message = parsed
+                raise RemoteRunnerExit(result.returncode, code, _sanitize_runner_message(message), result.stdout)
+            raise RemoteTransportError("Remote transport command exited nonzero.")
+        return result
+
     def run_runner(
         self,
         subcommand: str,
@@ -97,7 +151,7 @@ class SshRunner:
             subcommand,
             *args,
         ]
-        return self._invoke(argv)
+        return self._invoke_runner(argv)
 
     @staticmethod
     def _is_safe_runner_token(token: str) -> bool:

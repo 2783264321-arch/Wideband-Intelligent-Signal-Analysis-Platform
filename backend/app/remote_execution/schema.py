@@ -129,6 +129,16 @@ class RemoteExecutionEnvelopeV1(RemoteWireModel):
     remote_finished_at: datetime | None = None
 
 
+class RemoteProbeResponseV1(RemoteWireModel):
+    """Frozen successful producer contract for the remote probe (produced by
+    12F-B in runner._cli_probe; consumed here via a deterministic fake in 12F-A)."""
+    schema_version: Literal[1] = 1
+    status: Literal["available"] = "available"
+    remote_runtime_commit: GitCommitSha
+    asset_manifest_sha256: Sha256Hex
+    device: int
+
+
 def _is_safe_relative_protocol_path(value: str) -> bool:
     if value != value.strip():
         return False
