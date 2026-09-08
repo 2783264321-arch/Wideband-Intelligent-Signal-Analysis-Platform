@@ -18,6 +18,7 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9._:\-]+$")
 _USER_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _REMOTE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def is_safe_remote_posix_path_text(value: str) -> bool:
@@ -56,6 +57,12 @@ def _unavailable(message: str) -> PlatformError:
 def _safe_identifier(value: str, name: str) -> str:
     if not value or _IDENTIFIER_RE.fullmatch(value) is None:
         raise _unavailable(f"{name} must be a safe identifier.")
+    return value
+
+
+def _require_runtime_commit(value: str) -> str:
+    if not value or _GIT_COMMIT_RE.fullmatch(value) is None:
+        raise _unavailable("WSP_REMOTE_REQUIRED_RUNTIME_COMMIT must be a 40-hex commit.")
     return value
 
 
@@ -121,6 +128,7 @@ class RemoteProfile:
     remote_repo_root: PurePosixPath
     remote_job_root: PurePosixPath
     remote_python_path: PurePosixPath
+    required_remote_runtime_commit: str
 
     dataset_roots: dict[str, PurePosixPath]
     asset_paths: dict[str, PurePosixPath]
@@ -157,6 +165,7 @@ class RemoteProfile:
         # validated as a safe absolute POSIX path only; the local computer cannot
         # inspect the server filesystem, so no Path.exists() is used here.
         remote_python_path = _safe_posix_root(_get("WSP_REMOTE_PYTHON_PATH"), "WSP_REMOTE_PYTHON_PATH")
+        required_remote_runtime_commit = _require_runtime_commit(_get("WSP_REMOTE_REQUIRED_RUNTIME_COMMIT"))
 
         dataset_roots = _safe_posix_mapping(env.get("WSP_REMOTE_DATASET_ROOTS_JSON"), "WSP_REMOTE_DATASET_ROOTS_JSON")
         asset_paths = _safe_posix_mapping(env.get("WSP_REMOTE_ASSET_PATHS_JSON"), "WSP_REMOTE_ASSET_PATHS_JSON")
@@ -171,6 +180,7 @@ class RemoteProfile:
             remote_repo_root=remote_repo_root,
             remote_job_root=remote_job_root,
             remote_python_path=remote_python_path,
+            required_remote_runtime_commit=required_remote_runtime_commit,
             dataset_roots=dataset_roots,
             asset_paths=asset_paths,
         )

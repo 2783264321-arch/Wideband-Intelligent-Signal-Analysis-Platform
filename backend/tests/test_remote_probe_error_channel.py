@@ -43,6 +43,7 @@ def _profile() -> RemoteProfile:
         remote_repo_root=Path("/repo"),
         remote_job_root=Path("/jobs"),
         remote_python_path=Path("/py"),
+        required_remote_runtime_commit="a" * 40,
         dataset_roots={},
         asset_paths={},
     )

@@ -74,6 +74,7 @@ def _profile(tmp_path):
         remote_repo_root=PurePosixPath("/root/repo"),
         remote_job_root=PurePosixPath("/root/jobs"),
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
+        required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
     )
@@ -94,6 +95,7 @@ def _profile_env(tmp_path, monkeypatch, **overrides):
         "WSP_REMOTE_REPO_ROOT": "/root/repo",
         "WSP_REMOTE_JOB_ROOT": "/root/jobs",
         "WSP_REMOTE_PYTHON_PATH": "/opt/wsp-runtime/bin/python",
+        "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT": "a" * 40,
         "WSP_REMOTE_DATASET_ROOTS_JSON": json.dumps({"SpaceNet": "/root/autodl-tmp/SpaceNet_Dataset"}),
         "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({"detector_checkpoint": "/root/models/best.pt"}),
     }
@@ -304,6 +306,7 @@ def test_ssh_runner_argv_env_prefix_uses_remote_repo_root(tmp_path):
         remote_repo_root=PurePosixPath("/opt/platform"),
         remote_job_root=PurePosixPath("/root/jobs"),
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
+        required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
     )
@@ -378,6 +381,7 @@ def test_ssh_runner_argv_uses_custom_remote_python(tmp_path):
         remote_repo_root=PurePosixPath("/root/repo"),
         remote_job_root=PurePosixPath("/root/jobs"),
         remote_python_path=PurePosixPath("/srv/runtime/python"),
+        required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
     )
@@ -404,6 +408,7 @@ def test_ssh_runner_argv_uses_custom_job_root(tmp_path):
         remote_repo_root=PurePosixPath("/root/repo"),
         remote_job_root=PurePosixPath("/srv/jobs"),
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
+        required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
     )
