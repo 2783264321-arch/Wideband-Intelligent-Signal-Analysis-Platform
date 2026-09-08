@@ -46,6 +46,7 @@ from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.postprocess import (
     postprocess_detections,
     _SCORE_THRESHOLD,
 )
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition import ZOOMSPEC_FROZEN_DEFINITION
 from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.preprocessing import (
     build_ls_stft_spectrogram,
     LSSTFTNormalization,
@@ -90,19 +91,7 @@ class ZoomSpecFrozenPipeline(Pipeline):
 
     @property
     def definition(self) -> PipelineDefinition:
-        return PipelineDefinition(
-            id=_PIPELINE_ID,
-            name="ZoomSpec YOLO26n + Combined FRN V3",
-            version=_PIPELINE_VERSION,
-            label_space="spacenet_14",
-            recommended_device="GPU",
-            cpu_supported=False,
-            stages=("ls_stft", "cpn", "ahlp", "frn", "postprocess"),
-            inspectable_stages=(),
-            task_capability="detection_classification",
-            executors_supported=("remote_gpu",),
-            recommended_executor="remote_gpu",
-        )
+        return ZOOMSPEC_FROZEN_DEFINITION
 
     def run(
         self,
