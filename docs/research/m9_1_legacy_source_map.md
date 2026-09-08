@@ -10,7 +10,7 @@
 
 - Pipeline id: `zoomspec_yolo26n_aug_combined_frn_v3`
 - Pipeline version: `1.0.0`
-- Legacy driver that produced the oracle: `/root/autodl-tmp/Claude/scripts/run_test_new_pipeline.py`
+- Legacy driver that produced the surviving oracle: `/root/autodl-tmp/Claude/scripts/run_test_frn_16shards.py` (16 workers; earlier 4-shard runs wrote the same filename, but the surviving frozen artifacts are the 16-shard `{00..15}` outputs with `shard_count=16`)
 - Legacy runtime interpreter: `/root/miniconda3/bin/python` (Python 3.12.3)
 - Platform repo branch/HEAD at characterization time: `feature/m9-1-live-remote-gpu-inference`
 
@@ -22,7 +22,7 @@ Evidence convention: `file.py :: function` and optional line range. YAML evidenc
 - SHA256: `950ad87ec355169b1904da4364f296ade5854926d4e02dc83049d9585859efcd` (verified)
 - Row count: `33373` (verified)
 - Split: `test` (SpaceNet advanced/test), manifest `test_manifest.json` (`test_ids` 2500, seed 42)
-- This file was produced by `run_test_new_pipeline.py` step 3: `merge_detection_jsonl.py` merging the 4 FRN shard outputs `test_det_shard_augv3_{0..3}.jsonl`.
+- This file was produced by `run_test_frn_16shards.py` step 3: `merge_detection_jsonl.py` merging the 16 FRN post-NMS shard outputs `test_det_shard_augv3_{00..15}.jsonl` (33,373 total rows).
 
 ## 3. Frozen assets
 
@@ -38,13 +38,13 @@ The tracked asset manifest (Task 10 / Task 11 corrective) records these same log
 ## 4. End-to-end call graph
 
 ```
-run_test_new_pipeline.py  (Claude/scripts)
+run_test_frn_16shards.py  (Claude/scripts; 16 workers; produces the surviving frozen oracle)
  ├─ step1  ZoomSpec/scripts/evaluate_cpn.py
  │          model=detector_checkpoint  --split test --representation ls_stft --conf 0.003
  │          └─ ultralytics YOLO.predict(source=<cached 640x640 PNGs>, imgsz=640, conf=0.003, iou=0.7, max_det=300, device=0)
  │          └─ zoomspec_repro.coordinates.image_box_to_proposal (normalized pixel -> physical Proposal)
  │          └─ output: test_cpn_proposals_augv3.jsonl  (49,825 rows, 19.93/image)
- ├─ step2  ZoomSpec/scripts/run_frn_on_proposals.py  ×4 shards
+ ├─ step2  ZoomSpec/scripts/run_frn_on_proposals.py  ×16 shards ({00..15})
  │          checkpoint=frn_checkpoint  --score-mode geometric --score-threshold 0.001 --nms-iou 0.7
  │          └─ zoomspec_repro.pipeline.refine_proposals
  │               ├─ ahlp.purify_candidate          (AHLP per proposal)
@@ -53,7 +53,7 @@ run_test_new_pipeline.py  (Claude/scripts)
  │               ├─ geometric score fusion         sqrt(proposal_score * signal_prob * class_prob)
  │               ├─ FRN regression decode (start/duration/bandwidth/center_offset)
  │               └─ metrics.physical_class_nms     (class-aware 2D TF NMS, IoU 0.7)
- │          └─ output: test_det_shard_augv3_{0..3}.jsonl  (+ raw shards)
+ │          └─ output: test_det_shard_augv3_{00..15}.jsonl  (+ 16 raw shards test_raw_shard_augv3_{00..15}.jsonl)
  ├─ step3  ZoomSpec/scripts/merge_detection_jsonl.py
  │          └─ output: test_val_detections_augv3.jsonl  (33,373 rows, sorted by sample_id then -score)
  └─ step4  ZoomSpec/scripts/evaluate_detections.py  (evaluation only, not part of inference)
