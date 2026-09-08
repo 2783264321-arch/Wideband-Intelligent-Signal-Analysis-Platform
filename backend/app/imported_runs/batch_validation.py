@@ -22,6 +22,7 @@ from app.imported_runs.fingerprint import (
     RecordingFingerprintValue,
     build_batch_import_fingerprint,
     build_recording_fingerprint,
+    manifest_recording_for,
 )
 from app.imported_runs.validation import ValidatedAnalysisPackage, validate_extracted_package
 from app.labels.service import LabelSpaceService
@@ -50,26 +51,7 @@ class ValidatedBatch:
 
 
 def _manifest_recording_for(recording: RecordingModel, gt_rows: list[GroundTruthModel]) -> ManifestRecording:
-    ground_truth = tuple(
-        ManifestGroundTruth(
-            t_start_s=gt.t_start_s, t_end_s=gt.t_end_s,
-            f_low_hz=gt.f_low_hz, f_high_hz=gt.f_high_hz,
-            class_id=gt.class_id, class_name=gt.class_name,
-        )
-        for gt in gt_rows
-    )
-    return ManifestRecording(
-        recording_id=recording.id,
-        name=recording.name,
-        data_format=recording.data_format,
-        sample_rate_hz=recording.sample_rate_hz,
-        center_frequency_hz=recording.center_frequency_hz,
-        frequency_low_hz=recording.frequency_low_hz,
-        frequency_high_hz=recording.frequency_high_hz,
-        num_samples=recording.num_samples,
-        duration_s=recording.duration_s,
-        ground_truth=ground_truth,
-    )
+    return manifest_recording_for(recording, gt_rows)
 
 
 def validate_batch(
