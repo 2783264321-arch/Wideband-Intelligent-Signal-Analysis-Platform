@@ -19,6 +19,7 @@ configurable: any non-empty ``parameters`` is rejected.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -43,6 +44,7 @@ from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.detector import (
 from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import FRNRefiner
 from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.postprocess import (
     postprocess_detections,
+    _SCORE_THRESHOLD,
 )
 from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.preprocessing import (
     build_ls_stft_spectrogram,
@@ -54,6 +56,14 @@ _PIPELINE_ID = "zoomspec_yolo26n_aug_combined_frn_v3"
 _PIPELINE_VERSION = "1.0.0"
 _FRN_BATCH_SIZE = 64
 _CPN_BATCH_SIZE = 16  # reserved default; live call uses actual batch=1
+
+
+@dataclass(frozen=True)
+class _CompositionResult:
+    payloads: list[DetectionPayload]
+    frn_valid_count: int
+    score_threshold_survivor_count: int
+    post_nms_count: int
 
 
 class ZoomSpecFrozenPipeline(Pipeline):
@@ -114,17 +124,17 @@ class ZoomSpecFrozenPipeline(Pipeline):
             device=str(self._device) if not isinstance(self._device, int) else "cuda",
         )
         proposals = self._detector.detect_batch([spectrogram], batch_size=1)[0]
-        payloads = self._refine_from_proposals(iq, recording, proposals)
+        comp = self._compose_from_proposals(iq, recording, proposals)
         return PipelineOutput(
-            detections=payloads,
+            detections=comp.payloads,
             artifacts=[],
             run_metadata={
                 "kind": _PIPELINE_ID,
                 "task_capability": "detection_classification",
                 "cpn_proposal_count": len(proposals),
-                "frn_valid_count": sum(1 for p in payloads if p.confidence >= 0.0),
-                "score_threshold_survivor_count": len(payloads),
-                "post_nms_count": len(payloads),
+                "frn_valid_count": comp.frn_valid_count,
+                "score_threshold_survivor_count": comp.score_threshold_survivor_count,
+                "post_nms_count": comp.post_nms_count,
             },
         )
 
@@ -136,6 +146,20 @@ class ZoomSpecFrozenPipeline(Pipeline):
     ) -> list[DetectionPayload]:
         """Private test seam: refine frozen/external CPN proposals into
         DetectionPayloads (used for exact frozen-oracle composition)."""
+        return self._compose_from_proposals(iq, recording, proposals).payloads
+
+    def _compose_from_proposals(
+        self,
+        iq: np.ndarray,
+        recording: RecordingInput,
+        proposals: Sequence[CPNProposal],
+    ) -> _CompositionResult:
+        """Refine frozen/external CPN proposals into DetectionPayloads and report
+        the distinct scientific stage counts:
+        - frn_valid_count: FRNRefinedDetection entries that are not None;
+        - score_threshold_survivor_count: valid detections with confidence >= frozen
+          0.001 (reuses the postprocess module's frozen threshold);
+        - post_nms_count: final kept detections after class-aware TF NMS."""
         candidates: list[PurifiedCandidate] = [
             purify_candidate(
                 iq,
@@ -154,6 +178,7 @@ class ZoomSpecFrozenPipeline(Pipeline):
             batch_size=_FRN_BATCH_SIZE,
         )
         valid = [det for det in refined if det is not None]
+        threshold_survivors = [det for det in valid if det.confidence >= _SCORE_THRESHOLD]
         kept = postprocess_detections(valid)
 
         payloads: list[DetectionPayload] = []
@@ -175,4 +200,9 @@ class ZoomSpecFrozenPipeline(Pipeline):
                     },
                 )
             )
-        return payloads
+        return _CompositionResult(
+            payloads=payloads,
+            frn_valid_count=len(valid),
+            score_threshold_survivor_count=len(threshold_survivors),
+            post_nms_count=len(payloads),
+        )

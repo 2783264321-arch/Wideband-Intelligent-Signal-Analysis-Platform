@@ -657,3 +657,19 @@ Live `run()` (raw IQ -> LS-STFT -> live CPN batch=1 -> AHLP -> FRN -> postproces
 ### Task 12F boundary
 
 Registry registration, remote execution, AnalysisRun/DB persistence, frontend, Algorithm Lab wiring, and asset/runtime resolution remain **NOT STARTED** (Task 12F).
+
+### Task 12E metadata corrective
+
+- Scientific composition remains exact (Level-2 frozen-oracle parity unchanged).
+- Root cause of the metadata bug: `run()` derived intermediate stage counts from the final post-NMS `payloads`, collapsing `frn_valid_count` / `score_threshold_survivor_count` / `post_nms_count` to the same number.
+- Corrected stage-count definitions (via `_compose_from_proposals` / `_CompositionResult`):
+  - `cpn_proposal_count` = number of CPN proposals;
+  - `frn_valid_count` = `FRNRefinedDetection` entries that are not None;
+  - `score_threshold_survivor_count` = valid detections with `confidence >= 0.001` (reuses the postprocess module's frozen threshold; no divergent tunable);
+  - `post_nms_count` = final kept detections / `len(payloads)`.
+- `_refine_from_proposals` now returns `_compose_from_proposals(...).payloads`; the exact-parity seam is unchanged.
+- Level-3 live sample-0 diagnostic hardened to measure actual drift (deterministic one-to-one physical-IoU matching against the frozen sample-0 final oracle):
+  - live CPN proposals 17, live final detections 13, frozen final 13; matched 13/13, live/frozen unmatched 0/0;
+  - max matched drift: t_start 1.98e-4 s, t_end 8.15e-4 s, f_low 2.56e5 Hz, f_high 4.43e5 Hz, confidence 2.7e-2; class-change count 0.
+  - CPN batch=1 caveat remains; no dummy padding / oracle tuning.
+- Device-index normalization concern (if any) remains deferred to Task 12F. Registry/remote E2E still NOT completed.
