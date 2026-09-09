@@ -6,11 +6,11 @@
 
 **Architecture:** `RemoteProfile` remains **local** control-plane configuration. On the remote server a **`RemoteWorkerContext`** is built from fixed, validated environment assignments (no SSH/credential reference, no request-controlled paths, no deployment paths inside `RemoteExecutionBatchV1`). `runner._cli_probe` verifies server readiness without loading models. `ZoomSpecRemoteItemExecutor.execute(item, job_root)` performs the frozen scientific execution and atomic result publication. `runner.run_work` stays the lifecycle/write-once/status owner.
 
-**Tech Stack:** Python 3.12 (AutoDL), PyTorch 2.8.0+cu128, ultralytics 8.4.114, NumPy 2.3.2, FastAPI, SQLAlchemy, Pydantic, OpenSSH/SCP. No real SSH/GPU required for the CPU/no-GPU unit phase; GPU-required acceptance is explicitly gated and must only run on a card-mode server.
+**Tech Stack:** PyTorch 2.8.0+cu128, ultralytics 8.4.114, NumPy 2.3.2, FastAPI, SQLAlchemy, Pydantic, OpenSSH/SCP. Remote runtime is the deployed `/root/miniconda3/bin/python`; no Python minor version is claimed without fresh runtime evidence. No real SSH/GPU required for the CPU/no-GPU unit phase; GPU-required acceptance is explicitly gated and must only run on a card-mode server.
 
 **Spec:** `docs/superpowers/specs/2026-09-09-m9-1-task12f-remote-platform-integration-design.md` (§8.2, §9, §10, §14)
 
-**Base:** `feature/m9-1-live-remote-gpu-inference @ 34d854411c721bfb0459e6b1aa0e149e7ceaf2de`
+**Base:** `feature/m9-1-live-remote-gpu-inference @ 6ebd3c231ac75ad3e8071e3b30bf0acf8fddc195`
 
 ---
 
@@ -52,7 +52,7 @@
 | `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT` | 40-hex required remote runtime commit | `RemoteProfile.required_remote_runtime_commit` |
 | `PYTHONPATH` | `<remote_repo_root>/backend` | derived from `remote_repo_root` |
 
-All values are already validated safe absolute POSIX paths by `RemoteProfile`. `SshRunner` fails closed **before any SSH invocation** if `dataset_roots["SpaceNet"]` or any of the four required asset logical mappings is missing/unsafe.
+All values are already validated safe absolute POSIX paths by `RemoteProfile`. Only `probe`/`submit`/`work` require the full worker mappings; for those subcommands `SshRunner` fails closed **before any SSH invocation** if `dataset_roots["SpaceNet"]` or any of the four required asset logical mappings is missing/unsafe. `status` requires only the repo/job fields needed for its minimal env and remains usable without the scientific mappings.
 
 **Repo-owned paths derived remotely from `WSP_REMOTE_REPO_ROOT` (no extra deployment config):**
 - label-space root = `<remote_repo_root>/label_spaces`
@@ -87,6 +87,26 @@ class RemoteWorkerContext:
 - `status` → **minimal env only**: `PYTHONPATH=<repo_root>/backend` and `WSP_REMOTE_JOB_ROOT=<job_root>`.
   `status` MUST NOT require SpaceNet root, detector checkpoint, FRN checkpoint, frozen_config, or LS-STFT normalization — existing remote jobs must remain status/reconciliation-readable even if scientific deployment mappings become temporarily incomplete.
 
+**No-I/O preflight interface (LOCKED, owned by Task 1):** `SshRunner` exposes a zero subprocess/network-I/O preflight so callers validate the runner environment BEFORE any SCP/SSH side effect:
+```python
+def validate_runner_environment(self, subcommand: str) -> None:
+    """Validate that this subcommand's required runner env is satisfiable from the
+    RemoteProfile. Performs ZERO subprocess/network I/O.
+
+    probe -> require full worker env mappings
+    submit -> require full worker env mappings
+    work -> require full worker env mappings
+    status -> require only repo/job fields already needed for the minimal status env
+
+    Raises RemoteTransportError (not raw PlatformError) on missing/invalid mappings
+    so existing consumers fail closed through their current transport-error
+    boundaries. Missing/invalid full worker mapping is NEVER classified as a remote
+    runner exit."""
+    ...
+```
+
+`run_runner(subcommand, ...)` MUST call `validate_runner_environment(subcommand)` internally before invoking SSH, protecting direct callers too. `SshRunner` remains the single owner of the subcommand env rules; no caller duplicates them.
+
 ---
 
 # TASK 1 — RemoteWorkerContext + Scalar Env Bridge (transport + worker_context)
@@ -94,7 +114,21 @@ class RemoteWorkerContext:
 **First: read before editing**
 - `backend/app/remote_execution/profile.py` (`RemoteProfile`, `is_safe_remote_posix_path_text`, `_safe_posix_root`, `_safe_posix_mapping`).
 - `backend/app/remote_execution/transport.py` (`SshRunner.run_runner` argv construction — currently sets `PYTHONPATH`, `WSP_REMOTE_JOB_ROOT`, `remote_python_path -m ...`; must be extended with the fixed scalar worker env names above).
-- `backend/tests/test_remote_transport.py` (existing transport tests).
+- `backend/app/remote_execution/job_manager.py` (`RemoteGpuJobManager.submit` — currently uploads the request via `transport.upload_file(...)` and THEN invokes `transport.run_runner("submit", ...)`; the submit preflight must be inserted BEFORE the upload).
+- `backend/tests/test_remote_transport.py` (existing transport tests) and the existing `RemoteGpuJobManager` submit tests.
+
+**Submit preflight before SCP (LOCKED, Task 1 also modifies job_manager.py):**
+```python
+class RemoteGpuJobManager:
+    def submit(self, ...):
+        self.transport.validate_runner_environment("submit")   # BEFORE any I/O
+        self.transport.upload_file(...)                        # then SCP the request
+        self.transport.run_runner("submit", ...)               # run_runner re-validates defensively
+```
+- invalid/incomplete worker deployment → **zero** SCP, **zero** SSH runner invocation;
+- valid deployment → preflight, then upload request, then `run_runner` submit;
+- `run_runner` still performs its own defensive `validate_runner_environment` internally;
+- `RemoteGpuJobManager` must NOT duplicate the worker-mapping rules — `SshRunner` remains the single owner.
 
 **Interfaces:**
 - `backend/app/remote_execution/worker_context.py` (new):
@@ -135,30 +169,47 @@ Env bridge is **subcommand-specific**:
 - `work` → full worker env if invoked directly.
 - `status` → **minimal env only**: `PYTHONPATH=<repo_root>/backend`, `WSP_REMOTE_JOB_ROOT=<job_root>`. `status` must remain usable even if the scientific asset/dataset mappings are temporarily incomplete; it must not require SpaceNet root or any asset scalar.
 
-**RED test (`backend/tests/test_remote_worker_context.py`, new) + transport tests (`backend/tests/test_remote_transport.py`, extend):**
+**Error-type contract (LOCKED):**
+- **Local runner-env preparation failure → `RemoteTransportError`.** `validate_runner_environment` raises `RemoteTransportError` (not raw `PlatformError`) for missing/invalid worker mappings, so existing consumers fail closed through their current transport-error boundaries.
+- **Controlled nonzero remote runner response → `RemoteRunnerExit`.** A remote runner that exits nonzero (including a remote-side `RemoteWorkerContext.from_env` fail-close, which prints `CODE: message` to stderr and exits nonzero) is surfaced as `RemoteRunnerExit` by the local adapter.
+- **Do NOT misclassify a local missing mapping as `RemoteRunnerExit`.** Because `validate_runner_environment` runs locally BEFORE any SSH, a local missing mapping is always `RemoteTransportError` and never reaches a remote runner.
+- **Unsafe public API/programmer arguments** may retain existing `PlatformError` semantics where already established (e.g. `RemoteWorkerContext.from_env` on the remote host).
+- **No arbitrary config/path details leak to API clients**: error messages carry stable codes, never profile values/paths.
+
+**RED test (`backend/tests/test_remote_worker_context.py`, new) + transport tests (`backend/tests/test_remote_transport.py`, extend) + submit preflight tests (`backend/tests/test_remote_job_manager_submit.py`, new):**
 - `test_context_from_env_valid_full`: a complete valid scalar env produces a `RemoteWorkerContext` with every field set; `asset_manifest_path` and `label_space_root` are derived from repo_root.
 - `test_context_contains_no_ssh_credential_fields`: the dataclass has no host/user/port/ssh_key/known_hosts field and no credential value anywhere.
-- `test_context_missing_spacenet_root_fails_closed`: `WSP_REMOTE_SPACENET_ROOT` absent → PlatformError.
-- `test_context_missing_asset_scalar_fails_closed`: any of the four asset scalars absent → PlatformError.
+- `test_context_missing_spacenet_root_fails_closed`: `WSP_REMOTE_SPACENET_ROOT` absent → PlatformError (remote-host `RemoteWorkerContext.from_env` public-API fail-close; on the remote host this surfaces locally as `RemoteRunnerExit` via the nonzero runner exit).
+- `test_context_missing_asset_scalar_fails_closed`: any of the four asset scalars absent → PlatformError (remote-host public-API fail-close; see error-type contract).
 - `test_context_unsafe_path_rejected`: path with `..`/shell chars → PlatformError.
 - `test_context_invalid_runtime_commit_rejected`: non-40-hex runtime commit → PlatformError.
 - `test_probe_submit_work_argv_contain_full_scalar_worker_env` (transport): the remote command argv for `probe`/`submit`/`work` contains the full scalar env (`WSP_REMOTE_REPO_ROOT=`, `WSP_REMOTE_JOB_ROOT=`, `WSP_REMOTE_SPACENET_ROOT=`, `WSP_REMOTE_DETECTOR_CHECKPOINT=`, `WSP_REMOTE_FRN_CHECKPOINT=`, `WSP_REMOTE_FROZEN_CONFIG=`, `WSP_REMOTE_LS_STFT_NORMALIZATION=`, `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT=`, `PYTHONPATH=`).
 - `test_status_argv_contains_minimal_env_only` (transport): the `status` command argv contains only `PYTHONPATH=` and `WSP_REMOTE_JOB_ROOT=`; it does NOT require SpaceNet root or any asset scalar.
 - `test_status_invokes_ssh_with_missing_asset_mappings` (transport): `status` still invokes SSH (proceeds) when SpaceNet/asset mappings are absent from the profile.
-- `test_probe_submit_fail_before_ssh_when_worker_mapping_missing` (transport): missing SpaceNet root or a required asset mapping → PlatformError raised before any SSH invocation (no subprocess call) for `probe`/`submit`.
+- `test_validate_runner_environment_zero_io` (transport): `validate_runner_environment` performs zero subprocess/network I/O (no `subprocess`/SSH/SCP calls) for every subcommand, including on the failure path.
+- `test_validate_runner_environment_full_worker_for_probe_submit_work` (transport): `probe`/`submit`/`work` require the full worker env mappings (SpaceNet root + four asset scalars).
+- `test_validate_runner_environment_minimal_for_status` (transport): `status` requires only repo/job fields needed for the minimal status env; it passes even with SpaceNet/asset mappings absent.
+- `test_validate_runner_environment_missing_mapping_raises_transport_error` (transport): missing SpaceNet root or any required asset mapping → `RemoteTransportError` (not raw `PlatformError`, never `RemoteRunnerExit`), raised before any SSH invocation (no subprocess call) for `probe`/`submit`.
+- `test_run_runner_internally_validates_before_ssh` (transport): a direct `run_runner("submit", ...)` call with a missing mapping raises `RemoteTransportError` before any SSH invocation (defensive internal validation).
 - `test_worker_env_values_round_trip` (transport): every scalar value in the argv equals the corresponding validated `RemoteProfile` value.
-- `test_missing_spacenet_mapping_fails_before_ssh` (transport): `dataset_roots` without `"SpaceNet"` → PlatformError raised before any SSH invocation (no subprocess call) for probe/submit.
-- `test_missing_asset_logical_mapping_fails_before_ssh` (transport): asset map missing a required logical name → PlatformError before SSH (probe/submit).
+- `test_missing_spacenet_mapping_fails_before_ssh` (transport): `dataset_roots` without `"SpaceNet"` → `RemoteTransportError` raised before any SSH invocation (no subprocess call) for probe/submit.
+- `test_missing_asset_logical_mapping_fails_before_ssh` (transport): asset map missing a required logical name → `RemoteTransportError` before SSH (probe/submit).
+- `test_submit_missing_spacenet_mapping_zero_io` (job_manager): `RemoteGpuJobManager.submit` with SpaceNet mapping missing → zero `upload_file`/SSH/SCP calls (preflight runs before SCP).
+- `test_submit_missing_each_asset_mapping_zero_io` (job_manager): each of the four required asset mappings missing → zero upload/subprocess calls.
+- `test_submit_valid_ordering_preflight_then_upload_then_runner` (job_manager): valid deployment → call order is exactly `validate_runner_environment("submit")` → `upload_file(...)` → `run_runner("submit", ...)`.
+- `test_status_still_works_with_missing_scientific_mappings` (job_manager): `status`/reconciliation succeeds even when SpaceNet/asset mappings are absent.
+- `test_probe_missing_mapping_returns_transport_unavailable` (job_manager/adapter): a probe with a missing mapping returns a transport-layer unavailable result through the existing adapter and never crashes the API (no raw `PlatformError` escapes the adapter).
+- `test_no_config_details_leak_in_transport_errors`: `RemoteTransportError` messages carry stable codes and never include profile values/paths.
 - `test_no_credential_field_in_remote_env` (transport): no `host`/`user`/`ssh_key`/`known_hosts` value appears in the remote env/argv.
 - `test_no_json_mapping_in_remote_command` (transport): neither `WSP_REMOTE_DATASET_ROOTS_JSON` nor `WSP_REMOTE_ASSET_PATHS_JSON` appears anywhere in the remote command.
 
-**Expected failure (RED):** `worker_context.py` does not exist; `SshRunner.run_runner` does not yet expand the scalar worker env.
+**Expected failure (RED):** `worker_context.py` does not exist; `SshRunner.validate_runner_environment`/scalar env expansion absent; `RemoteGpuJobManager.submit` has no preflight before `upload_file`.
 
-**Minimal implementation:** add `worker_context.py` (scalar `from_env` + `required_worker_env_vars` + `is_complete_worker_env`); extend `SshRunner.run_runner` with the fixed scalar env expansion (fail-closed pre-SSH validation of required dataset/asset logical mappings).
+**Minimal implementation:** add `worker_context.py` (scalar `from_env` + `required_worker_env_vars` + `is_complete_worker_env`); extend `SshRunner.run_runner` with the fixed scalar env expansion (fail-closed pre-SSH validation of required dataset/asset logical mappings) and add `SshRunner.validate_runner_environment(subcommand)` (zero-I/O preflight raising `RemoteTransportError`); modify `RemoteGpuJobManager.submit` to call `self.transport.validate_runner_environment("submit")` BEFORE `upload_file` (no duplicated rules; `SshRunner` is the single owner).
 
 **Focused verification:**
 ```bash
-PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_remote_worker_context.py backend/tests/test_remote_transport.py -v
+PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_remote_worker_context.py backend/tests/test_remote_transport.py backend/tests/test_remote_job_manager_submit.py -v
 ```
 
 **Commit checkpoint:** `feat: add scalar worker env bridge and remote worker context`
@@ -577,9 +628,15 @@ These gates use real `detector_checkpoint`, `frn_checkpoint`, `frozen_config`, `
 
 - **Spec coverage:** §8.2 (RemoteWorkerContext + probe), §9 (ZoomSpecRemoteItemExecutor), §10 (device 0 normalization preserved), §11 (Analysis Package v1 reuse; envelope → hardware_info_json, provenance stays in execution metadata), §13 (security: no request-controlled path, fixed validated env bridge, fail-closed identity), §14 (12F-B acceptance). No local control-plane/coordinator redesign.
 - **No JSON mapping crosses the remote SSH command:** the worker env bridge is exact fixed scalar names only (`WSP_REMOTE_SPACENET_ROOT`, `WSP_REMOTE_DETECTOR_CHECKPOINT`, `WSP_REMOTE_FRN_CHECKPOINT`, `WSP_REMOTE_FROZEN_CONFIG`, `WSP_REMOTE_LS_STFT_NORMALIZATION`, etc.); `WSP_REMOTE_DATASET_ROOTS_JSON` / `WSP_REMOTE_ASSET_PATHS_JSON` never appear in the remote command (tested).
-- **Task 1 owns transport env propagation (subcommand-specific):** `SshRunner` expands the trusted scalar `RemoteProfile` values and fails closed before SSH on missing/unsafe SpaceNet/asset mappings for `probe`/`submit`; tests live in `test_remote_transport.py`.
+- **Task 1 owns transport env propagation (subcommand-specific):** `SshRunner` expands the trusted scalar `RemoteProfile` values and fails closed before SSH on missing/unsafe SpaceNet/asset mappings for `probe`/`submit`; `validate_runner_environment(subcommand)` is the single owner of the subcommand env rules; tests live in `test_remote_transport.py`.
 - **status stays usable without scientific asset mappings:** `status` carries minimal env only (`PYTHONPATH=<repo_root>/backend`, `WSP_REMOTE_JOB_ROOT=<job_root>`), does not require SpaceNet/asset scalars, and still invokes SSH even when those mappings are absent.
 - **submit/probe/work receive full worker context:** `probe` and `work` carry the full scalar env; `submit` carries it because the detached `runner work` subprocess inherits the submit environment through existing `Popen` inheritance.
+- **Missing submit worker config causes zero SCP/SSH calls:** `RemoteGpuJobManager.submit` calls `validate_runner_environment("submit")` BEFORE `upload_file`; a missing/invalid worker deployment raises `RemoteTransportError` with zero upload/SSH/SCP calls (tested); `run_runner` still performs its own defensive internal validation.
+- **One owner defines subcommand env requirements:** `SshRunner.validate_runner_environment` is the single owner; `run_runner` calls it internally before SSH; `RemoteGpuJobManager` duplicates no worker-mapping rules.
+- **Probe fail-closes through the existing adapter:** a probe with a missing mapping returns a transport-layer unavailable result through the existing adapter and never crashes the API with a raw `PlatformError`.
+- **Error-type contract:** local runner-env preparation failure → `RemoteTransportError`; controlled nonzero remote runner response (incl. remote `from_env` fail-close) → `RemoteRunnerExit`; a local missing mapping is NEVER `RemoteRunnerExit`; no arbitrary config/path details leak to API clients.
+- **No unverified Python minor version:** the plan references only the deployed `/root/miniconda3/bin/python` runtime; no minor-version claim without fresh runtime evidence.
+- **No contradiction between global env contract and status rule:** the authoritative contract states only `probe`/`submit`/`work` require the full worker mappings; `status` is minimal and usable without them.
 - **batch.pipeline owns pipeline identity:** executor requires `batch.pipeline.id/version == ZOOMSPEC_FROZEN_DEFINITION.id/version`; `item.recording` is dataset/split/key/label-space + double identity only (negative tests for wrong id and wrong version; `test_execute_uses_batch_pipeline_identity_only` uses a normal valid `RemoteRecordingRefV1` and invents no pipeline fields on recording).
 - **Package execution metadata has one exact value:** `executor="remote_gpu"`, `device="cuda:0"`, `environment=None` — no alternatives.
 - **Runtime hardware has one owner + CPU injection seam:** `runtime_info_provider` (default `default_runtime_info_provider` lazily imports torch inside `execute`) produces the envelope `hardware`; CPU tests inject a fake provider; importing `zoomspec_executor.py` remains torch-free.
