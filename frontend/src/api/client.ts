@@ -254,6 +254,8 @@ interface PipelineDefinitionWire {
   label_space: string;
   recommended_device: string;
   cpu_supported: boolean;
+  executors_supported: string[];
+  recommended_executor: string;
   stages: string[];
   inspectable_stages: string[];
   task_capability: string;
@@ -268,11 +270,13 @@ interface AnalysisRunWire {
   status: import("./types").AnalysisRunStatus;
   parameters_json: Record<string, unknown>;
   hardware_info_json?: Record<string, unknown> | null;
+  execution_metadata_json?: Record<string, unknown> | null;
   started_at?: string | null;
   finished_at?: string | null;
   error_type?: string | null;
   error_message?: string | null;
   worker_pid?: number | null;
+  created_at?: string | null;
 }
 
 function mapAnalysisRun(item: AnalysisRunWire): import("./types").AnalysisRun {
@@ -285,11 +289,13 @@ function mapAnalysisRun(item: AnalysisRunWire): import("./types").AnalysisRun {
     status: item.status,
     parameters: item.parameters_json,
     hardwareInfo: item.hardware_info_json,
+    executionMetadata: item.execution_metadata_json,
     startedAt: item.started_at,
     finishedAt: item.finished_at,
     errorType: item.error_type,
     errorMessage: item.error_message,
     workerPid: item.worker_pid,
+    createdAt: item.created_at,
   };
 }
 
@@ -302,17 +308,49 @@ export async function listPipelines(): Promise<import("./types").PipelineDefinit
     labelSpace: item.label_space,
     recommendedDevice: item.recommended_device,
     cpuSupported: item.cpu_supported,
+    executorsSupported: item.executors_supported,
+    recommendedExecutor: item.recommended_executor,
     stages: item.stages,
     inspectableStages: item.inspectable_stages,
     taskCapability: item.task_capability,
   }));
 }
 
-export async function createAnalysisRun(recordingId: string, pipelineId: string): Promise<import("./types").AnalysisRun> {
+interface ExecutorAvailabilityWire {
+  executor: string;
+  available: boolean;
+  reason_code: string | null;
+  reason_message: string | null;
+  remote_profile: string | null;
+  recommended: boolean;
+}
+
+export async function getExecutorAvailability(
+  recordingId: string,
+  pipelineId: string,
+): Promise<import("./types").ExecutorAvailability> {
+  const item = await apiGet<ExecutorAvailabilityWire>(
+    `/api/executor-availability?recording_id=${encodeURIComponent(recordingId)}&pipeline_id=${encodeURIComponent(pipelineId)}`,
+  );
+  return {
+    executor: item.executor,
+    available: item.available,
+    reasonCode: item.reason_code,
+    reasonMessage: item.reason_message,
+    remoteProfile: item.remote_profile,
+    recommended: item.recommended,
+  };
+}
+
+export async function createAnalysisRun(
+  recordingId: string,
+  pipelineId: string,
+  executor = "local_cpu",
+): Promise<import("./types").AnalysisRun> {
   return mapAnalysisRun(await apiPostJson<AnalysisRunWire>("/api/analysis-runs", {
     recording_id: recordingId,
     pipeline_id: pipelineId,
-    executor: "local_cpu",
+    executor,
     parameters: {},
   }));
 }

@@ -71,6 +71,8 @@ export interface PipelineDefinition {
   labelSpace: string;
   recommendedDevice: string;
   cpuSupported: boolean;
+  executorsSupported: string[];
+  recommendedExecutor: string;
   stages: string[];
   inspectableStages: string[];
   taskCapability: string;
@@ -87,11 +89,22 @@ export interface AnalysisRun {
   status: AnalysisRunStatus;
   parameters: Record<string, unknown>;
   hardwareInfo?: Record<string, unknown> | null;
+  executionMetadata?: Record<string, unknown> | null;
   startedAt?: string | null;
   finishedAt?: string | null;
   errorType?: string | null;
   errorMessage?: string | null;
   workerPid?: number | null;
+  createdAt?: string | null;
+}
+
+export interface ExecutorAvailability {
+  executor: string;
+  available: boolean;
+  reasonCode: string | null;
+  reasonMessage: string | null;
+  remoteProfile: string | null;
+  recommended: boolean;
 }
 
 export interface DetectionMetrics {

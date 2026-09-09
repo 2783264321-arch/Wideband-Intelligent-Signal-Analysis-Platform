@@ -1,4 +1,4 @@
-import { apiGet, apiPostJson, PlatformApiError } from "./client";
+import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, getExecutorAvailability } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -66,4 +66,54 @@ test("non-JSON error body falls back to a generic HTTP error", async () => {
   expect(err.status).toBe(500);
   expect(err.code).toBe("HTTP_500");
   expect(err.message).toBe("API request failed: 500");
+});
+
+test("getExecutorAvailability maps the backend availability contract", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    expect(url).toContain("/api/executor-availability");
+    expect(url).toContain("recording_id=rec_1");
+    expect(url).toContain("pipeline_id=zoomspec_yolo26n_aug_combined_frn_v3");
+    return new Response(JSON.stringify({
+      executor: "remote_gpu",
+      available: true,
+      reason_code: null,
+      reason_message: null,
+      remote_profile: "autodl_primary",
+      recommended: true,
+    }));
+  }));
+  const result = await getExecutorAvailability("rec_1", "zoomspec_yolo26n_aug_combined_frn_v3");
+  expect(result.executor).toBe("remote_gpu");
+  expect(result.available).toBe(true);
+  expect(result.reasonCode).toBeNull();
+  expect(result.remoteProfile).toBe("autodl_primary");
+  expect(result.recommended).toBe(true);
+});
+
+test("createAnalysisRun forwards the requested executor", async () => {
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    expect(url).toBe("http://127.0.0.1:8000/api/analysis-runs");
+    posted = JSON.parse(String(options?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      id: "run_r",
+      recording_id: "rec_1",
+      pipeline_id: "zoomspec_yolo26n_aug_combined_frn_v3",
+      pipeline_version: "1.0.0",
+      executor: posted.executor,
+      status: "pending",
+      parameters_json: {},
+      hardware_info_json: null,
+      started_at: null,
+      finished_at: null,
+      error_type: null,
+      error_message: null,
+      worker_pid: 1,
+      created_at: "2026-09-05T00:00:00",
+      execution_metadata_json: null,
+    }), { status: 201 });
+  }));
+  const run = await createAnalysisRun("rec_1", "zoomspec_yolo26n_aug_combined_frn_v3", "remote_gpu");
+  expect(posted).toMatchObject({ executor: "remote_gpu", parameters: {} });
+  expect(run.executor).toBe("remote_gpu");
 });

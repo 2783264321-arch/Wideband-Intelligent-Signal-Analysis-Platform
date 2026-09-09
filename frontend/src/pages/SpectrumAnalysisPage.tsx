@@ -1,8 +1,9 @@
 import { Alert, Button, Card, Checkbox, Col, Row, Select, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { createAnalysisRun, getAnalysisRun, getDetections, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
-import type { AnalysisRun, DetectionResult, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
+import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorAvailability, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
+import type { AnalysisRun, DetectionResult, ExecutorAvailability, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
+import { resolveExecutorForPipeline, type AvailabilityState } from "../features/spectrum/executorPolicy";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
 import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
 
@@ -14,6 +15,43 @@ function pipelineOptionLabel(item: PipelineDefinition): string {
     return `${base} · Detection & localization only`;
   }
   return base;
+}
+
+const SHORT_SHA_LENGTH = 8;
+
+function RemoteRunSummary({ run }: { run: AnalysisRun }) {
+  const metadata = run.executionMetadata ?? {};
+  const hardware = run.hardwareInfo ?? {};
+  const runtimeCommit = typeof metadata.required_remote_runtime_commit === "string"
+    ? metadata.required_remote_runtime_commit.slice(0, SHORT_SHA_LENGTH)
+    : null;
+  const payloadSha = typeof metadata.payload_sha256 === "string"
+    ? metadata.payload_sha256.slice(0, SHORT_SHA_LENGTH)
+    : null;
+  const deviceName = typeof hardware.device_name === "string" ? hardware.device_name : null;
+  const deviceType = typeof hardware.device_type === "string" ? hardware.device_type : null;
+  const remoteProfile = typeof metadata.remote_profile === "string" ? metadata.remote_profile : null;
+  const startedAt = typeof metadata.remote_started_at === "string" ? metadata.remote_started_at : null;
+  const finishedAt = typeof metadata.remote_finished_at === "string" ? metadata.remote_finished_at : null;
+
+  return (
+    <Space direction="vertical" size={4} data-testid="remote-run-summary">
+      <Tag color="geekblue">Executor: {run.executor}</Tag>
+      {remoteProfile ? <Typography.Text type="secondary">Profile: {remoteProfile}</Typography.Text> : null}
+      {deviceName || deviceType ? (
+        <Typography.Text type="secondary">
+          Device: {deviceName ?? deviceType}{deviceName && deviceType ? ` (${deviceType})` : ""}
+        </Typography.Text>
+      ) : null}
+      {runtimeCommit ? <Typography.Text type="secondary">Runtime commit: {runtimeCommit}</Typography.Text> : null}
+      {payloadSha ? <Typography.Text type="secondary">Payload SHA: {payloadSha}</Typography.Text> : null}
+      {startedAt || finishedAt ? (
+        <Typography.Text type="secondary">
+          Remote: {startedAt ?? "—"} → {finishedAt ?? "—"}
+        </Typography.Text>
+      ) : null}
+    </Space>
+  );
 }
 
 export function SpectrumAnalysisPage() {
@@ -33,6 +71,8 @@ export function SpectrumAnalysisPage() {
   const [showPredictions, setShowPredictions] = useState(true);
   const [showGroundTruth, setShowGroundTruth] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availability, setAvailability] = useState<ExecutorAvailability | null>(null);
+  const [availabilityStatus, setAvailabilityStatus] = useState<AvailabilityState["state"]>("idle");
 
   useEffect(() => {
     let active = true;
@@ -61,6 +101,29 @@ export function SpectrumAnalysisPage() {
     return () => { active = false; };
   }, [recordingId, runId]);
 
+  // Executor availability for the SELECTED pipeline only. On recording/pipeline
+  // change the stale availability is cleared immediately and an in-flight
+  // response for the previous pipeline is ignored (active flag torn down).
+  useEffect(() => {
+    setAvailability(null);
+    setAvailabilityStatus("idle");
+    if (!recording || !pipelines.length) return undefined;
+    const selectedPipeline = pipelines.find((item) => item.id === pipelineId);
+    if (!selectedPipeline?.executorsSupported.includes("remote_gpu")) return undefined;
+    let active = true;
+    setAvailabilityStatus("loading");
+    void getExecutorAvailability(recordingId, pipelineId)
+      .then((result) => {
+        if (!active) return;
+        setAvailability(result);
+        setAvailabilityStatus(result.available ? "available" : "unavailable");
+      })
+      .catch(() => {
+        if (active) setAvailabilityStatus("error");
+      });
+    return () => { active = false; };
+  }, [recordingId, pipelineId, recording, pipelines]);
+
   useEffect(() => {
     if (!currentRun || !activeStatuses.has(currentRun.status)) return undefined;
     const timer = window.setInterval(() => {
@@ -78,6 +141,31 @@ export function SpectrumAnalysisPage() {
   const selectedPipeline = pipelines.find((item) => item.id === pipelineId);
   const runActive = currentRun ? activeStatuses.has(currentRun.status) : false;
 
+  const resolution = useMemo(() => {
+    if (!selectedPipeline) return { executor: null as "remote_gpu" | "local_cpu" | null, disabledReason: null };
+    const availabilityState: AvailabilityState =
+      availabilityStatus === "available"
+        ? { state: "available" }
+        : availabilityStatus === "unavailable"
+          ? { state: "unavailable", reason: availability?.reasonMessage ?? null }
+          : availabilityStatus === "error"
+            ? { state: "error", reason: availability?.reasonMessage ?? null }
+            : availabilityStatus === "loading"
+              ? { state: "loading" }
+              : { state: "idle" };
+    return resolveExecutorForPipeline(selectedPipeline, availabilityState);
+  }, [selectedPipeline, availabilityStatus, availability]);
+
+  const availabilitySummary = useMemo(() => {
+    if (availabilityStatus === "loading") return "Checking remote GPU...";
+    if (availabilityStatus === "error") return "Remote GPU check failed.";
+    if (availabilityStatus === "available" && availability) return `Remote GPU available${availability.remoteProfile ? ` · ${availability.remoteProfile}` : ""}`;
+    if (availabilityStatus === "unavailable" && availability) {
+      return `Remote GPU unavailable${availability.reasonMessage ? ` · ${availability.reasonMessage}` : ""}`;
+    }
+    return null;
+  }, [availabilityStatus, availability]);
+
   const selectDetection = (id: string) => {
     setSelectedId(id);
     const next = new URLSearchParams(searchParams);
@@ -87,8 +175,10 @@ export function SpectrumAnalysisPage() {
 
   const runAnalysis = async () => {
     setError(null);
+    const executor = resolution.executor;
+    if (!executor) return;
     try {
-      const run = await createAnalysisRun(recordingId, pipelineId);
+      const run = await createAnalysisRun(recordingId, pipelineId, executor);
       setCurrentRun(run);
       setDetections([]);
       setSelectedId(undefined);
@@ -122,9 +212,14 @@ export function SpectrumAnalysisPage() {
             onChange={setPipelineId}
             options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item) }))}
           />
-          <Button type="primary" loading={runActive} disabled={!selectedPipeline?.cpuSupported || runActive} onClick={() => void runAnalysis()}>
+          <Button type="primary" loading={runActive} disabled={!resolution.executor || runActive} onClick={() => void runAnalysis()}>
             {runActive ? "Analyzing..." : "Run Analysis"}
           </Button>
+          {selectedPipeline?.executorsSupported.includes("remote_gpu") ? (
+            <Typography.Text type="secondary" data-testid="executor-availability">
+              {availabilitySummary ?? (resolution.disabledReason ?? "")}
+            </Typography.Text>
+          ) : null}
         </Space>
       </div>
       <Space wrap>
@@ -132,6 +227,7 @@ export function SpectrumAnalysisPage() {
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>Ground Truth</Checkbox>
         {currentRun ? <Tag>{currentRun.status}</Tag> : <Typography.Text type="secondary">No AnalysisRun selected yet.</Typography.Text>}
         {currentRun?.status === "failed" ? <Typography.Text type="danger">{currentRun.errorMessage ?? "Analysis failed."}</Typography.Text> : null}
+        {currentRun?.executor === "remote_gpu" ? <RemoteRunSummary run={currentRun} /> : null}
       </Space>
       <Row gutter={16} align="stretch">
         <Col xs={24} xl={18}>
