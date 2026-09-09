@@ -191,16 +191,24 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 **First: read before editing**
 - `backend/app/main.py` (`_wire_remote_lifecycle`).
+- `backend/app/remote_execution/profile.py` (`RemoteProfile.from_env` — construction fails ONLY on core fields; `dataset_roots`/`asset_paths` default to `{}`).
 - `backend/app/remote_execution/executor.py` (`SshRemoteExecutorProbe`).
+- `backend/app/remote_execution/recovery.py` (`remote_config_available`, `coordinate_orphaned_remote_runs`).
 - `backend/tests/test_remote_bootstrap.py`.
 
-**RED test (extend `backend/tests/test_remote_bootstrap.py`):**
-- `test_full_remote_env_wires_real_probe_and_coordinator`: `create_app` with the COMPLETE `WSP_REMOTE_*` env (full scalar env + dataset/asset JSON) → `app.state.remote_config_available is True`, `app.state.remote_executor_probe` is a real `SshRemoteExecutorProbe`, `app.state.remote_coordinator_launcher` is a `CoordinatorJobManager`, `runtime_commit_config` == the profile commit.
-- `test_partial_remote_env_stays_healthy_and_preserves_runs`: missing dataset/asset JSON (or missing SSH key) → `remote_config_available is False`, probes `None`, health endpoint `200`, and a pre-existing `remote_gpu` `pending`/`running` run is NOT interrupted and NOT re-launched (`coordinate_orphaned_remote_runs` launches nothing).
+**Bootstrap semantics (LOCKED — preserves the 12F-B status/recovery contract):**
 
-**Coverage target (RED or COVERAGE CONFIRMED):** full-env wiring assertion not covered by existing bootstrap tests; record COVERAGE CONFIRMED if it passes first.
+- **Case A — core `RemoteProfile` invalid** (missing/invalid host/port/user/ssh-key/known_hosts/repo/job/python/runtime commit): `remote_config_available=False`, no probe, no coordinator launcher, app healthy, existing `remote_gpu` runs untouched, **no** recovery launch.
+- **Case B — core `RemoteProfile` valid but SpaceNet/asset scientific mappings missing** (`dataset_roots`/`asset_paths` empty): `remote_config_available=True`; the real `SshRemoteExecutorProbe` + `CoordinatorJobManager` REMAIN wired; startup recovery MAY re-coordinate existing `pending`/`running` remote runs (reconciliation stays usable because `status` requires only repo/job env); the executor-availability probe returns `available=false` (`REMOTE_TRANSPORT_UNAVAILABLE`, because the probe `run_runner("probe")` full-worker preflight fails); new `create_run(remote_gpu)` is rejected by that availability; existing remote runs are NOT blindly interrupted.
 
-**Minimal implementation:** test-only (wiring already exists); no production change expected.
+**Coverage target (RED or COVERAGE CONFIRMED, extend `backend/tests/test_remote_bootstrap.py`):**
+- `test_missing_ssh_key_core_profile_disables_remote_lifecycle` (Case A): `create_app` with a missing/invalid core field → `remote_config_available is False`, probe `None`, launcher `None`, health `200`, and a pre-existing `remote_gpu` `pending`/`running` run is NOT interrupted and NOT re-launched.
+- `test_core_valid_missing_scientific_mappings_stays_remote_config_available` (Case B): `create_app` with a VALID core `RemoteProfile` but EMPTY dataset/asset JSON → `remote_config_available is True`; `remote_executor_probe` is a real `SshRemoteExecutorProbe`; `remote_coordinator_launcher` is a `CoordinatorJobManager`.
+- `test_case_b_availability_unavailable_and_create_run_rejected`: same Case B wiring → probe availability returns `available=false` with reason `REMOTE_TRANSPORT_UNAVAILABLE`; `POST /api/analysis-runs` (`remote_gpu`) → `EXECUTOR_UNAVAILABLE`, no run row.
+- `test_case_b_existing_remote_run_may_be_recovery_launched`: with a `remote_gpu` `pending`/`running` run present under Case B wiring, `coordinate_orphaned_remote_runs` MAY launch a reconciliation coordinator for it (the old expectation that recovery is suppressed was wrong and is removed).
+- `test_case_b_completed_run_unchanged`: a completed remote run + its `DetectionResult` rows are unchanged under Case B.
+
+**Minimal implementation:** test-only (production wiring already implements Case A/B correctly; do NOT change `_wire_remote_lifecycle`/`recovery.py` merely to satisfy the superseded test expectation).
 
 **Focused verification:**
 ```bash
@@ -227,15 +235,29 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
    - `AnalysisRun`: add `executionMetadata: Record<string, unknown> | null` and `createdAt: string` (wire `execution_metadata_json` / `created_at`).
    - `createAnalysisRun(recordingId, pipelineId, executor = "local_cpu")` — send `executor` in the POST body.
    - new `getExecutorAvailability(recordingId, pipelineId)` → `GET /api/executor-availability` mapped to `ExecutorAvailability { executor, available, reasonCode, reasonMessage, remoteProfile, recommended }`.
-2. `SpectrumAnalysisPage.tsx` — **deterministic executor resolution** (single pure helper, unit-testable):
+2. `SpectrumAnalysisPage.tsx` — **deterministic executor resolution** (single pure helper, unit-testable). Classify the pipeline first, then resolve:
    ```text
-   if pipeline.executorsSupported includes remote_gpu AND remote available        -> "remote_gpu"
-   if pipeline.executorsSupported includes remote_gpu AND (unavailable/loading/error) -> DISABLED (show reason)
-   if pipeline.executorsSupported == ["local_cpu"] (or only local)               -> "local_cpu"
-   if dual-capable AND recommendedExecutor == "remote_gpu" AND remote available   -> "remote_gpu"
-   otherwise if pipeline.cpuSupported                                            -> "local_cpu"
-   else                                                                          -> DISABLED
+   remoteOnly = supports remote_gpu AND NOT cpuSupported
+   localOnly  = cpuSupported AND does NOT support remote_gpu
+   dual       = cpuSupported AND supports remote_gpu
+
+   remoteOnly:
+     availability loading/error/unavailable  -> DISABLED (show reason)
+     available                                -> remote_gpu
+
+   localOnly:
+                                               -> local_cpu
+
+   dual:
+     if recommendedExecutor == "remote_gpu":
+       loading                                -> DISABLED
+       available                              -> remote_gpu
+       unavailable/error                      -> local_cpu
+     otherwise (recommended local)            -> local_cpu
+
+   if neither executor usable                 -> DISABLED
    ```
+   The earlier generic rules ("supports remote_gpu AND available -> remote_gpu"; "supports remote_gpu AND unavailable/loading/error -> disabled") are REMOVED — they wrongly swallowed the dual-capable fallback-to-local cases.
    - On recording/pipeline change: **clear stale availability immediately**; start a fresh availability request; **ignore/cancel stale async responses** (generation counter or abort); **never reuse availability from the previous pipeline**.
 3. **Safe remote metadata rendering (allowlist only):** for the current/completed remote run render ONLY:
    `executor`, `remote profile`, `hardware device name/type`, `remote runtime commit (short)`, `payload SHA (short)`, `remote started/finished timestamps`.
@@ -244,7 +266,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 **RED→GREEN test (extend `frontend/src/pages/SpectrumAnalysisPage.test.tsx` + `frontend/src/api/client.test.ts`):**
 - `test_run_analysis_sends_remote_gpu_executor`: ZoomSpec remote-only pipeline + availability `available` → POST body `{executor:"remote_gpu", parameters:{}}` (RED: current client cannot send remote_gpu).
 - `test_run_button_uses_availability_reason`: remote-only + availability `false` → button disabled with reason message.
-- `test_executor_resolution_is_deterministic`: table over the five resolution cases above (remote-only available/unavailable, local-only, dual recommended-remote available, dual fallback cpu).
+- `test_executor_resolution_is_deterministic`: table over the classification above — remote-only available/unavailable/loading; local-only; dual recommended-remote loading/available/unavailable (→disabled/remote_gpu/local_cpu); dual recommended-local (→local_cpu).
 - `test_stale_availability_response_ignored_on_pipeline_change`: switching pipelines while an availability response is in flight does not apply the previous pipeline's availability.
 - `test_remote_pending_to_completed_polling_renders_detections`: remote run `pending` → polling `getAnalysisRun` → `completed` → `getDetections` → detections rendered on the spectrogram (executor-agnostic polling already exists; this proves the remote path end-to-end in the UI).
 - `test_remote_metadata_summary_renders_allowlist_only`: completed remote run renders the allowlisted summary and does NOT render raw `executionMetadata` JSON or any `coordinator_token` substring.
@@ -303,23 +325,25 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_a
    - Independently compute `source_data_sha256 = compute_file_sha256(sample.data_path)` and the production `recording_fingerprint = build_recording_fingerprint("SpaceNet", "test", "spacenet_14", manifest_recording_from_sample).sha256`.
    - BEFORE `create_run`, require the frozen hashes: `recording_fingerprint == 35deea81c82f706d88c84079b40c377c01a77393821233467bc45b212fbc48d6` and `source_data_sha256 == cb4981e2debfa0eb31f565ed8cff2b259e0330103de85700faff5428145d9b4f`.
 
-3. **HTTP-level availability + create_run (two runs, A then B):**
+3. **HTTP-level availability + create run A (sequential):**
    ```bash
    curl -s "http://127.0.0.1:8000/api/executor-availability?recording_id=rec_sn0&pipeline_id=zoomspec_yolo26n_aug_combined_frn_v3"
    curl -s -X POST "http://127.0.0.1:8000/api/analysis-runs" \
      -H 'Content-Type: application/json' \
      -d '{"recording_id":"rec_sn0","pipeline_id":"zoomspec_yolo26n_aug_combined_frn_v3","executor":"remote_gpu","parameters":{}}'   # -> run A
-   curl -s -X POST "http://127.0.0.1:8000/api/analysis-runs" ...   # repeat -> run B (same payload)
    ```
-   Require both runs `pending` with valid `execution_metadata_json.request_sha256` and a live coordinator `worker_pid` each.
+   Require run A `pending` with a valid `execution_metadata_json.request_sha256` and a live coordinator `worker_pid`.
 
-4. **Live coordinator → completed (A, then B):** poll `GET /api/analysis-runs/{id}` until each reaches `completed`; assert `hardware_info_json.device_name` = RTX 5090 and `execution_metadata_json.payload_sha256` matches each downloaded zip.
+4. **Live coordinator → run A completed:** poll `GET /api/analysis-runs/{id}` until A is `completed`; assert `hardware_info_json.device_name` = RTX 5090 and `execution_metadata_json.payload_sha256` matches the downloaded zip; verify A's 13 detections / artifact (step 5) BEFORE creating B.
 
 5. **DB DetectionResult verification vs the real package — 1:1 (not count-only):** for each run, `GET /api/analysis-runs/{id}/detections` returns rows that equal the downloaded `analysis_result.zip` `detections.json` **1:1 on every field** — `t_start_s`, `t_end_s`, `f_low_hz`, `f_high_hz`, `class_id`, `class_name`, `confidence`, `scores` — AND `count == 13`. Count-only or class-presence checks are insufficient.
 
 6. **GET/readback:** `GET /api/analysis-runs/{id}` + detections render through the Spectrum UI (see Task 4) with the allowlisted hardware/remote summary visible (never raw `execution_metadata_json`, never `coordinator_token`).
 
-7. **Algorithm Lab live acceptance (A != B):** after run A AND run B are both `completed` on `rec_sn0`, `POST /api/algorithm-lab/compare {recording_id:"rec_sn0", run_a_id:<A>, run_b_id:<B>, iou_threshold:0.5}` returns detection/class metrics; both runs belong to `rec_sn0`; `A != B`; no crash, no special branch.
+7. **Create run B only AFTER A is fully verified; Algorithm Lab compares A != B:**
+   - Only after A is `completed` and its 13-detection artifact verified, `POST /api/analysis-runs` again (same payload) → run B; poll until B is `completed`; verify B's 13-detection artifact 1:1 (step 5).
+   - Then `POST /api/algorithm-lab/compare {recording_id:"rec_sn0", run_a_id:<A>, run_b_id:<B>, iou_threshold:0.5}` returns detection/class metrics; both runs belong to `rec_sn0`; `A != B`; no crash, no special branch.
+   - **A and B are NEVER intentionally run concurrently.** 12F-C is live integration acceptance on ONE RTX 5090, not GPU scheduling/concurrency testing.
 
 **FINAL SAFETY after gate:** `git status --short` clean; no repo file changes; no commit/push for this gate.
 
@@ -353,7 +377,10 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_a
 
 ## Self-Review
 
+- **Bootstrap Case A vs Case B (Task 3):** missing/invalid CORE `RemoteProfile` fields → `remote_config_available=False`, no recovery launch, existing runs untouched. Core-valid + missing scientific mappings → `remote_config_available=True`, probe + coordinator launcher stay wired, recovery MAY re-coordinate `pending`/`running` runs (status stays usable), availability returns `REMOTE_TRANSPORT_UNAVAILABLE`, new `create_run` rejected, existing runs not blindly interrupted. No production change to satisfy the superseded test expectation.
+- **Frontend executor policy is non-contradictory (Task 4):** remoteOnly/localOnly/dual classification; dual-capable pipelines fall back to `local_cpu` on remote unavailable/error (or recommended-local), so they are never wrongly disabled; the generic "supports remote_gpu → remote_gpu/disabled" rules are removed.
 - **Algorithm Lab A/B IDs always distinct:** CPU tests (Tasks 1/5) and Gate A step 7 use two DISTINCT completed run IDs on the same recording; no single-run-vs-GT description anywhere; `AlgorithmLabCompareRequest` rejection of `run_a_id == run_b_id` is preserved.
+- **Live A/B runs are sequential:** run B is created ONLY after run A is `completed` and its 13-detection artifact verified; A and B are never intentionally concurrent (single RTX 5090; 12F-C is integration acceptance, not scheduling tests).
 - **sample0 metadata/GT comes from production SpaceNet adapter:** Gate A step 2 builds the Recording + GT rows directly from `SpaceNetAdapter.load("test","0")` / `sample.signals`; no hand-copied metadata, no new dataset parsing logic; frozen hashes asserted before `create_run`.
 - **DB detections equal the package 1:1:** Gate A step 5 compares every field (`t_start/t_end/f_low/f_high/class_id/class_name/confidence/scores`) with `count == 13`; count-only/class-presence is insufficient.
 - **No `coordinator_token` rendered:** Task 4 renders an allowlisted remote summary only; never raw `executionMetadata` JSON and never the coordinator token.
@@ -414,7 +441,7 @@ Listed in Task 6 / Task 7 with explicit commands. Operator switches AutoDL to ca
 
 - [ ] `nvidia-smi` shows RTX 5090 (not the 2 GiB reduced container); `torch.cuda.is_available()` True.
 - [ ] Real SSH probe (real `SshRunner` → remote `runner probe`) returns `available=true` (Gate A step 1).
-- [ ] API availability + create_run succeed on sample0; runs A and B both reach `completed` (Gate A steps 3-4).
+- [ ] API availability + create run A succeed on sample0; A reaches `completed` and its 13-detection artifact is verified BEFORE run B is created; then B reaches `completed` and is verified (Gate A steps 3-5, 7; sequential, never concurrent).
 - [ ] DB `DetectionResult` rows equal each downloaded package 1:1 on every field AND `count == 13` (Gate A step 5).
 - [ ] Algorithm Lab compares run A vs run B (distinct, both on `rec_sn0`, both completed) (Gate A step 7).
 - [ ] Orphan/re-attach: old local coordinator terminated, remote job survives, startup recovery re-attaches, SAME run completes once with 13 rows / one payload SHA (Gate B step 1).
