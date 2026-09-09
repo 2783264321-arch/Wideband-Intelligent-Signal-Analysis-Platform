@@ -219,7 +219,13 @@ def test_live_loop_get_readback_returns_detections(client, settings):
     assert body["status"] == "completed"
     assert body["executor"] == "remote_gpu"
     assert body["hardware_info_json"] == HARDWARE
-    assert body["execution_metadata_json"]["request_sha256"]
+    meta = body["execution_metadata_json"] or {}
+    assert meta["remote_profile"] == "autodl_primary"
+    assert meta["required_remote_runtime_commit"]
+    assert "coordinator_token" not in meta
+    assert "request_id" not in meta
+    assert "batch_id" not in meta
+    assert "request_sha256" not in meta
 
     det_resp = client.get("/api/analysis-runs/run_a/detections")
     assert det_resp.status_code == 200
