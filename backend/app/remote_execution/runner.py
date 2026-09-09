@@ -638,20 +638,16 @@ def _cli_work(args: argparse.Namespace) -> int:
     if job_root.name != batch_id:
         raise PlatformError("REMOTE_EXECUTOR_UNAVAILABLE", "job-root name must equal batch-id.")
 
-    # Production ItemExecutor does not exist until Tasks 9/10/12. This import
-    # stays LAZY and inside this handler; runner module import stays clean.
-    try:
-        from app.remote_execution.assets import verify_asset_manifest  # noqa: F401
-        from app.remote_execution.resolver import resolve_space_net  # noqa: F401
-    except ImportError:
-        raise PlatformError(
-            "REMOTE_EXECUTOR_UNAVAILABLE",
-            "production remote ItemExecutor is not available until Tasks 9/10/12.",
-        )
-    raise PlatformError(
-        "REMOTE_EXECUTOR_UNAVAILABLE",
-        "production remote ItemExecutor is not available until Tasks 9/10/12.",
-    )
+    # Lazy imports stay INSIDE this handler so importing runner.py remains
+    # GPU-library-free. run_work stays the lifecycle/write-once/status owner;
+    # ZoomSpecRemoteItemExecutor owns scientific execution + result creation.
+    from app.remote_execution.worker_context import RemoteWorkerContext
+    from app.remote_execution.zoomspec_executor import ZoomSpecRemoteItemExecutor
+    batch = _load_batch(job_root)
+    worker = RemoteWorkerContext.from_env()
+    executor = ZoomSpecRemoteItemExecutor(batch=batch, worker=worker)
+    run_work(batch.batch_id, job_root, executor)
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
