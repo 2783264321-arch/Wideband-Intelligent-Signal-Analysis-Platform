@@ -37,6 +37,31 @@ def _default_ingest(session, run, envelope, zip_path, writer) -> str:
     return ingest_remote_result(session, run.id, envelope, zip_path, writer)
 
 
+def make_production_writer_factory(settings):
+    """Build an AnalysisResultWriter bound to a specific session/run.
+
+    The factory is invoked inside the coordinator's completed final transaction,
+    so the writer is bound to the SAME session that performs the fence check +
+    ingest + status commit. The registry remains model-load/Torch-free because
+    ZoomSpec is registered via its remote-only definition stub.
+    """
+
+    def factory(session, run):
+        from app.labels.service import LabelSpaceService
+        from app.pipelines.registry import create_pipeline_registry
+        from app.remote_execution.validation import AnalysisResultWriter
+        from app.storage.service import StorageService
+
+        registry = create_pipeline_registry()
+        label_service = LabelSpaceService(settings.label_space_root)
+        storage = StorageService(settings.data_root)
+        pipeline_definition = registry.get(run.pipeline_id).definition
+        workspace = storage.artifact_dir(run.id)
+        return AnalysisResultWriter(session, label_service, pipeline_definition, workspace)
+
+    return factory
+
+
 class Coordinator:
     def __init__(
         self,
@@ -50,6 +75,7 @@ class Coordinator:
         max_polls: int | None = None,
         ingest: Callable | None = None,
         writer=None,
+        writer_factory=None,
         logger=None,
     ) -> None:
         self._session_factory = session_factory
@@ -61,6 +87,7 @@ class Coordinator:
         self._max_polls = max_polls
         self._ingest = ingest or _default_ingest
         self._writer = writer
+        self._writer_factory = writer_factory
         self._logger = logger
         self._run_id = metadata.get("local_run_id")
 
@@ -110,31 +137,36 @@ class Coordinator:
         if verify_request_sha256(batch, self._metadata) is False:
             raise PlatformError("REMOTE_REQUEST_INVALID", "request_sha256 reconstruction failed.")
 
-        # Fence-check + submit-or-attach in one session/transaction (the submit
-        # remote side effect is guarded by a current fence).
+        # --- submit-or-attach phase: short session fence -> close -> submit (no session) ---
         with self._open_current_session() as session:
             try:
                 run = self._require_current_fence(session)
             except _StaleFence:
                 return self._metadata.get("status", self._read_current_status())
             if run.status == "completed":
-                return "completed"  # idempotent
+                return "completed"
             if run.status in {"failed", "interrupted"}:
-                return run.status  # immutable terminal
+                return run.status
+        try:
+            self._job_manager.submit(batch, self._request_json_path(batch))
+        except PlatformError as exc:
+            if exc.code in {"REMOTE_SUBMIT_FAILED", "REMOTE_TRANSPORT_UNAVAILABLE",
+                            "REMOTE_REQUEST_INVALID"}:
+                # Uncertain submit: reconcile the SAME batch before a terminal decision.
+                pass
+            else:
+                raise
+        # fresh short session: fence re-check -> mark pending -> close
+        with self._open_current_session() as session:
             try:
-                self._job_manager.submit(batch, self._request_json_path(batch))
-            except PlatformError as exc:
-                if exc.code in {"REMOTE_SUBMIT_FAILED", "REMOTE_TRANSPORT_UNAVAILABLE",
-                                "REMOTE_REQUEST_INVALID"}:
-                    # Uncertain submit: reconcile the SAME batch before a terminal decision.
-                    pass
-                else:
-                    raise
+                run = self._require_current_fence(session)
+            except _StaleFence:
+                return self._read_current_status()
             self._set_status(session, run, status="pending")
-            started = run.started_at
 
         polls = 0
         while True:
+            # short session: fence check -> close BEFORE remote status
             with self._open_current_session() as session:
                 try:
                     run = self._require_current_fence(session)
@@ -142,24 +174,32 @@ class Coordinator:
                     return self._read_current_status()
                 if run.status in {"completed", "failed", "interrupted"}:
                     return run.status
+            # remote status OUTSIDE any DB session
+            try:
+                remote = self._job_manager.status(batch.batch_id)
+            except PlatformError as exc:
+                if exc.code in {"REMOTE_STATUS_UNAVAILABLE", "REMOTE_TRANSPORT_UNAVAILABLE"}:
+                    polls += 1
+                    if self._max_polls is not None and polls >= self._max_polls:
+                        return self._read_current_status()
+                    # sleep OUTSIDE any DB session
+                    self._sleep_fn(self._poll_interval)
+                    continue
+                raise
+            status = remote.status
+            # fresh session: fence re-check -> mutate -> close
+            with self._open_current_session() as session:
                 try:
-                    remote = self._job_manager.status(batch.batch_id)
-                except PlatformError as exc:
-                    if exc.code in {"REMOTE_STATUS_UNAVAILABLE", "REMOTE_TRANSPORT_UNAVAILABLE"}:
-                        polls += 1
-                        if self._max_polls is not None and polls >= self._max_polls:
-                            return run.status  # remain recoverable; no terminal
-                        self._sleep_fn(self._poll_interval)
-                        continue
-                    raise
-                status = remote.status
+                    run = self._require_current_fence(session)
+                except _StaleFence:
+                    return self._read_current_status()
                 if status == "queued":
                     self._set_status(session, run, status="pending")
                 elif status == "running":
                     self._set_status(session, run, status="running",
                                      started_at=datetime.now(timezone.utc))
                 elif status == "completed":
-                    return self._finish_completed(session, run, batch)
+                    return self._finish_completed(batch)
                 elif status == "failed":
                     self._set_status(session, run, status="failed", error_type="ANALYSIS_FAILED",
                                      error_message="Remote analysis failed.",
@@ -170,31 +210,46 @@ class Coordinator:
                                      error_message="Remote analysis was interrupted.",
                                      finished_at=datetime.now(timezone.utc))
                     return "interrupted"
-
             polls += 1
             if self._max_polls is not None and polls >= self._max_polls:
-                return run.status
+                return self._read_current_status()
+            # sleep OUTSIDE any DB session
             self._sleep_fn(self._poll_interval)
 
-    def _finish_completed(self, session, run, batch) -> str:
+    def _finish_completed(self, batch) -> str:
         from datetime import datetime, timezone
 
-        # Re-check fence in the SAME transaction that will ingest + commit.
-        try:
-            self._require_current_fence(session)
-        except _StaleFence:
-            return "interrupted"  # stale token -> no download/ingest, no mutation
+        # short session: fence check BEFORE download -> close
+        with self._open_current_session() as session:
+            try:
+                self._require_current_fence(session)
+            except _StaleFence:
+                return "interrupted"  # stale token -> no download/ingest, no mutation
+        # download OUTSIDE any DB session (may finish even if token rotates during it)
         try:
             dest = self._job_manager.download(batch.batch_id, batch.items[0].item_key, self._workspace())
         except PlatformError:
             return "interrupted"  # unrecoverable remote job
-        try:
-            envelope = self._parse_envelope(dest / "envelope.json")
-        except PlatformError:
-            return "interrupted"
-        payload_sha = self._ingest(session, run, envelope, dest / "analysis_result.zip", self._writer)
-        self._set_status(session, run, status="completed", finished_at=datetime.now(timezone.utc))
-        return "completed"
+        # FRESH session: re-read current run/fence; if stale, no ingest/terminal mutation.
+        with self._open_current_session() as session:
+            try:
+                run = self._require_current_fence(session)
+            except _StaleFence:
+                return "interrupted"
+            try:
+                envelope = self._parse_envelope(dest / "envelope.json")
+            except PlatformError:
+                return "interrupted"
+            if self._writer_factory is not None:
+                writer = self._writer_factory(session, run)
+            else:
+                writer = self._writer
+            if writer is None:
+                return "interrupted"
+            # fence + ingest + status commit in the SAME final transaction
+            self._ingest(session, run, envelope, dest / "analysis_result.zip", writer)
+            self._set_status(session, run, status="completed", finished_at=datetime.now(timezone.utc))
+            return "completed"
 
     def _request_json_path(self, batch):
         import tempfile
@@ -254,12 +309,17 @@ def main(argv: list[str] | None = None) -> int:
 
     profile = RemoteProfile.from_env(None)
     job_manager = RemoteGpuJobManager(profile, SshRunner(profile))
+
+    from app.core.config import Settings
+
+    settings = Settings()
     coordinator = Coordinator(
         session_factory=database.session_factory,
         job_manager=job_manager,
         metadata=metadata,
         coordinator_token=args.coordinator_token,
         poll_interval=args.poll_interval,
+        writer_factory=make_production_writer_factory(settings),
     )
     try:
         coordinator.run()

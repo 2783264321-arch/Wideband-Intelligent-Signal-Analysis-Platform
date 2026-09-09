@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,9 +130,13 @@ def test_coordinator_queued_running_completed_sequence(client):
     meta = _batch_metadata(token="tok_1")
     jm = FakeJobManager(status_sequence=[_status("queued"), _status("running"), _status("completed")])
     fake = FakeIngestor()
+
+    def writer_factory(session, run):
+        return SimpleNamespace(persist=lambda *a, **k: None)
+
     coord = Coordinator(
         session_factory=_sf(client), job_manager=jm, metadata=meta, coordinator_token="tok_1",
-        sleep_fn=lambda *a, **k: None, poll_interval=0.01, ingest=fake,
+        sleep_fn=lambda *a, **k: None, poll_interval=0.01, ingest=fake, writer_factory=writer_factory,
     )
     assert coord.run() == "completed"
     assert len(fake.calls) == 1
