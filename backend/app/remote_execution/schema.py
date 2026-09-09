@@ -10,7 +10,7 @@ from datetime import datetime
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 GitCommitSha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
@@ -127,6 +127,18 @@ class RemoteExecutionEnvelopeV1(RemoteWireModel):
     payload_sha256: Sha256Hex
     remote_started_at: datetime | None = None
     remote_finished_at: datetime | None = None
+
+    @field_validator("remote_started_at", "remote_finished_at", mode="before")
+    @classmethod
+    def _parse_datetime_text(cls, value):
+        """Accept the envelope's own JSON serialization (ISO-8601 text, which
+        pydantic emits as ``...Z`` for UTC) under the strict model config."""
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return value
+        return value
 
 
 class RemoteProbeResponseV1(RemoteWireModel):
