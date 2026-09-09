@@ -8,6 +8,7 @@ owns the entire local transaction.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 import tempfile
 
@@ -55,6 +56,8 @@ def _reject_non_finite_json_constant(value: str):
 def parse_remote_execution_envelope_json(raw: bytes | str) -> RemoteExecutionEnvelopeV1:
     """Strict raw-envelope boundary: UTF-8 bytes, duplicate keys rejected at
     every nesting level, non-finite constants rejected, top-level object only.
+    UTC semantics are validated AFTER parsing (timezone-aware, UTC offset == 0,
+    ``remote_finished_at >= remote_started_at``).
 
     Local AnalysisRun identity is NOT verified here; the ingestor owns that.
     """
@@ -67,9 +70,26 @@ def parse_remote_execution_envelope_json(raw: bytes | str) -> RemoteExecutionEnv
         )
         if not isinstance(payload, dict):
             raise ValueError("envelope JSON must be a top-level object")
-        return RemoteExecutionEnvelopeV1.model_validate(payload)
+        envelope = RemoteExecutionEnvelopeV1.model_validate(payload)
+        _validate_envelope_utc_semantics(envelope)
+        return envelope
     except Exception:
         raise _remote_invalid("Remote result envelope is invalid.")
+
+
+def _validate_envelope_utc_semantics(envelope: RemoteExecutionEnvelopeV1) -> None:
+    for name in ("remote_started_at", "remote_finished_at"):
+        value = getattr(envelope, name)
+        if value is None:
+            continue
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise _remote_invalid(f"Envelope {name} must be a timezone-aware UTC datetime.")
+        if value.utcoffset() != timedelta(0):
+            raise _remote_invalid(f"Envelope {name} must be a UTC datetime.")
+    started = envelope.remote_started_at
+    finished = envelope.remote_finished_at
+    if started is not None and finished is not None and finished < started:
+        raise _remote_invalid("Envelope remote_finished_at precedes remote_started_at.")
 
 
 def _verify_envelope_identity(

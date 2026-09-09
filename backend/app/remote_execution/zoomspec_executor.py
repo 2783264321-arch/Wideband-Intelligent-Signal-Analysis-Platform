@@ -98,6 +98,15 @@ class ZoomSpecRemoteItemExecutor:
         worker = self._worker
         batch = self._batch
 
+        # Frozen runtime provenance guard (defense in depth, BEFORE any
+        # assets/resolver/model work): the frozen request must target this
+        # worker deployment's runtime.
+        if batch.required_remote_runtime_commit != worker.required_runtime_commit:
+            raise PlatformError(
+                "REMOTE_IMPLEMENTATION_MISMATCH",
+                "Frozen request runtime does not match the worker deployment.",
+            )
+
         manifest = verify_asset_manifest(
             worker.asset_manifest_path,
             {
@@ -131,6 +140,18 @@ class ZoomSpecRemoteItemExecutor:
             )
 
         recording = item.recording
+        # Frozen SpaceNet recording contract (BEFORE any resolver/model work).
+        if recording.dataset_name != "SpaceNet":
+            raise PlatformError(
+                "REMOTE_REQUEST_INVALID",
+                "Frozen ZoomSpec execution requires the SpaceNet dataset.",
+            )
+        if recording.label_space != ZOOMSPEC_FROZEN_DEFINITION.label_space:
+            raise PlatformError(
+                "REMOTE_REQUEST_INVALID",
+                "Frozen ZoomSpec execution requires the spacenet_14 label space.",
+            )
+
         resolved = resolve_space_net(
             worker.dataset_root_space_net,
             recording.dataset_split,
@@ -141,7 +162,9 @@ class ZoomSpecRemoteItemExecutor:
             worker.label_space_root,
         )
 
-        label_space = LabelSpaceService(worker.label_space_root).get(recording.label_space)
+        label_space = LabelSpaceService(worker.label_space_root).get(
+            ZOOMSPEC_FROZEN_DEFINITION.label_space
+        )
         normalization = _load_normalization(worker.ls_stft_normalization_path)
         pipeline = self._pipeline_factory(worker, normalization, label_space, _DEVICE_INDEX)
 

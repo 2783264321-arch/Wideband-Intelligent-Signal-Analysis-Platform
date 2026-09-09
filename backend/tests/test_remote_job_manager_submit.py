@@ -95,11 +95,11 @@ class CallRecordingTransport(SshRunner):
         return super().run_runner(subcommand, args)
 
 
-def _batch(batch_id="batch_x"):
+def _batch(batch_id="batch_x", runtime_commit=RUNTIME_COMMIT):
     batch = RemoteExecutionBatchV1(
         schema_version=1,
         batch_id=batch_id,
-        required_remote_runtime_commit=RUNTIME_COMMIT,
+        required_remote_runtime_commit=runtime_commit,
         pipeline={"id": "pipeline_x", "version": "1.0"},
         asset_manifest_sha256="c" * 64,
         items=[RemoteExecutionItemV1(
@@ -166,6 +166,24 @@ def test_submit_preflight_transport_error_maps_to_platform_error(tmp_path):
     assert exc.value.code == "REMOTE_SUBMIT_FAILED"
     assert exc.value.message == "Remote submit transport failed."
     assert not isinstance(exc.value, Exception.__class__)
+
+
+def test_submit_frozen_runtime_commit_mismatch_zero_io(tmp_path):
+    """Frozen request runtime commit != configured remote runtime commit ->
+    REMOTE_SUBMIT_FAILED with ZERO upload/SSH and NO runner_code. The
+    coordinator treats this as an uncertain submit and reconciles the SAME
+    batch instead of spawning the frozen request under a new runtime."""
+    recorder = ProcessRecorder()
+    profile = _profile(tmp_path)  # required_remote_runtime_commit == RUNTIME_COMMIT
+    manager = RemoteGpuJobManager(profile, SshRunner(profile, run_process=recorder))
+    batch = _batch(runtime_commit="a" * 40)
+    with pytest.raises(PlatformError) as exc:
+        manager.submit(batch, _request_file(tmp_path, batch))
+    assert exc.value.code == "REMOTE_SUBMIT_FAILED"
+    assert recorder.calls == []
+    assert "runner_code" not in exc.value.details
+    assert "a" * 40 not in exc.value.message
+    assert RUNTIME_COMMIT not in exc.value.message
 
 
 def test_submit_valid_ordering_preflight_then_upload_then_runner(tmp_path):

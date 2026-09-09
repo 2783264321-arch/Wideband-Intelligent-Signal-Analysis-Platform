@@ -55,6 +55,8 @@ def _make_batch(
     batch_id="batch_x",
     item_key="000000",
     runtime_commit=COMMIT,
+    dataset_name="SpaceNet",
+    label_space="spacenet_14",
 ):
     batch = RemoteExecutionBatchV1(
         schema_version=1,
@@ -68,8 +70,8 @@ def _make_batch(
             local_run_id="run_x",
             orchestrator_commit=ORCHESTRATOR_COMMIT,
             recording=RemoteRecordingRefV1(
-                dataset_name="SpaceNet", dataset_split="test", dataset_key="0",
-                label_space="spacenet_14",
+                dataset_name=dataset_name, dataset_split="test", dataset_key="0",
+                label_space=label_space,
                 expected_recording_fingerprint="a" * 64,
                 expected_source_data_sha256="b" * 64,
             ),
@@ -132,12 +134,12 @@ class FakePipeline:
 
 
 class FakeLabelSpace:
-    def __init__(self):
-        self.calls = []
+    def __init__(self, captured):
+        self.captured = captured
 
     def get(self, label_space_id):
-        self.calls.append(label_space_id)
-        return type("LabelSpace", (), {"id": "spacenet_14", "version": 1, "classes": ()})
+        self.captured["label_space_ids"].append(label_space_id)
+        return type("LabelSpace", (), {"id": label_space_id, "version": 1, "classes": ()})
 
 
 def _fake_manifest():
@@ -162,7 +164,7 @@ def _setup(tmp_path, monkeypatch, *, real_publish=False):
         "publish_kwargs": None,
         "hardware": FAKE_HARDWARE,
     }
-    label_space = FakeLabelSpace()
+    label_space = FakeLabelSpace(captured)
 
     def fake_verify(manifest_path, asset_paths, repo_root, required_runtime_commit):
         captured["verify_manifest"] = {
@@ -262,6 +264,59 @@ def test_execute_rejects_non_empty_parameters(tmp_path, monkeypatch):
     assert exc.value.code == "REMOTE_REQUEST_INVALID"
     assert captured["pipeline_constructed"] is None
     assert captured["publish_kwargs"] is None
+
+
+def test_execute_runtime_drift_fails_before_any_work(tmp_path, monkeypatch):
+    """Defense in depth: frozen request runtime != worker deployment runtime ->
+    REMOTE_IMPLEMENTATION_MISMATCH before verify_asset_manifest / resolver /
+    pipeline construction / publication."""
+    batch = _make_batch(runtime_commit="a" * 40)
+    executor, worker, captured = _make_executor(tmp_path, monkeypatch, batch=batch)
+    with pytest.raises(PlatformError) as exc:
+        executor.execute(batch.items[0], _job_root(tmp_path))
+    assert exc.value.code == "REMOTE_IMPLEMENTATION_MISMATCH"
+    assert captured["verify_manifest"] is None
+    assert captured["resolver_args"] is None
+    assert captured["pipeline_constructed"] is None
+    assert captured["publish_kwargs"] is None
+
+
+def test_execute_wrong_dataset_name_fails_before_resolver(tmp_path, monkeypatch):
+    batch = _make_batch(dataset_name="OtherSet")
+    executor, worker, captured = _make_executor(tmp_path, monkeypatch, batch=batch)
+    with pytest.raises(PlatformError) as exc:
+        executor.execute(batch.items[0], _job_root(tmp_path))
+    assert exc.value.code == "REMOTE_REQUEST_INVALID"
+    assert captured["resolver_args"] is None
+    assert captured["pipeline_constructed"] is None
+    assert captured["publish_kwargs"] is None
+
+
+def test_execute_wrong_label_space_fails_before_resolver(tmp_path, monkeypatch):
+    batch = _make_batch(label_space="signal_presence_v1")
+    executor, worker, captured = _make_executor(tmp_path, monkeypatch, batch=batch)
+    with pytest.raises(PlatformError) as exc:
+        executor.execute(batch.items[0], _job_root(tmp_path))
+    assert exc.value.code == "REMOTE_REQUEST_INVALID"
+    assert captured["resolver_args"] is None
+    assert captured["pipeline_constructed"] is None
+    assert captured["publish_kwargs"] is None
+
+
+def test_execute_valid_spacenet_contract_unchanged(tmp_path, monkeypatch):
+    batch = _make_batch()
+    executor, worker, captured = _make_executor(tmp_path, monkeypatch, batch=batch)
+    executor.execute(batch.items[0], _job_root(tmp_path))
+    assert captured["resolver_args"] is not None
+    assert captured["publish_kwargs"] is not None
+
+
+def test_execute_loads_label_space_from_frozen_definition(tmp_path, monkeypatch):
+    batch = _make_batch()
+    executor, worker, captured = _make_executor(tmp_path, monkeypatch, batch=batch)
+    executor.execute(batch.items[0], _job_root(tmp_path))
+    assert captured["label_space_ids"] == [ZOOMSPEC_FROZEN_DEFINITION.label_space]
+    assert captured["label_space_ids"] == ["spacenet_14"]
 
 
 def test_execute_verifies_runtime_commit_and_assets_fail_closed(tmp_path, monkeypatch):

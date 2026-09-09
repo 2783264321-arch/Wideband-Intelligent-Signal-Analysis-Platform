@@ -68,6 +68,15 @@ class RemoteGpuJobManager:
             raise PlatformError("REMOTE_SUBMIT_FAILED", "Local request file could not be parsed.")
         if parsed != batch:
             raise PlatformError("REMOTE_SUBMIT_FAILED", "Local request file does not match the supplied batch.")
+        # Frozen runtime provenance guard (BEFORE any validate/upload/SSH): the
+        # frozen request must target the CURRENTLY configured remote runtime.
+        # A drift means the coordinator reconciles the SAME batch (uncertain
+        # submit) instead of spawning the frozen request under a new runtime.
+        if batch.required_remote_runtime_commit != self.profile.required_remote_runtime_commit:
+            raise PlatformError(
+                "REMOTE_SUBMIT_FAILED",
+                "Frozen request runtime does not match the configured remote runtime.",
+            )
         remote_request_path = self.profile.remote_job_root / "incoming" / f"{batch.batch_id}.request.json"
         try:
             # Preflight BEFORE any SCP/SSH side effect. A missing/invalid worker

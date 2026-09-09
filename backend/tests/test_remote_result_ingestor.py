@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import zipfile
 
@@ -406,6 +406,58 @@ def test_parse_envelope_valid():
     assert isinstance(parsed, RemoteExecutionEnvelopeV1)
     assert parsed.payload_sha256 == payload
     assert parsed.local_run_id == "run_r"
+
+
+def test_parse_envelope_utc_z_suffix_ok():
+    started = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    finished = datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    raw = _envelope("d" * 64, remote_started_at=started, remote_finished_at=finished).model_dump_json()
+    parsed = parse_remote_execution_envelope_json(raw)
+    assert parsed.remote_started_at == started
+    assert parsed.remote_finished_at == finished
+    assert parsed.remote_started_at.utcoffset() == timedelta(0)
+
+
+def test_parse_envelope_utc_plus_zero_offset_ok():
+    base = _envelope("d" * 64, remote_started_at=None, remote_finished_at=None)
+    data = base.model_dump()
+    data["remote_started_at"] = "2026-01-01T00:00:00+00:00"
+    data["remote_finished_at"] = "2026-01-01T00:01:00+00:00"
+    raw = json.dumps(data, separators=(",", ":"))
+    parsed = parse_remote_execution_envelope_json(raw)
+    assert parsed.remote_started_at == datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert parsed.remote_finished_at == datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+
+
+def test_parse_envelope_naive_timestamp_rejected():
+    raw = _envelope(
+        "d" * 64,
+        remote_started_at=datetime(2026, 1, 1, 0, 0, 0),
+        remote_finished_at=datetime(2026, 1, 1, 0, 1, 0),
+    ).model_dump_json()
+    with pytest.raises(PlatformError) as exc:
+        parse_remote_execution_envelope_json(raw)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+
+
+def test_parse_envelope_non_utc_offset_rejected():
+    base = _envelope("d" * 64, remote_started_at=None, remote_finished_at=None)
+    data = base.model_dump()
+    data["remote_started_at"] = "2026-01-01T00:00:00+02:00"
+    data["remote_finished_at"] = "2026-01-01T00:01:00+02:00"
+    raw = json.dumps(data, separators=(",", ":"))
+    with pytest.raises(PlatformError) as exc:
+        parse_remote_execution_envelope_json(raw)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+
+
+def test_parse_envelope_finished_before_started_rejected():
+    started = datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    finished = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    raw = _envelope("d" * 64, remote_started_at=started, remote_finished_at=finished).model_dump_json()
+    with pytest.raises(PlatformError) as exc:
+        parse_remote_execution_envelope_json(raw)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
 
 
 def test_parse_envelope_duplicate_top_level_key_rejected():
