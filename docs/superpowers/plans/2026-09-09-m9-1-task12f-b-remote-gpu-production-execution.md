@@ -79,7 +79,13 @@ class RemoteWorkerContext:
 
 `RemoteExecutionBatchV1` / `RemoteExecutionItemV1` never carry deployment paths (existing wire schema already only carries logical identity + hashes + `remote_runtime_commit` + `asset_manifest_sha256`).
 
-**Transport ownership (LOCKED):** Task 1 modifies `backend/app/remote_execution/transport.py` (scalar env expansion in `run_runner`) and `backend/tests/test_remote_transport.py` in addition to `worker_context.py`. `SshRunner` owns the fixed scalar env bridge; the same env assignments are present on `submit`, `probe` and `work` invocations; the detached `runner work` subprocess inherits the submit environment through existing `Popen` inheritance.
+**Transport ownership (LOCKED):** Task 1 modifies `backend/app/remote_execution/transport.py` (scalar env expansion in `run_runner`) and `backend/tests/test_remote_transport.py` in addition to `worker_context.py`. `SshRunner` owns the fixed scalar env bridge. The env bridge is **subcommand-specific**:
+
+- `probe` → full worker env (all scalar fields).
+- `submit` → full worker env, because the detached `runner work` subprocess inherits the submit environment through existing `Popen` inheritance.
+- `work` → full worker env if invoked directly.
+- `status` → **minimal env only**: `PYTHONPATH=<repo_root>/backend` and `WSP_REMOTE_JOB_ROOT=<job_root>`.
+  `status` MUST NOT require SpaceNet root, detector checkpoint, FRN checkpoint, frozen_config, or LS-STFT normalization — existing remote jobs must remain status/reconciliation-readable even if scientific deployment mappings become temporarily incomplete.
 
 ---
 
@@ -123,7 +129,11 @@ def is_complete_worker_env(env) -> bool: ...             # True iff all required
 - `asset_paths["detector_checkpoint"|"frn_checkpoint"|"frozen_config"|"ls_stft_normalization"]` → `WSP_REMOTE_DETECTOR_CHECKPOINT` / `WSP_REMOTE_FRN_CHECKPOINT` / `WSP_REMOTE_FROZEN_CONFIG` / `WSP_REMOTE_LS_STFT_NORMALIZATION` (fail closed before SSH if missing/unsafe);
 - plus existing `WSP_REMOTE_REPO_ROOT`, `WSP_REMOTE_JOB_ROOT`, `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT`, `PYTHONPATH=<repo>/backend`.
 
-The same env assignments appear on `submit`, `probe` and `work`; the detached `runner work` subprocess inherits the submit environment through the existing `Popen` inheritance.
+Env bridge is **subcommand-specific**:
+- `probe` → full worker env.
+- `submit` → full worker env (detached `runner work` inherits the submit env through existing `Popen` inheritance).
+- `work` → full worker env if invoked directly.
+- `status` → **minimal env only**: `PYTHONPATH=<repo_root>/backend`, `WSP_REMOTE_JOB_ROOT=<job_root>`. `status` must remain usable even if the scientific asset/dataset mappings are temporarily incomplete; it must not require SpaceNet root or any asset scalar.
 
 **RED test (`backend/tests/test_remote_worker_context.py`, new) + transport tests (`backend/tests/test_remote_transport.py`, extend):**
 - `test_context_from_env_valid_full`: a complete valid scalar env produces a `RemoteWorkerContext` with every field set; `asset_manifest_path` and `label_space_root` are derived from repo_root.
@@ -132,10 +142,13 @@ The same env assignments appear on `submit`, `probe` and `work`; the detached `r
 - `test_context_missing_asset_scalar_fails_closed`: any of the four asset scalars absent → PlatformError.
 - `test_context_unsafe_path_rejected`: path with `..`/shell chars → PlatformError.
 - `test_context_invalid_runtime_commit_rejected`: non-40-hex runtime commit → PlatformError.
-- `test_runner_argv_contains_exact_fixed_worker_env_assignments` (transport): the remote command argv contains exactly the fixed scalar env assignments (`WSP_REMOTE_REPO_ROOT=`, `WSP_REMOTE_JOB_ROOT=`, `WSP_REMOTE_SPACENET_ROOT=`, `WSP_REMOTE_DETECTOR_CHECKPOINT=`, `WSP_REMOTE_FRN_CHECKPOINT=`, `WSP_REMOTE_FROZEN_CONFIG=`, `WSP_REMOTE_LS_STFT_NORMALIZATION=`, `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT=`, `PYTHONPATH=`).
+- `test_probe_submit_work_argv_contain_full_scalar_worker_env` (transport): the remote command argv for `probe`/`submit`/`work` contains the full scalar env (`WSP_REMOTE_REPO_ROOT=`, `WSP_REMOTE_JOB_ROOT=`, `WSP_REMOTE_SPACENET_ROOT=`, `WSP_REMOTE_DETECTOR_CHECKPOINT=`, `WSP_REMOTE_FRN_CHECKPOINT=`, `WSP_REMOTE_FROZEN_CONFIG=`, `WSP_REMOTE_LS_STFT_NORMALIZATION=`, `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT=`, `PYTHONPATH=`).
+- `test_status_argv_contains_minimal_env_only` (transport): the `status` command argv contains only `PYTHONPATH=` and `WSP_REMOTE_JOB_ROOT=`; it does NOT require SpaceNet root or any asset scalar.
+- `test_status_invokes_ssh_with_missing_asset_mappings` (transport): `status` still invokes SSH (proceeds) when SpaceNet/asset mappings are absent from the profile.
+- `test_probe_submit_fail_before_ssh_when_worker_mapping_missing` (transport): missing SpaceNet root or a required asset mapping → PlatformError raised before any SSH invocation (no subprocess call) for `probe`/`submit`.
 - `test_worker_env_values_round_trip` (transport): every scalar value in the argv equals the corresponding validated `RemoteProfile` value.
-- `test_missing_spacenet_mapping_fails_before_ssh` (transport): `dataset_roots` without `"SpaceNet"` → PlatformError raised before any SSH invocation (no subprocess call).
-- `test_missing_asset_logical_mapping_fails_before_ssh` (transport): asset map missing a required logical name → PlatformError before SSH.
+- `test_missing_spacenet_mapping_fails_before_ssh` (transport): `dataset_roots` without `"SpaceNet"` → PlatformError raised before any SSH invocation (no subprocess call) for probe/submit.
+- `test_missing_asset_logical_mapping_fails_before_ssh` (transport): asset map missing a required logical name → PlatformError before SSH (probe/submit).
 - `test_no_credential_field_in_remote_env` (transport): no `host`/`user`/`ssh_key`/`known_hosts` value appears in the remote env/argv.
 - `test_no_json_mapping_in_remote_command` (transport): neither `WSP_REMOTE_DATASET_ROOTS_JSON` nor `WSP_REMOTE_ASSET_PATHS_JSON` appears anywhere in the remote command.
 
@@ -177,6 +190,8 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 5. SpaceNet root exists/is a directory.
 6. `spacenet_14` loadable via `LabelSpaceService(label_space_root).get("spacenet_14")`.
 7. CUDA available (`torch.cuda.is_available()`) and device 0 usable (`torch.cuda.get_device_name(0)` succeeds) — import torch lazily inside the handler.
+
+**Probe verified commit value (LOCKED):** after `verify_remote_runtime_commit(worker.repo_root, worker.required_runtime_commit)` passes, `run_probe` returns `remote_runtime_commit = worker.required_runtime_commit`. This value is legitimate only because equality with the deployed HEAD was just verified; no second independent git interpretation is performed.
 
 **Probe MUST NOT:** construct `ZoomSpecFrozenPipeline`; load YOLO or FRN checkpoint; perform inference.
 
@@ -284,6 +299,8 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 **Interfaces (file to create):** `backend/app/remote_execution/result_publisher.py` (new):
 ```python
+from datetime import datetime
+
 def publish_result(
     *,
     job_root: Path,
@@ -293,11 +310,14 @@ def publish_result(
     remote_runtime_commit: str,
     asset_manifest_sha256: str,
     hardware: dict,
-    workspace: Path,
+    remote_started_at: datetime,
+    remote_finished_at: datetime,
 ) -> None:
     """Atomically expose BOTH terminal files as one result directory:
     <job_root>/results/<item_key>/{envelope.json,analysis_result.zip}."""
 ```
+
+`remote_started_at` and `remote_finished_at` MUST be timezone-aware UTC datetimes; they are written directly into `RemoteExecutionEnvelopeV1.remote_started_at` / `remote_finished_at`. Naive datetimes fail closed (rejected before publication). No `workspace` parameter (no repository evidence requires it).
 
 **Atomic result-pair design (V1, LOCKED):**
 - Final directory: `<job_root>/results/<item_key>`.
@@ -317,6 +337,8 @@ def publish_result(
 - `test_publish_creates_valid_terminal_artifacts`: after `publish_result`, `<job_root>/results/<item_key>/` contains both files; `envelope.json` parses and `analysis_result.zip` exists; `_verify_terminal_result(batch, item, job_root)` passes (write-once verifier accepts the final directory).
 - `test_publish_envelope_identity_matches_frozen_batch`.
 - `test_publish_payload_sha256_is_exact_zip_hash`.
+- `test_publish_envelope_timestamps_equal_supplied_utc_datetimes`: the parsed `envelope.remote_started_at` and `envelope.remote_finished_at` equal the supplied timezone-aware UTC datetimes exactly.
+- `test_publish_rejects_naive_datetimes`: a naive (non-tz-aware) `remote_started_at`/`remote_finished_at` → rejected/fails closed before publication.
 - `test_no_observer_sees_only_one_terminal_file`: after successful publish both files are visible simultaneously (directory-level atomicity — an observer never sees exactly one terminal file).
 - `test_pre_rename_failure_leaves_final_directory_absent`: injected failure before the directory rename → final result directory absent (no terminal artifact visible).
 - `test_publish_refuses_to_overwrite_terminal_result`: a second publication cannot replace the final directory (existing envelope/zip unchanged or a write-once error is raised).
@@ -385,32 +407,36 @@ class ZoomSpecRemoteItemExecutor:
 `item.recording` is used only for dataset/split/key/label-space and the double identity (fingerprint + source hash).
 
 `execute` sequence:
-1. Re-verify required runtime commit + complete asset manifest/assets (`verify_asset_manifest` with the worker context paths; repo-owned asset-manifest path + runtime commit). `remote_runtime_commit` may only be asserted as `worker.required_runtime_commit` AFTER this proves the deployed HEAD equals the required commit.
-2. Require `batch.pipeline.id == ZOOMSPEC_FROZEN_DEFINITION.id` and `batch.pipeline.version == ZOOMSPEC_FROZEN_DEFINITION.version`.
-3. Require `item.parameters == {}`.
-4. Resolve SpaceNet logical identity via `resolve_space_net(worker.dataset_root_space_net, dataset_split, dataset_key, label_space, expected_recording_fingerprint, expected_source_data_sha256, worker.label_space_root)` (dataset/split/key/label_space from `item.recording`).
-5. `resolve_space_net` verifies the recording fingerprint and the exact source-data SHA (double-identity enforcement; GroundTruth participates only in fingerprint validation and never reaches inference).
-6. Load `spacenet_14` label space.
-7. Load LS-STFT normalization from the verified `ls_stft_normalization` asset file (values parsed from JSON; never a copied literal).
-8. Construct `ZoomSpecFrozenPipeline(detector_checkpoint_path, frn_checkpoint_path, normalization, label_space, device=0)` (lazy/within execute; `pipeline_factory` seam for tests).
-9. `remote_started_at = utc now`; `output = pipeline.run(recording_input, {}, workspace)`; `remote_finished_at = utc now` (UTC timestamps produced around actual item execution).
-10. `runtime_info = self._runtime_info_provider()` (production provider lazily imports torch here; CPU tests inject a fake provider so importing `zoomspec_executor.py` remains torch-free).
-11. `build_analysis_package_zip(output, recording_name, dataset_name, workspace)` — Analysis Package `execution.device == "cuda:0"`, `environment = None`.
-12. `publish_result(...)` atomically with `hardware = runtime_info`, `remote_started_at`, `remote_finished_at`.
+1. `remote_started_at = datetime.now(timezone.utc)` immediately after executor entry and BEFORE any runtime/assets/resolver/model work.
+2. Re-verify required runtime commit + complete asset manifest/assets (`verify_asset_manifest` with the worker context paths; repo-owned asset-manifest path + runtime commit). `remote_runtime_commit` may only be asserted as `worker.required_runtime_commit` AFTER this proves the deployed HEAD equals the required commit.
+3. Require `batch.pipeline.id == ZOOMSPEC_FROZEN_DEFINITION.id` and `batch.pipeline.version == ZOOMSPEC_FROZEN_DEFINITION.version`.
+4. Require `item.parameters == {}`.
+5. Resolve SpaceNet logical identity via `resolve_space_net(worker.dataset_root_space_net, dataset_split, dataset_key, label_space, expected_recording_fingerprint, expected_source_data_sha256, worker.label_space_root)` (dataset/split/key/label_space from `item.recording`).
+6. `resolve_space_net` verifies the recording fingerprint and the exact source-data SHA (double-identity enforcement; GroundTruth participates only in fingerprint validation and never reaches inference).
+7. Load `spacenet_14` label space.
+8. Load LS-STFT normalization from the verified `ls_stft_normalization` asset file (values parsed from JSON; never a copied literal).
+9. Construct `ZoomSpecFrozenPipeline(detector_checkpoint_path, frn_checkpoint_path, normalization, label_space, device=0)` (lazy/within execute; `pipeline_factory` seam for tests).
+10. `workspace = job_root / "work" / item.item_key` (item_key already validated by the wire schema; created only under `job_root`; never a request-controlled absolute path).
+11. `output = pipeline.run(recording_input, {}, workspace)`.
+12. `runtime_info = self._runtime_info_provider()` (production provider lazily imports torch here; CPU tests inject a fake provider so importing `zoomspec_executor.py` remains torch-free).
+13. `build_analysis_package_zip(output, recording_name, dataset_name, workspace)` — Analysis Package `execution.device == "cuda:0"`, `environment = None`.
+14. `remote_finished_at = datetime.now(timezone.utc)` after successful pipeline + package construction and immediately before terminal publication; require `remote_finished_at >= remote_started_at`.
+15. `publish_result(...)` atomically with `hardware = runtime_info`, `remote_started_at`, `remote_finished_at`.
 
 `frozen_config` remains a **required verified asset identity** even though `ZoomSpecFrozenPipeline` does not consume it directly; it is verified in step 1 and no new scientific use is invented.
 
 **RED test (`backend/tests/test_zoomspec_remote_executor.py`, new):** CPU/no-GPU, via injected fake pipeline factory + faked assets/resolver/runtime-info provider where appropriate.
 - `test_execute_requires_batch_pipeline_id_match`: `batch.pipeline.id != ZOOMSPEC_FROZEN_DEFINITION.id` → PlatformError.
 - `test_execute_requires_batch_pipeline_version_match`: `batch.pipeline.version != ZOOMSPEC_FROZEN_DEFINITION.version` → PlatformError.
-- `test_execute_ignores_item_recording_for_pipeline_identity`: item with a different id/version context still executes when `batch.pipeline` matches (proving identity is batch-owned).
+- `test_execute_uses_batch_pipeline_identity_only`: uses a normal valid `RemoteRecordingRefV1` (no pipeline id/version fields on recording) and proves successful execution depends on matching `batch.pipeline` — it must not invent pipeline fields on `item.recording`.
 - `test_execute_rejects_non_empty_parameters`: item.parameters != {} → PlatformError.
 - `test_execute_verifies_runtime_commit_and_assets_fail_closed`: mismatch → PlatformError before pipeline construction.
 - `test_execute_calls_pipeline_with_empty_params_and_device_zero`: fake pipeline records `(recording_input, {}, workspace)` and `device == 0`.
 - `test_execute_verifies_recording_fingerprint_and_source_hash` (resolver double-identity enforced via fake resolver).
 - `test_execute_ground_truth_never_reaches_inference`: fake pipeline asserts no GT passed (only RecordingInput without GT).
 - `test_execute_hardware_comes_from_runtime_info_provider`: injected fake provider returns a dict; the published envelope `hardware` equals it exactly.
-- `test_execute_records_remote_started_and_finished_at`: both UTC timestamps are produced around actual pipeline execution.
+- `test_execute_records_remote_started_and_finished_at`: `remote_started_at` is captured immediately after executor entry (before runtime/assets/resolver/model work), `remote_finished_at` after successful pipeline + package construction (immediately before terminal publication); both timezone-aware UTC; `remote_finished_at >= remote_started_at`; both passed explicitly to `publish_result` and written to the envelope.
+- `test_execute_workspace_is_under_job_root`: `workspace == job_root / "work" / item.item_key`; no request-controlled absolute path is used.
 - `test_execute_publishes_terminal_envelope_and_zip` accepted by `run_work`/`_verify_terminal_result` (reuse result_publisher test fixture).
 - `test_executor_module_does_not_import_torch_or_ultralytics_at_import`: fresh subprocess import `app.remote_execution.zoomspec_executor`; assert no torch/ultralytics in sys.modules (the production runtime-info provider imports torch lazily inside `execute`).
 
@@ -470,6 +496,12 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 **Goal:** lock the error semantics end to end (CPU/no-GPU, using fakes). No behavior change beyond hardening if a test exposes a real gap.
 
+**TDD honesty rule (LOCKED):**
+- If a new negative test exposes a defect: **RED → fix → GREEN** (a real RED/GREEN cycle).
+- If it passes immediately because existing behavior is already correct: record **COVERAGE CONFIRMED** — no production fix and no claimed RED.
+
+Task 7 may still commit test-only coverage. The implementation final report MUST distinguish real RED/GREEN cycles from pass-first coverage tests.
+
 **Interfaces (files):** existing modules; add tests only unless a real defect is found.
 
 **RED test (`backend/tests/test_remote_executor_negative.py`, new):**
@@ -478,9 +510,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 - terminal artifact corruption → `REMOTE_RESULT_CORRUPTED`/`interrupted` semantics.
 - no traceback or arbitrary local path leaks into protocol error messages/status.
 
-**Expected failure (RED):** only if a specific negative case currently leaks or maps incorrectly; otherwise the task is primarily adding missing tests (this is acceptable as "RED = missing coverage" only when the plan marks the assertion as the behavior under test; do not weaken tests).
-
-**Minimal implementation:** fix only genuine error-mapping defects surfaced; otherwise add the tests and confirm they pass.
+**Outcome recording:** each test is reported as either a real RED→fix→GREEN cycle or COVERAGE CONFIRMED (pass-first); no fabricated RED evidence is ever recorded.
 
 **Focused verification:**
 ```bash
@@ -547,13 +577,19 @@ These gates use real `detector_checkpoint`, `frn_checkpoint`, `frozen_config`, `
 
 - **Spec coverage:** §8.2 (RemoteWorkerContext + probe), §9 (ZoomSpecRemoteItemExecutor), §10 (device 0 normalization preserved), §11 (Analysis Package v1 reuse; envelope → hardware_info_json, provenance stays in execution metadata), §13 (security: no request-controlled path, fixed validated env bridge, fail-closed identity), §14 (12F-B acceptance). No local control-plane/coordinator redesign.
 - **No JSON mapping crosses the remote SSH command:** the worker env bridge is exact fixed scalar names only (`WSP_REMOTE_SPACENET_ROOT`, `WSP_REMOTE_DETECTOR_CHECKPOINT`, `WSP_REMOTE_FRN_CHECKPOINT`, `WSP_REMOTE_FROZEN_CONFIG`, `WSP_REMOTE_LS_STFT_NORMALIZATION`, etc.); `WSP_REMOTE_DATASET_ROOTS_JSON` / `WSP_REMOTE_ASSET_PATHS_JSON` never appear in the remote command (tested).
-- **Task 1 owns transport env propagation:** `SshRunner` expands the trusted scalar `RemoteProfile` values and fails closed before SSH on missing/unsafe SpaceNet/asset mappings; tests live in `test_remote_transport.py`.
-- **Detached work inherits the exact worker context:** the same scalar env assignments are present on `submit`/`probe`/`work`; the detached `runner work` subprocess inherits the submit environment through existing `Popen` inheritance.
-- **batch.pipeline owns pipeline identity:** executor requires `batch.pipeline.id/version == ZOOMSPEC_FROZEN_DEFINITION.id/version`; `item.recording` is dataset/split/key/label-space + double identity only (negative tests for wrong id and wrong version).
+- **Task 1 owns transport env propagation (subcommand-specific):** `SshRunner` expands the trusted scalar `RemoteProfile` values and fails closed before SSH on missing/unsafe SpaceNet/asset mappings for `probe`/`submit`; tests live in `test_remote_transport.py`.
+- **status stays usable without scientific asset mappings:** `status` carries minimal env only (`PYTHONPATH=<repo_root>/backend`, `WSP_REMOTE_JOB_ROOT=<job_root>`), does not require SpaceNet/asset scalars, and still invokes SSH even when those mappings are absent.
+- **submit/probe/work receive full worker context:** `probe` and `work` carry the full scalar env; `submit` carries it because the detached `runner work` subprocess inherits the submit environment through existing `Popen` inheritance.
+- **batch.pipeline owns pipeline identity:** executor requires `batch.pipeline.id/version == ZOOMSPEC_FROZEN_DEFINITION.id/version`; `item.recording` is dataset/split/key/label-space + double identity only (negative tests for wrong id and wrong version; `test_execute_uses_batch_pipeline_identity_only` uses a normal valid `RemoteRecordingRefV1` and invents no pipeline fields on recording).
 - **Package execution metadata has one exact value:** `executor="remote_gpu"`, `device="cuda:0"`, `environment=None` — no alternatives.
 - **Runtime hardware has one owner + CPU injection seam:** `runtime_info_provider` (default `default_runtime_info_provider` lazily imports torch inside `execute`) produces the envelope `hardware`; CPU tests inject a fake provider; importing `zoomspec_executor.py` remains torch-free.
 - **Result pair is atomically visible as a directory:** staging directory → fsync → same-filesystem directory rename → parent fsync; never a partial single-file view; second publication cannot replace the final directory; crash windows covered by existing runner verification.
-- **Envelope runtime commit provenance:** `remote_runtime_commit` is asserted as `worker.required_runtime_commit` only after `verify_asset_manifest` proves deployed HEAD == required commit; `remote_started_at`/`remote_finished_at` are UTC timestamps around actual item execution.
+- **Envelope timestamps have one owner and exact UTC semantics:** `publish_result` writes the supplied `remote_started_at`/`remote_finished_at` (timezone-aware UTC) directly into `RemoteExecutionEnvelopeV1`; naive datetimes fail closed before publication; envelope timestamps equal the supplied datetimes exactly (tested).
+- **publish_result signature matches the Task 5 call exactly:** `publish_result(*, job_root, item, batch, zip_path, remote_runtime_commit, asset_manifest_sha256, hardware, remote_started_at, remote_finished_at)`; no `workspace` parameter.
+- **Executor workspace has one safe location:** `workspace = job_root / "work" / item.item_key` (item_key validated by the wire schema; created only under `job_root`; never a request-controlled absolute path).
+- **Timestamp boundary frozen:** `remote_started_at = datetime.now(timezone.utc)` immediately after executor entry and before any runtime/assets/resolver/model work; `remote_finished_at = datetime.now(timezone.utc)` after successful pipeline + package construction and immediately before terminal publication; require `remote_finished_at >= remote_started_at`; both passed explicitly to `publish_result`.
+- **Probe verified commit value:** `run_probe` returns `remote_runtime_commit = worker.required_runtime_commit`, legitimate only because `verify_remote_runtime_commit` just proved deployed HEAD == required commit; no second independent git interpretation.
+- **No fake TDD RED claims:** Task 7 records each negative test as a real RED→fix→GREEN cycle or COVERAGE CONFIRMED (pass-first); no fabricated RED evidence; test-only coverage commits are allowed and the final report distinguishes the two.
 - **GPU server never constructs RemoteProfile:** the direct server probe uses only the scalar worker env with no SSH credential env; `RemoteProfile` stays local control-plane only; the real SSH probe is a separate post-12F-B integration gate.
 - **No TODO/TBD/placeholders or `or`/ellipsis ambiguity:** every task lists exact files, exact interfaces/signatures, RED test, expected failure, minimal implementation, focused verification, and commit checkpoint; no alternative values are offered anywhere.
 - **No unowned interface:** `RemoteWorkerContext`, `run_probe`, `manifest_for`, `build_analysis_package_zip`, `publish_result`, `default_runtime_info_provider`, `ZoomSpecRemoteItemExecutor`, `_cli_probe`, `_cli_work` all have one owner each.
