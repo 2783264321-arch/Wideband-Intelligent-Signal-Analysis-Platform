@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import TYPE_CHECKING
 
 from app.benchmarks.manifest import (
+    ManifestGroundTruth,
     ManifestRecording,
     canonical_ground_truth_payload,
     canonical_json_bytes,
@@ -10,6 +12,41 @@ from app.benchmarks.manifest import (
 )
 from app.imported_runs.batch_schema import BatchManifest
 from app.imported_runs.schema import PackageDetection
+
+if TYPE_CHECKING:
+    from app.ground_truth.model import GroundTruthModel
+    from app.recordings.model import RecordingModel
+
+
+def manifest_recording_for(recording: "RecordingModel", gt_rows: list["GroundTruthModel"]) -> ManifestRecording:
+    """Build a ManifestRecording from a RecordingModel + its GroundTruth rows.
+
+    Public shared helper used by both batch import validation and remote
+    recording-identity resolution. The local ``recording_id`` is intentionally
+    carried into the manifest (it is excluded from the canonical fingerprint
+    payload by ``canonical_recording_payload``), so re-using the same recording
+    content under different local ids yields the same fingerprint.
+    """
+    ground_truth = tuple(
+        ManifestGroundTruth(
+            t_start_s=gt.t_start_s, t_end_s=gt.t_end_s,
+            f_low_hz=gt.f_low_hz, f_high_hz=gt.f_high_hz,
+            class_id=gt.class_id, class_name=gt.class_name,
+        )
+        for gt in gt_rows
+    )
+    return ManifestRecording(
+        recording_id=recording.id,
+        name=recording.name,
+        data_format=recording.data_format,
+        sample_rate_hz=recording.sample_rate_hz,
+        center_frequency_hz=recording.center_frequency_hz,
+        frequency_low_hz=recording.frequency_low_hz,
+        frequency_high_hz=recording.frequency_high_hz,
+        num_samples=recording.num_samples,
+        duration_s=recording.duration_s,
+        ground_truth=ground_truth,
+    )
 
 RECORDING_FINGERPRINT_SCHEMA = "recording_fingerprint_v1"
 BATCH_IMPORT_FINGERPRINT_SCHEMA = "batch_import_fingerprint_v1"

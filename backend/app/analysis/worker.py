@@ -1,28 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timezone
-import json
 import logging
 from pathlib import Path
 import sys
 import traceback
-from uuid import uuid4
-
-from sqlalchemy import delete
 
 from app.analysis.model import AnalysisRunModel
 from app.core.config import Settings
 from app.core.errors import PlatformError
-from app.core.signal_validation import validate_label, validate_physical_box
 from app.db.base import Base, load_domain_models
 from app.db.migrations import run_additive_migrations
 from app.db.session import Database
-from app.detections.model import DetectionResultModel
 from app.labels.service import LabelSpaceService
 from app.pipelines.base import RecordingInput
 from app.pipelines.registry import create_pipeline_registry
 from app.recordings.model import RecordingModel
+from app.remote_execution.validation import AnalysisResultWriter
 from app.storage.service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -75,50 +69,17 @@ def execute_run(run_id: str, settings: Settings | None = None) -> None:
             workspace = storage.artifact_dir(run.id)
             output = pipeline.run(_recording_input(recording, settings.data_root), dict(run.parameters_json), workspace)
 
-            session.execute(delete(DetectionResultModel).where(DetectionResultModel.run_id == run.id))
-            for item in output.detections:
-                validate_physical_box(
-                    recording,
-                    t_start_s=item.t_start_s,
-                    t_end_s=item.t_end_s,
-                    f_low_hz=item.f_low_hz,
-                    f_high_hz=item.f_high_hz,
-                    error_code="INVALID_DETECTION",
-                )
-                validate_label(
-                    label_service,
-                    label_space_id=pipeline.definition.label_space,
-                    class_id=item.class_id,
-                    class_name=item.class_name,
-                    error_code="INVALID_DETECTION",
-                )
-                session.add(
-                    DetectionResultModel(
-                        id=f"det_{uuid4().hex}",
-                        run_id=run.id,
-                        t_start_s=item.t_start_s,
-                        t_end_s=item.t_end_s,
-                        f_low_hz=item.f_low_hz,
-                        f_high_hz=item.f_high_hz,
-                        class_id=item.class_id,
-                        class_name=item.class_name,
-                        confidence=item.confidence,
-                        scores_json=item.scores,
-                    )
-                )
-
-            if output.artifacts:
-                artifact_index = []
-                for artifact in output.artifacts:
-                    artifact_path = artifact.path.resolve()
-                    if workspace.resolve() not in artifact_path.parents and artifact_path != workspace.resolve():
-                        raise PlatformError("INVALID_ARTIFACT", "Pipeline artifact path escaped the run workspace.")
-                    artifact_index.append({**asdict(artifact), "path": str(artifact_path.relative_to(workspace.resolve()))})
-                (workspace / "artifacts.json").write_text(json.dumps(artifact_index, indent=2, default=str), encoding="utf-8")
-
-            (workspace / "run_metadata.json").write_text(json.dumps(output.run_metadata, indent=2, default=str), encoding="utf-8")
-            run.status = "completed"
-            run.finished_at = datetime.now(timezone.utc)
+            writer = AnalysisResultWriter(
+                session=session,
+                label_service=label_service,
+                pipeline_definition=pipeline.definition,
+                workspace=workspace,
+            )
+            writer.persist(
+                run=run,
+                recording=recording,
+                output=output,
+            )
             session.commit()
     except Exception as exc:
         logger.error("Analysis worker failed for %s\n%s", run_id, traceback.format_exc())

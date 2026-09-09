@@ -30,6 +30,7 @@ class RecordingModel(Base):
     dataset_split: Mapped[str | None] = mapped_column(String(64), nullable=True)
     label_space: Mapped[str | None] = mapped_column(String(128), nullable=True)
     has_ground_truth: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source_data_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     analysis_runs: Mapped[list["AnalysisRunModel"]] = relationship(back_populates="recording", cascade="all, delete-orphan")

@@ -1,0 +1,11 @@
+{
+  "pipeline_id": "zoomspec_yolo26n_aug_combined_frn_v3",
+  "pipeline_version": "1.0.0",
+  "assets": {
+    "detector_checkpoint": "eba4fa4b112a0e61cc1013e96f99d1ae82b845f4be1e8b1f80bd2089d1f82311",
+    "frn_checkpoint": "da6087da2fbfbaa5ba0e2cb210d08c24ee8b2af8418329d32216f7c77253be67",
+    "frozen_config": "030dbfa77353f876728252c2f247b47816baf8921a7641bb8873ae9035d9d7ec",
+    "ls_stft_normalization": "9b994655a279352b835b96cb00cefde89410fc6130458665dca7070de146d72f"
+  },
+  "asset_manifest_sha256": "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08"
+}

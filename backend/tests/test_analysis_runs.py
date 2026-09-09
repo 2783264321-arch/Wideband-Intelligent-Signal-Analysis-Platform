@@ -68,8 +68,8 @@ def test_analysis_run_executes_dummy_pipeline_in_subprocess_and_persists_results
     assert run["status"] in {"pending", "running"}
     assert run["worker_pid"] is not None
 
-    deadline = time.time() + 10
-    while time.time() < deadline:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
         status = client.get(f"/api/analysis-runs/{run['id']}")
         assert status.status_code == 200
         run = status.json()

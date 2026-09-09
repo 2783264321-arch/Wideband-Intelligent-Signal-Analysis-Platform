@@ -4,6 +4,7 @@ from app.core.errors import PlatformError
 from app.pipelines.base import Pipeline, PipelineDefinition
 from app.pipelines.dummy import DummyPipeline
 from app.pipelines.stft_energy.pipeline import STFTEnergyDetectorPipeline
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition import ZoomSpecRemoteOnlyPipeline
 
 
 class PipelineRegistry:
@@ -21,4 +22,4 @@ class PipelineRegistry:
 
 
 def create_pipeline_registry() -> PipelineRegistry:
-    return PipelineRegistry([DummyPipeline(), STFTEnergyDetectorPipeline()])
+    return PipelineRegistry([DummyPipeline(), STFTEnergyDetectorPipeline(), ZoomSpecRemoteOnlyPipeline()])

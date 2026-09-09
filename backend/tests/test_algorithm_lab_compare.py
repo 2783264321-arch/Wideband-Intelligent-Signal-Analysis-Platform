@@ -91,6 +91,50 @@ def test_compare_rejects_same_run_twice(client):
     assert response.status_code == 422
 
 
+def test_compare_includes_remote_gpu_completed_run(client):
+    """A completed remote_gpu run compares identically to any completed run,
+    always with TWO DISTINCT run IDs (run_a_id != run_b_id)."""
+    database = client.app.state.database
+    with database.session_factory() as session:
+        _add_recording(session)
+        _add_run(session, run_id="run_remote", rec_id="rec_cmp",
+                 pipeline_id="zoomspec_yolo26n_aug_combined_frn_v3",
+                 pipeline_version="1.0.0", executor="remote_gpu")
+        _add_run(session, run_id="run_b", rec_id="rec_cmp")
+        _add_gt(session, gt_id="gt0", rec_id="rec_cmp", t0=0.0, t1=0.02,
+                f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_gt(session, gt_id="gt1", rec_id="rec_cmp", t0=0.02, t1=0.04,
+                f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        # Remote run A matches both GT boxes (one class-correct, one class-wrong).
+        _add_detection(session, det_id="det_r0", run_id="run_remote", t0=0.0, t1=0.02,
+                       f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9, class_name="LoRa 250kHz")
+        _add_detection(session, det_id="det_r1", run_id="run_remote", t0=0.02, t1=0.04,
+                       f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=13, class_name="FM")
+        # Run B matches one GT box (detection-only pipeline).
+        _add_detection(session, det_id="det_b0", run_id="run_b", t0=0.0, t1=0.02,
+                       f0=2_440_000_000.0, f1=2_441_000_000.0)
+        session.commit()
+
+    response = _compare(client, run_a="run_remote", run_b="run_b")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["run_a"]["run_id"] == "run_remote"
+    assert payload["run_b"]["run_id"] == "run_b"
+    run_a = payload["run_a"]
+    assert run_a["pipeline_id"] == "zoomspec_yolo26n_aug_combined_frn_v3"
+    assert run_a["metrics"]["tp"] == 2
+    assert run_a["metrics"]["fp"] == 0
+    assert run_a["metrics"]["fn"] == 0
+    assert run_a["classification_applicable"] is True
+    assert run_a["classification"]["matched_count"] == 2
+    assert run_a["classification"]["class_correct"] == 1
+    assert run_a["classification"]["class_wrong"] == 1
+    assert run_a["class_aware"]["tp"] == 1
+    assert run_a["class_aware"]["fp"] == 1
+    assert run_a["class_aware"]["fn"] == 1
+    assert len(payload["cases"]) == 2
+
+
 def test_compare_rejects_missing_run(client):
     _populate_comparison_fixture(client)
     response = _compare(client, run_b="run_missing")
