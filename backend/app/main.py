@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -24,6 +26,79 @@ from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
 
+
+def _asset_manifest_path(project_root) -> Path:
+    return (
+        Path(project_root)
+        / "backend" / "app" / "pipelines" / "zoomspec_yolo26n_aug_combined_frn_v3"
+        / "asset_manifest.json"
+    )
+
+
+def _wire_remote_lifecycle(app, settings) -> None:
+    """Wire the local control-plane remote lifecycle when a valid RemoteProfile exists.
+
+    Missing or invalid remote config keeps the app healthy: no coordinator recovery
+    launch, remote availability=false, and existing remote runs are preserved.
+    """
+    from app.remote_execution.executor import SshRemoteExecutorProbe
+    from app.remote_execution.identity import (
+        resolve_asset_manifest_sha256,
+        resolve_local_orchestrator_commit,
+        resolve_remote_recording_identity,
+    )
+    from app.remote_execution.profile import RemoteProfile
+    from app.remote_execution.transport import SshRunner
+
+    try:
+        profile = RemoteProfile.from_env(settings)
+    except Exception:
+        app.state.remote_config_available = False
+        app.state.remote_executor_probe = None
+        app.state.remote_coordinator_launcher = None
+        app.state.identity_resolver = None
+        app.state.orchestrator_commit_resolver = None
+        app.state.asset_manifest_sha256_resolver = None
+        app.state.runtime_commit_config = None
+        app.state.project_root = settings.project_root
+        app.state.data_root = settings.data_root
+        app.state.asset_manifest_path = None
+        return
+
+    asset_manifest_path = _asset_manifest_path(settings.project_root)
+    try:
+        asset_manifest_sha256 = resolve_asset_manifest_sha256(asset_manifest_path)
+    except Exception:
+        app.state.remote_config_available = False
+        app.state.remote_executor_probe = None
+        app.state.remote_coordinator_launcher = None
+        app.state.identity_resolver = None
+        app.state.orchestrator_commit_resolver = None
+        app.state.asset_manifest_sha256_resolver = None
+        app.state.runtime_commit_config = None
+        app.state.project_root = settings.project_root
+        app.state.data_root = settings.data_root
+        app.state.asset_manifest_path = None
+        return
+
+    transport = SshRunner(profile)
+    probe = SshRemoteExecutorProbe(
+        profile,
+        transport,
+        expected_runtime_commit=profile.required_remote_runtime_commit,
+        expected_manifest_sha256=asset_manifest_sha256,
+    )
+    app.state.remote_config_available = True
+    app.state.remote_executor_probe = probe
+    app.state.remote_coordinator_launcher = CoordinatorJobManager(settings)
+    app.state.identity_resolver = resolve_remote_recording_identity
+    app.state.orchestrator_commit_resolver = resolve_local_orchestrator_commit
+    app.state.asset_manifest_sha256_resolver = resolve_asset_manifest_sha256
+    app.state.runtime_commit_config = profile.required_remote_runtime_commit
+    app.state.project_root = settings.project_root
+    app.state.data_root = settings.data_root
+    app.state.asset_manifest_path = asset_manifest_path
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     app = FastAPI(title="Wideband Intelligent Signal Analysis Platform")
@@ -37,23 +112,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     load_domain_models()
     Base.metadata.create_all(app.state.database.engine)
     run_additive_migrations(app.state.database.engine)
+    _wire_remote_lifecycle(app, settings)
     with app.state.database.session_factory() as recovery_session:
         from app.remote_execution.recovery import (
             coordinate_orphaned_remote_runs,
             mark_stale_local_cpu_runs_interrupted,
-            remote_config_available,
         )
 
         mark_stale_local_cpu_runs_interrupted(recovery_session)
         mark_stale_running_evaluations_interrupted(recovery_session)
-        remote_config = remote_config_available()
-        app.state.remote_config_available = remote_config
-        if remote_config:
-            launcher = CoordinatorJobManager(settings)
-            app.state.remote_coordinator_launcher = launcher
+        if app.state.remote_config_available and app.state.remote_coordinator_launcher is not None:
             coordinate_orphaned_remote_runs(
                 recovery_session,
-                launcher=launcher,
+                launcher=app.state.remote_coordinator_launcher,
                 remote_config_available=True,
                 seen_run_ids=set(),
             )

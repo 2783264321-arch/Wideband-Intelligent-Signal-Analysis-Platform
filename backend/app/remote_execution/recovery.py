@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -59,24 +58,20 @@ def rotate_coordinator_token(metadata: dict) -> dict:
     return result
 
 
-def remote_config_available() -> bool:
-    """True iff the remote deployment config env keys are present.
+def remote_config_available(settings=None) -> bool:
+    """True iff a complete, valid RemoteProfile can be built from env.
 
-    Conservative check: requires the runtime-commit key plus the SSH/transport
-    config keys that construct a ``RemoteProfile``.
+    Bootstrap validity comes from actual ``RemoteProfile.from_env`` validation
+    (which requires the SSH key, known-hosts, port, repo/job roots, python path,
+    and the runtime commit), not from a partial env-key presence list.
     """
-    required = (
-        "WSP_REMOTE_PROFILE_NAME",
-        "WSP_REMOTE_HOST",
-        "WSP_REMOTE_USER",
-        "WSP_REMOTE_SSH_KEY_PATH",
-        "WSP_REMOTE_KNOWN_HOSTS_PATH",
-        "WSP_REMOTE_REPO_ROOT",
-        "WSP_REMOTE_JOB_ROOT",
-        "WSP_REMOTE_PYTHON_PATH",
-        "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT",
-    )
-    return all(os.environ.get(key) for key in required)
+    from app.remote_execution.profile import RemoteProfile
+
+    try:
+        RemoteProfile.from_env(settings)
+        return True
+    except Exception:
+        return False
 
 
 def coordinate_orphaned_remote_runs(

@@ -16,19 +16,14 @@ from app.remote_execution.executor import RemoteExecutorProbe
 
 
 def mark_stale_running_runs_interrupted(session: Session) -> int:
-    statement = (
-        update(AnalysisRunModel)
-        .where(AnalysisRunModel.status == "running")
-        .values(
-            status="interrupted",
-            error_type="ANALYSIS_INTERRUPTED",
-            error_message="Previous local analysis process ended before platform restart.",
-            finished_at=datetime.now(timezone.utc),
-        )
-    )
-    result = session.execute(statement)
-    session.commit()
-    return int(result.rowcount or 0)
+    """Interrupt stale ``local_cpu`` running runs only.
+
+    Remote ``remote_gpu`` runs are never blindly interrupted here; they are
+    re-coordinated at startup (see ``remote_execution.recovery``).
+    """
+    from app.remote_execution.recovery import mark_stale_local_cpu_runs_interrupted
+
+    return mark_stale_local_cpu_runs_interrupted(session)
 
 
 class AnalysisService:
