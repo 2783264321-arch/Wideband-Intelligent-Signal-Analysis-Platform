@@ -147,6 +147,12 @@ def _validate_manifest_consistency(
         raise _remote_invalid("Remote package label space does not match the Recording.")
     if manifest.execution.executor != "remote_gpu":
         raise _remote_invalid("Remote package execution executor is not remote_gpu.")
+    if manifest.execution.device != "cuda:0":
+        raise _remote_invalid("Remote package execution device is not cuda:0.")
+    if manifest.execution.environment is not None:
+        raise _remote_invalid("Remote package execution environment must be null.")
+    if manifest.parameters != {}:
+        raise _remote_invalid("Remote package parameters must be empty.")
     if manifest.recording.name != recording.name:
         raise _remote_invalid("Remote package recording name does not match the Recording.")
     if manifest.recording.dataset != recording.dataset_name:

@@ -129,7 +129,7 @@ def _write_analysis_result_zip(tmp_path, *, manifest_overrides=None, detection_o
         "pipeline": {"id": "pipeline_x", "name": "Pipeline X", "version": "1.0"},
         "label_space": "spacenet_14",
         "recording": {"name": "r", "dataset": "SpaceNet"},
-        "execution": {"executor": "remote_gpu", "device": "GPU", "environment": "autodl"},
+        "execution": {"executor": "remote_gpu", "device": "cuda:0", "environment": None},
         "results": {"detections": "detections.json"},
         "parameters": {},
     }, manifest_overrides)
@@ -383,6 +383,29 @@ def test_manifest_consistency_mismatch(session, tmp_path, settings, manifest_ove
         ingest_remote_result(session, "run_r", envelope, zip_path, writer)
     assert exc.value.code == "REMOTE_RESULT_INVALID"
     assert writer.persist_calls == 0
+
+
+@pytest.mark.parametrize("manifest_override", [
+    {"execution": {"device": "cuda:1"}},
+    {"execution": {"environment": "autodl"}},
+    {"parameters": {"x": 1}},
+])
+def test_frozen_package_contract_mismatch(session, tmp_path, settings, manifest_override):
+    """The frozen remote package contract (device=cuda:0, environment=None,
+    parameters={}) must be enforced by the ingestor."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(tmp_path, manifest_overrides=manifest_override)
+    run = _seed_remote_run(session, status="running")
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+    assert _detections(session) == []
+    assert run.status == "running"
 
 
 def test_confidence_validity_reused(session, tmp_path, settings):
