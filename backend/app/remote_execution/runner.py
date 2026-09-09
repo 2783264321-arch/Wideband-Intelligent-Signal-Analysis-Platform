@@ -587,20 +587,14 @@ def _default_spawn_worker(job_root: Path) -> Callable[[str], None]:
 
 
 def _cli_probe(args: argparse.Namespace) -> int:
-    # Task 10 owns runtime/assets verification. Fail closed until it exists.
-    # The future verifier import stays LAZY and inside this handler only.
-    try:
-        from app.remote_execution.assets import verify_asset_manifest  # noqa: F401
-        from app.remote_execution.resolver import resolve_space_net  # noqa: F401
-    except ImportError:
-        raise PlatformError(
-            "REMOTE_PROBE_UNAVAILABLE",
-            "runtime/assets verification is not available until Task 10.",
-        )
-    raise PlatformError(
-        "REMOTE_PROBE_UNAVAILABLE",
-        "runtime/assets verification is not available until Task 10.",
-    )
+    # Lazy imports stay INSIDE this handler so importing runner.py remains
+    # GPU-library-free. run_probe verifies readiness without loading models.
+    from app.remote_execution.probe import run_probe
+    from app.remote_execution.worker_context import RemoteWorkerContext
+    worker = RemoteWorkerContext.from_env()
+    response = run_probe(worker)
+    print(response.model_dump_json())
+    return 0
 
 
 def _cli_submit(args: argparse.Namespace) -> int:
