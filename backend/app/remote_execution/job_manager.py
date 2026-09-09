@@ -70,6 +70,10 @@ class RemoteGpuJobManager:
             raise PlatformError("REMOTE_SUBMIT_FAILED", "Local request file does not match the supplied batch.")
         remote_request_path = self.profile.remote_job_root / "incoming" / f"{batch.batch_id}.request.json"
         try:
+            # Preflight BEFORE any SCP/SSH side effect. A missing/invalid worker
+            # deployment raises RemoteTransportError -> mapped below to a safe
+            # PlatformError so the Coordinator never sees a raw transport error.
+            self.transport.validate_runner_environment("submit")
             self.transport.upload_file(request_json_path, remote_request_path)
             self.transport.run_runner("submit", ("--request-path", remote_request_path.as_posix()))
         except RemoteRunnerExit as exc:

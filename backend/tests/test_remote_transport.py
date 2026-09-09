@@ -14,7 +14,7 @@ from app.remote_execution.schema import (
     RemoteExecutionItemV1,
     RemoteRecordingRefV1,
 )
-from app.remote_execution.transport import SshRunner
+from app.remote_execution.transport import RemoteTransportError, SshRunner
 
 
 def _ok(*, stdout="", stderr=""):
@@ -59,6 +59,14 @@ class EnvelopeOnlyRecorder:
         return _ok()
 
 
+_FULL_ASSETS = {
+    "detector_checkpoint": PurePosixPath("/root/models/best.pt"),
+    "frn_checkpoint": PurePosixPath("/root/models/frn.pt"),
+    "frozen_config": PurePosixPath("/root/models/frozen_config.json"),
+    "ls_stft_normalization": PurePosixPath("/root/models/ls_stft_normalization.json"),
+}
+
+
 def _profile(tmp_path):
     key = tmp_path / "id_ed25519"
     key.write_bytes(b"key")
@@ -76,7 +84,7 @@ def _profile(tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+        asset_paths=dict(_FULL_ASSETS),
     )
 
 
@@ -97,7 +105,7 @@ def _profile_env(tmp_path, monkeypatch, **overrides):
         "WSP_REMOTE_PYTHON_PATH": "/opt/wsp-runtime/bin/python",
         "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT": "a" * 40,
         "WSP_REMOTE_DATASET_ROOTS_JSON": json.dumps({"SpaceNet": "/root/autodl-tmp/SpaceNet_Dataset"}),
-        "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({"detector_checkpoint": "/root/models/best.pt"}),
+        "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({k: v.as_posix() for k, v in _FULL_ASSETS.items()}),
     }
     env.update(overrides)
     for name, value in env.items():
@@ -158,7 +166,7 @@ def test_profile_loads_from_complete_env(tmp_path, monkeypatch, settings):
     assert profile.remote_repo_root == PurePosixPath("/root/repo")
     assert profile.remote_job_root == PurePosixPath("/root/jobs")
     assert profile.dataset_roots == {"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")}
-    assert profile.asset_paths == {"detector_checkpoint": PurePosixPath("/root/models/best.pt")}
+    assert profile.asset_paths == _FULL_ASSETS
 
 
 def test_profile_missing_host_fails(tmp_path, monkeypatch, settings):
@@ -308,7 +316,7 @@ def test_ssh_runner_argv_env_prefix_uses_remote_repo_root(tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+        asset_paths=dict(_FULL_ASSETS),
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -327,10 +335,12 @@ def test_ssh_runner_argv_env_before_python3(tmp_path):
     env_idx = argv.index("env")
     assert argv[env_idx + 1] == "PYTHONPATH=/root/repo/backend"
     assert argv[env_idx + 2] == "WSP_REMOTE_JOB_ROOT=/root/jobs"
-    assert argv[env_idx + 3] == profile.remote_python_path.as_posix()
-    assert argv[env_idx + 4] == "-m"
-    assert argv[env_idx + 5] == "app.remote_execution.runner"
-    assert argv[env_idx + 6] == "submit"
+    env_segment = argv[env_idx + 1:]
+    python_idx = env_segment.index(profile.remote_python_path.as_posix())
+    assert python_idx > 2
+    assert env_segment[python_idx + 1] == "-m"
+    assert env_segment[python_idx + 2] == "app.remote_execution.runner"
+    assert env_segment[python_idx + 3] == "submit"
 
 
 def test_ssh_runner_argv_exact_ordered_segment(tmp_path):
@@ -383,7 +393,7 @@ def test_ssh_runner_argv_uses_custom_remote_python(tmp_path):
         remote_python_path=PurePosixPath("/srv/runtime/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+        asset_paths=dict(_FULL_ASSETS),
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -410,7 +420,7 @@ def test_ssh_runner_argv_uses_custom_job_root(tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths={"detector_checkpoint": PurePosixPath("/root/models/best.pt")},
+        asset_paths=dict(_FULL_ASSETS),
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -823,3 +833,273 @@ def test_status_duplicate_item_key_fails(tmp_path):
     with pytest.raises(PlatformError) as exc:
         manager.status("batch_x")
     assert exc.value.code == "REMOTE_STATUS_UNAVAILABLE"
+
+
+# ----------------------- TASK 12F-B TASK 1: scalar worker env bridge
+
+
+def _full_env_tokens(argv):
+    env_idx = argv.index("env")
+    segment = argv[env_idx + 1:]
+    python_idx = segment.index("/opt/wsp-runtime/bin/python")
+    return segment[:python_idx]
+
+
+@pytest.mark.parametrize("subcommand", ["probe", "submit", "work"])
+def test_probe_submit_work_argv_contain_full_scalar_worker_env(tmp_path, subcommand):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    if subcommand == "submit":
+        runner.run_runner("submit", ("--request-path", "/root/jobs/incoming/batch_x.request.json"))
+    elif subcommand == "work":
+        runner.run_runner("work", ("--batch-id", "batch_x", "--job-root", "/root/jobs/batch_x"))
+    else:
+        runner.run_runner("probe")
+    argv, _ = recorder.calls[0]
+    env_tokens = _full_env_tokens(argv)
+    expected = [
+        "PYTHONPATH=/root/repo/backend",
+        "WSP_REMOTE_JOB_ROOT=/root/jobs",
+        "WSP_REMOTE_REPO_ROOT=/root/repo",
+        f"WSP_REMOTE_REQUIRED_RUNTIME_COMMIT={'a' * 40}",
+        "WSP_REMOTE_SPACENET_ROOT=/root/autodl-tmp/SpaceNet_Dataset",
+        "WSP_REMOTE_DETECTOR_CHECKPOINT=/root/models/best.pt",
+        "WSP_REMOTE_FRN_CHECKPOINT=/root/models/frn.pt",
+        "WSP_REMOTE_FROZEN_CONFIG=/root/models/frozen_config.json",
+        "WSP_REMOTE_LS_STFT_NORMALIZATION=/root/models/ls_stft_normalization.json",
+    ]
+    assert env_tokens == expected
+
+
+def test_status_argv_contains_minimal_env_only(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("status", ("--batch-id", "batch_x"))
+    argv, _ = recorder.calls[0]
+    env_tokens = _full_env_tokens(argv)
+    assert env_tokens == [
+        "PYTHONPATH=/root/repo/backend",
+        "WSP_REMOTE_JOB_ROOT=/root/jobs",
+    ]
+    for forbidden in ("WSP_REMOTE_SPACENET_ROOT", "WSP_REMOTE_DETECTOR_CHECKPOINT",
+                      "WSP_REMOTE_FRN_CHECKPOINT", "WSP_REMOTE_FROZEN_CONFIG",
+                      "WSP_REMOTE_LS_STFT_NORMALIZATION"):
+        assert forbidden not in env_tokens
+
+
+def test_status_invokes_ssh_with_missing_asset_mappings(tmp_path):
+    profile = _profile(tmp_path)
+    profile = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={}, asset_paths={},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("status", ("--batch-id", "batch_x"))
+    assert len(recorder.calls) == 1
+
+
+def test_validate_runner_environment_zero_io(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    for subcommand in ("probe", "submit", "work", "status"):
+        runner.validate_runner_environment(subcommand)
+    assert recorder.calls == []
+    # Failure path also performs zero I/O.
+    empty = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={}, asset_paths={},
+    )
+    failing = SshRunner(empty, run_process=recorder)
+    for subcommand in ("probe", "submit", "work"):
+        with pytest.raises(RemoteTransportError):
+            failing.validate_runner_environment(subcommand)
+    assert recorder.calls == []
+
+
+def test_validate_runner_environment_full_worker_for_probe_submit_work(tmp_path):
+    profile = _profile(tmp_path)
+    empty = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={}, asset_paths={},
+    )
+    runner = SshRunner(empty, run_process=ProcessRecorder())
+    for subcommand in ("probe", "submit", "work"):
+        with pytest.raises(RemoteTransportError):
+            runner.validate_runner_environment(subcommand)
+
+
+def test_validate_runner_environment_minimal_for_status(tmp_path):
+    profile = _profile(tmp_path)
+    empty = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={}, asset_paths={},
+    )
+    runner = SshRunner(empty, run_process=ProcessRecorder())
+    runner.validate_runner_environment("status")  # must not raise
+
+
+@pytest.mark.parametrize("subcommand", ["probe", "submit"])
+def test_validate_runner_environment_missing_mapping_raises_transport_error(tmp_path, subcommand):
+    profile = _profile(tmp_path)
+    missing_assets = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths={},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(missing_assets, run_process=recorder)
+    with pytest.raises(RemoteTransportError):
+        runner.validate_runner_environment(subcommand)
+    assert recorder.calls == []
+
+
+def test_run_runner_internally_validates_before_ssh(tmp_path):
+    profile = _profile(tmp_path)
+    missing_assets = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths={},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(missing_assets, run_process=recorder)
+    with pytest.raises(RemoteTransportError):
+        runner.run_runner("submit", ("--request-path", "/root/jobs/incoming/batch_x.request.json"))
+    assert recorder.calls == []
+
+
+def test_worker_env_values_round_trip(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("probe")
+    argv, _ = recorder.calls[0]
+    env_tokens = _full_env_tokens(argv)
+    mapping = {token.split("=", 1)[0]: token.split("=", 1)[1] for token in env_tokens}
+    assert mapping["WSP_REMOTE_REPO_ROOT"] == profile.remote_repo_root.as_posix()
+    assert mapping["WSP_REMOTE_JOB_ROOT"] == profile.remote_job_root.as_posix()
+    assert mapping["WSP_REMOTE_SPACENET_ROOT"] == profile.dataset_roots["SpaceNet"].as_posix()
+    assert mapping["WSP_REMOTE_DETECTOR_CHECKPOINT"] == profile.asset_paths["detector_checkpoint"].as_posix()
+    assert mapping["WSP_REMOTE_FRN_CHECKPOINT"] == profile.asset_paths["frn_checkpoint"].as_posix()
+    assert mapping["WSP_REMOTE_FROZEN_CONFIG"] == profile.asset_paths["frozen_config"].as_posix()
+    assert mapping["WSP_REMOTE_LS_STFT_NORMALIZATION"] == profile.asset_paths["ls_stft_normalization"].as_posix()
+    assert mapping["WSP_REMOTE_REQUIRED_RUNTIME_COMMIT"] == profile.required_remote_runtime_commit
+    assert mapping["PYTHONPATH"] == "/root/repo/backend"
+
+
+@pytest.mark.parametrize("subcommand", ["probe", "submit"])
+def test_missing_spacenet_mapping_fails_before_ssh(tmp_path, subcommand):
+    profile = _profile(tmp_path)
+    empty = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={}, asset_paths={},
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(empty, run_process=recorder)
+    with pytest.raises(RemoteTransportError):
+        runner.run_runner(subcommand)
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("missing", ["detector_checkpoint", "frn_checkpoint",
+                                     "frozen_config", "ls_stft_normalization"])
+def test_missing_asset_logical_mapping_fails_before_ssh(tmp_path, missing):
+    profile = _profile(tmp_path)
+    assets = dict(_FULL_ASSETS)
+    assets.pop(missing)
+    partial = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths=assets,
+    )
+    recorder = ProcessRecorder()
+    runner = SshRunner(partial, run_process=recorder)
+    with pytest.raises(RemoteTransportError):
+        runner.run_runner("probe")
+    assert recorder.calls == []
+
+
+def test_no_config_details_leak_in_transport_errors(tmp_path):
+    profile = _profile(tmp_path)
+    empty = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={}, asset_paths={},
+    )
+    runner = SshRunner(empty, run_process=ProcessRecorder())
+    with pytest.raises(RemoteTransportError) as exc:
+        runner.validate_runner_environment("submit")
+    message = str(exc.value)
+    assert "/root" not in message
+    assert "auto.example.com" not in message
+    assert "SpaceNet_Dataset" not in message
+
+
+def test_no_credential_field_in_remote_env(tmp_path):
+    """Only the remote env-assignment segment (after the SSH 'env' token and
+    before the remote python) is inspected for credential leakage. SSH transport
+    arguments (host/user/key/known_hosts) are legitimate and excluded."""
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("probe")
+    argv, _ = recorder.calls[0]
+    env_tokens = _full_env_tokens(argv)
+    values = [token.split("=", 1)[1] for token in env_tokens]
+    assert profile.host not in values
+    assert profile.user not in values
+    assert str(profile.ssh_key_path) not in values
+    assert str(profile.known_hosts_path) not in values
+    names = [token.split("=", 1)[0] for token in env_tokens]
+    for forbidden in ("WSP_REMOTE_HOST", "WSP_REMOTE_USER",
+                      "WSP_REMOTE_SSH_KEY_PATH", "WSP_REMOTE_KNOWN_HOSTS_PATH"):
+        assert forbidden not in names
+
+
+def test_no_json_mapping_in_remote_command(tmp_path):
+    profile = _profile(tmp_path)
+    recorder = ProcessRecorder()
+    runner = SshRunner(profile, run_process=recorder)
+    runner.run_runner("probe")
+    argv, _ = recorder.calls[0]
+    joined = " ".join(argv)
+    assert "WSP_REMOTE_DATASET_ROOTS_JSON" not in joined
+    assert "WSP_REMOTE_ASSET_PATHS_JSON" not in joined

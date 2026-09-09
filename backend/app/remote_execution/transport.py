@@ -13,8 +13,26 @@ import subprocess
 
 from app.core.errors import PlatformError
 from app.remote_execution.profile import RemoteProfile, is_safe_remote_posix_path_text
+from app.remote_execution.worker_context import (
+    ENV_DETECTOR_CHECKPOINT,
+    ENV_FRN_CHECKPOINT,
+    ENV_FROZEN_CONFIG,
+    ENV_JOB_ROOT,
+    ENV_LS_STFT_NORMALIZATION,
+    ENV_REPO_ROOT,
+    ENV_REQUIRED_RUNTIME_COMMIT,
+    ENV_SPACENET_ROOT,
+)
 
 _RUNNER_COMMANDS = ("probe", "submit", "status", "work")
+_FULL_WORKER_ENV_SUBCOMMANDS = ("probe", "submit", "work")
+_REQUIRED_DATASET_LOGICAL_KEYS = ("SpaceNet",)
+_REQUIRED_ASSET_LOGICAL_KEYS = (
+    "detector_checkpoint",
+    "frn_checkpoint",
+    "frozen_config",
+    "ls_stft_normalization",
+)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _FLAG_RE = re.compile(r"^--[A-Za-z0-9_-]+$")
 _RUNNER_ERROR_RE = re.compile(r"^([A-Z][A-Z0-9_]{1,63}): (.+)$")
@@ -122,6 +140,72 @@ class SshRunner:
             raise RemoteTransportError("Remote transport command exited nonzero.")
         return result
 
+    def validate_runner_environment(self, subcommand: str) -> None:
+        """Zero subprocess/network-I/O preflight that this subcommand's required
+        runner env is satisfiable from the ``RemoteProfile``.
+
+        probe/submit/work require the full worker env mappings (SpaceNet root +
+        all four required asset scalars). status requires only the repo/job
+        fields needed for the minimal status env.
+
+        Raises ``RemoteTransportError`` (never raw ``PlatformError`` / never
+        ``RemoteRunnerExit``) on missing/invalid worker mappings so existing
+        consumers fail closed through their current transport-error boundaries.
+        """
+        if subcommand not in _RUNNER_COMMANDS:
+            raise PlatformError(
+                "REMOTE_TRANSPORT_ERROR", f"Runner subcommand '{subcommand}' is not allowed."
+            )
+        for name, value in (
+            ("WSP_REMOTE_REPO_ROOT", self.profile.remote_repo_root),
+            ("WSP_REMOTE_JOB_ROOT", self.profile.remote_job_root),
+        ):
+            if not is_safe_remote_posix_path_text(value.as_posix()):
+                raise RemoteTransportError(
+                    "Remote worker environment is not satisfiable from the configured profile."
+                )
+        if subcommand not in _FULL_WORKER_ENV_SUBCOMMANDS:
+            return
+        spacenet = self.profile.dataset_roots.get(_REQUIRED_DATASET_LOGICAL_KEYS[0])
+        if spacenet is None or not is_safe_remote_posix_path_text(spacenet.as_posix()):
+            raise RemoteTransportError(
+                "Remote worker deployment is missing the SpaceNet dataset root mapping."
+            )
+        for logical_name in _REQUIRED_ASSET_LOGICAL_KEYS:
+            path = self.profile.asset_paths.get(logical_name)
+            if path is None or not is_safe_remote_posix_path_text(path.as_posix()):
+                raise RemoteTransportError(
+                    f"Remote worker deployment is missing required asset mapping '{logical_name}'."
+                )
+
+    def _runner_env_prefix(
+        self,
+        subcommand: str,
+        module_root: PurePosixPath,
+        job_root: PurePosixPath,
+    ) -> list[str]:
+        """Subcommand-specific scalar env bridge. probe/submit/work receive the
+        full worker env; status receives minimal env only."""
+        prefix = [
+            f"PYTHONPATH={module_root.as_posix()}",
+            f"{ENV_JOB_ROOT}={job_root.as_posix()}",
+        ]
+        if subcommand not in _FULL_WORKER_ENV_SUBCOMMANDS:
+            return prefix
+        repo_root = _validate_remote_posix_path(self.profile.remote_repo_root)
+        prefix.extend(
+            [
+                f"{ENV_REPO_ROOT}={repo_root.as_posix()}",
+                f"{ENV_REQUIRED_RUNTIME_COMMIT}={self.profile.required_remote_runtime_commit}",
+                f"{ENV_SPACENET_ROOT}={self.profile.dataset_roots[_REQUIRED_DATASET_LOGICAL_KEYS[0]].as_posix()}",
+                f"{ENV_DETECTOR_CHECKPOINT}={self.profile.asset_paths['detector_checkpoint'].as_posix()}",
+                f"{ENV_FRN_CHECKPOINT}={self.profile.asset_paths['frn_checkpoint'].as_posix()}",
+                f"{ENV_FROZEN_CONFIG}={self.profile.asset_paths['frozen_config'].as_posix()}",
+                f"{ENV_LS_STFT_NORMALIZATION}={self.profile.asset_paths['ls_stft_normalization'].as_posix()}",
+            ]
+        )
+        return prefix
+
     def run_runner(
         self,
         subcommand: str,
@@ -129,6 +213,9 @@ class SshRunner:
     ) -> subprocess.CompletedProcess:
         if subcommand not in _RUNNER_COMMANDS:
             raise PlatformError("REMOTE_TRANSPORT_ERROR", f"Runner subcommand '{subcommand}' is not allowed.")
+        # Defensive internal preflight: a local missing/invalid worker mapping
+        # fails closed BEFORE any SSH invocation.
+        self.validate_runner_environment(subcommand)
         for argument in args:
             if not self._is_safe_runner_token(argument):
                 raise PlatformError("REMOTE_TRANSPORT_ERROR", "Runner argument is not a safe token.")
@@ -143,8 +230,7 @@ class SshRunner:
             *self._ssh_base_argv(),
             self._destination(),
             "env",
-            f"PYTHONPATH={module_root.as_posix()}",
-            f"WSP_REMOTE_JOB_ROOT={job_root.as_posix()}",
+            *self._runner_env_prefix(subcommand, module_root, job_root),
             python_path.as_posix(),
             "-m",
             "app.remote_execution.runner",
