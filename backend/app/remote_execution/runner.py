@@ -256,11 +256,11 @@ def _update_and_persist_item(
             )
         else:
             items.append(existing)
-    updated = RemoteBatchStatusV1(
-        batch_id=status.batch_id,
-        status=status.status,
-        items=items,
-    )
+    # The persisted batch status is the AGGREGATE of the updated item statuses,
+    # so a long-running item reports the batch as "running" (not a stale
+    # "queued" snapshot). The final run_work aggregation remains as
+    # defense-in-depth.
+    updated = _aggregate_status(status.batch_id, items)
     _write_status(job_root, updated)
     return updated
 

@@ -373,6 +373,34 @@ def test_fresh_run_work_completes_item_and_batch(tmp_path):
     assert (result_dir / "analysis_result.zip").is_file()
 
 
+class ObservingExecutor:
+    """Observes the persisted status.json WHILE execution is active."""
+
+    def __init__(self):
+        self.observed_batch = None
+        self.observed_item = None
+
+    def execute(self, item, job_root):
+        status = json.loads((job_root / "status.json").read_text(encoding="utf-8"))
+        self.observed_batch = status["status"]
+        self.observed_item = next(
+            it["status"] for it in status["items"] if it["item_key"] == item.item_key
+        )
+        FakeItemExecutor().execute(item, job_root)
+
+
+def test_run_work_persists_batch_running_status_during_execution(tmp_path):
+    """While an item is executing, the persisted batch status must report
+    'running' (aggregated from the running item), not stale 'queued'."""
+    batch = _make_batch()
+    job_root = _job_root(tmp_path)
+    create_or_attach(batch, job_root)
+    executor = ObservingExecutor()
+    run_work(batch.batch_id, job_root, executor)
+    assert executor.observed_item == "running"
+    assert executor.observed_batch == "running"
+
+
 def test_second_run_work_is_write_once(tmp_path):
     batch = _make_batch()
     job_root = _job_root(tmp_path)
