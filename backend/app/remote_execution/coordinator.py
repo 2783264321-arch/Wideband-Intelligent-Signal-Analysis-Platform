@@ -116,6 +116,28 @@ class Coordinator:
                 return "interrupted"
             return run.status
 
+    def _mark_interrupted_with_runner_error(self, exc: PlatformError) -> str:
+        """Terminal interrupt on a controlled, deterministic runner failure.
+
+        The runner code is a validated uppercase identifier carried in the
+        PlatformError details; no arbitrary stderr is exposed.
+        """
+        from datetime import datetime, timezone
+
+        runner_code = (exc.details or {}).get("runner_code") or "REMOTE_RUNNER_FAILED"
+        message = exc.message or "Remote runner reported a controlled failure."
+        message = message[:500]
+        with self._open_current_session() as session:
+            try:
+                run = self._require_current_fence(session)
+            except _StaleFence:
+                return "interrupted"
+            self._set_status(session, run, status="interrupted",
+                             error_type=runner_code,
+                             error_message=message,
+                             finished_at=datetime.now(timezone.utc))
+            return "interrupted"
+
     def _set_status(self, session, run, *, status, error_type=None, error_message=None,
                     started_at=None, finished_at=None, commit=True) -> None:
         run.status = status
@@ -150,9 +172,12 @@ class Coordinator:
         try:
             self._job_manager.submit(batch, self._request_json_path(batch))
         except PlatformError as exc:
-            if exc.code in {"REMOTE_SUBMIT_FAILED", "REMOTE_TRANSPORT_UNAVAILABLE",
-                            "REMOTE_REQUEST_INVALID"}:
-                # Uncertain submit: reconcile the SAME batch before a terminal decision.
+            runner_code = (exc.details or {}).get("runner_code") if getattr(exc, "details", None) else None
+            if exc.code in {"REMOTE_SUBMIT_FAILED", "REMOTE_TRANSPORT_UNAVAILABLE", "REMOTE_REQUEST_INVALID"}:
+                if runner_code:
+                    # Controlled deterministic submit rejection -> terminal interrupted.
+                    return self._mark_interrupted_with_runner_error(exc)
+                # No runner_code: uncertain submit -> reconcile the SAME batch.
                 pass
             else:
                 raise
@@ -178,7 +203,11 @@ class Coordinator:
             try:
                 remote = self._job_manager.status(batch.batch_id)
             except PlatformError as exc:
+                runner_code = (exc.details or {}).get("runner_code") if getattr(exc, "details", None) else None
                 if exc.code in {"REMOTE_STATUS_UNAVAILABLE", "REMOTE_TRANSPORT_UNAVAILABLE"}:
+                    if runner_code:
+                        # Controlled, deterministic runner failure: terminal interrupted.
+                        return self._mark_interrupted_with_runner_error(exc)
                     polls += 1
                     if self._max_polls is not None and polls >= self._max_polls:
                         return self._read_current_status()
@@ -187,7 +216,10 @@ class Coordinator:
                     continue
                 raise
             status = remote.status
-            # fresh session: fence re-check -> mutate -> close
+            completed = status == "completed"
+            # fresh session: fence re-check -> mutate -> close; for completed, only
+            # set a control-flow result and EXIT the session before finishing.
+            result = None
             with self._open_current_session() as session:
                 try:
                     run = self._require_current_fence(session)
@@ -199,17 +231,23 @@ class Coordinator:
                     self._set_status(session, run, status="running",
                                      started_at=datetime.now(timezone.utc))
                 elif status == "completed":
-                    return self._finish_completed(batch)
+                    result = "completed"
                 elif status == "failed":
                     self._set_status(session, run, status="failed", error_type="ANALYSIS_FAILED",
                                      error_message="Remote analysis failed.",
                                      finished_at=datetime.now(timezone.utc))
-                    return "failed"
+                    result = "failed"
                 elif status == "interrupted":
                     self._set_status(session, run, status="interrupted", error_type="ANALYSIS_INTERRUPTED",
                                      error_message="Remote analysis was interrupted.",
                                      finished_at=datetime.now(timezone.utc))
-                    return "interrupted"
+                    result = "interrupted"
+            if result == "completed":
+                # OUTER session is now closed; download + final ingest happen with
+                # their own short sessions and ZERO sessions open during download.
+                return self._finish_completed(batch)
+            if result in {"failed", "interrupted"}:
+                return result
             polls += 1
             if self._max_polls is not None and polls >= self._max_polls:
                 return self._read_current_status()

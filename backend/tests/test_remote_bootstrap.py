@@ -151,3 +151,52 @@ def test_production_availability_route_available_with_fake_probe(monkeypatch, tm
         availability = service.executor_availability("rec", "zoomspec_yolo26n_aug_combined_frn_v3")
     assert availability.available is True
     assert availability.reason_code is None
+
+
+def test_http_executor_availability_route_available(monkeypatch, tmp_path):
+    """Full HTTP acceptance: create_app wiring -> app.state -> analysis.router ->
+    AnalysisService -> probe, via GET /api/executor-availability."""
+    import json
+    from types import SimpleNamespace
+
+    _set_valid_remote_env(tmp_path, monkeypatch)
+    from app.remote_execution import transport
+
+    probe_payload = json.dumps({
+        "schema_version": 1,
+        "status": "available",
+        "remote_runtime_commit": RUNTIME_COMMIT,
+        "asset_manifest_sha256": MANIFEST_SHA,
+        "device": 0,
+    }).encode("utf-8")
+
+    def fake_run_runner(self, subcommand, args=()):
+        assert subcommand == "probe"
+        return SimpleNamespace(returncode=0, stdout=probe_payload, stderr=b"")
+
+    monkeypatch.setattr(transport.SshRunner, "run_runner", fake_run_runner)
+
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    app = create_app(_repo_settings(tmp_path))
+    with app.state.database.session_factory() as session:
+        from app.recordings.model import RecordingModel
+        session.add(RecordingModel(
+            id="rec_http", name="0", data_path="recordings/0/raw.iq", data_format="complex64_le",
+            sample_rate_hz=1e6, center_frequency_hz=0.0, frequency_low_hz=-5e5, frequency_high_hz=5e5,
+            num_samples=1000, duration_s=0.001, dataset_name="SpaceNet", dataset_split="test",
+            label_space="spacenet_14", source_data_sha256="1" * 64,
+        ))
+        session.commit()
+
+    client = TestClient(app)
+    response = client.get(
+        "/api/executor-availability",
+        params={"recording_id": "rec_http", "pipeline_id": "zoomspec_yolo26n_aug_combined_frn_v3"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["available"] is True
+    assert body["reason_code"] is None

@@ -97,10 +97,8 @@ def _add_run(client, status="pending", token="tok_1"):
 
 
 def test_production_writer_factory_returns_writer(settings):
-    # With a real settings fixture + registry, the factory builds a non-None writer.
-    session_holder = {}
-    calls = []
-
+    # With a real settings fixture + registry, the factory builds a non-None writer
+    # whose .session is exactly the session passed to the factory.
     class FakeSession:
         def __enter__(self):
             return self
@@ -109,11 +107,12 @@ def test_production_writer_factory_returns_writer(settings):
             return False
 
     factory = make_production_writer_factory(settings)
-    session_holder["session"] = FakeSession()
+    session = FakeSession()
     run = SimpleNamespace(id="run_1", pipeline_id="zoomspec_yolo26n_aug_combined_frn_v3")
-    writer = factory(session_holder["session"], run)
+    writer = factory(session, run)
     assert writer is not None
     assert hasattr(writer, "persist")
+    assert writer.session is session
 
 
 def test_completed_ingest_receives_non_none_writer(client, settings):
@@ -122,12 +121,12 @@ def test_completed_ingest_receives_non_none_writer(client, settings):
     jm = FakeJobManager(status_sequence=[_status("completed")])
     ingestor = RecordingIngestor()
 
-    # writer_factory returns a writer bound to the session passed to it.
     writer_holder = {}
 
     def writer_factory(session, run):
         writer_holder["session"] = session
-        return SimpleNamespace(persist=lambda *a, **k: None)
+        writer = SimpleNamespace(session=session)
+        return writer
 
     coord = Coordinator(
         session_factory=client.app.state.database.session_factory,
@@ -143,8 +142,9 @@ def test_completed_ingest_receives_non_none_writer(client, settings):
     assert len(ingestor.calls) == 1
     writer = ingestor.calls[0]["writer"]
     assert writer is not None
-    # Writer is bound to the same session used for fence+ingest.
-    assert writer_holder["session"] is ingestor.calls[0]["writer"].__class__ or True
+    # Writer must be bound to the SAME session passed to writer_factory (the final
+    # fence+ingest+commit session).
+    assert writer.session is writer_holder["session"]
 
 
 def test_completed_cannot_reach_ingest_without_writer(client):
