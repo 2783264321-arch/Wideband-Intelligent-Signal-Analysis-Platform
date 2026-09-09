@@ -254,6 +254,22 @@ class Coordinator:
             # sleep OUTSIDE any DB session
             self._sleep_fn(self._poll_interval)
 
+    def _terminalize_completion_failure(self, *, error_type: str, error_message: str) -> None:
+        """Fenced terminal audit when the local completion phase fails after the
+        remote batch completed. A stale fencing token means another coordinator
+        owns the run: no mutation."""
+        from datetime import datetime, timezone
+
+        with self._open_current_session() as session:
+            try:
+                run = self._require_current_fence(session)
+            except _StaleFence:
+                return
+            self._set_status(session, run, status="interrupted",
+                             error_type=error_type,
+                             error_message=(error_message or "")[:500],
+                             finished_at=datetime.now(timezone.utc))
+
     def _finish_completed(self, batch) -> str:
         from datetime import datetime, timezone
 
@@ -266,8 +282,19 @@ class Coordinator:
         # download OUTSIDE any DB session (may finish even if token rotates during it)
         try:
             dest = self._job_manager.download(batch.batch_id, batch.items[0].item_key, self._workspace())
-        except PlatformError:
-            return "interrupted"  # unrecoverable remote job
+        except PlatformError as exc:
+            # Fenced terminal audit: the run must never be left pending/running.
+            self._terminalize_completion_failure(
+                error_type=exc.code or "REMOTE_RESULT_INVALID",
+                error_message=exc.message or "Remote result download failed.",
+            )
+            return "interrupted"
+        except Exception:
+            self._terminalize_completion_failure(
+                error_type="REMOTE_RESULT_INVALID",
+                error_message="Remote result download failed.",
+            )
+            return "interrupted"
         # FRESH session: re-read current run/fence; if stale, no ingest/terminal mutation.
         with self._open_current_session() as session:
             try:
@@ -276,18 +303,35 @@ class Coordinator:
                 return "interrupted"
             try:
                 envelope = self._parse_envelope(dest / "envelope.json")
-            except PlatformError:
+                if self._writer_factory is not None:
+                    writer = self._writer_factory(session, run)
+                else:
+                    writer = self._writer
+                if writer is None:
+                    # Fenced terminal audit in the SAME fenced session.
+                    self._set_status(session, run, status="interrupted",
+                                     error_type="REMOTE_RESULT_INVALID",
+                                     error_message="Remote completion writer is unavailable.",
+                                     finished_at=datetime.now(timezone.utc))
+                    return "interrupted"
+                # fence + ingest + status commit in the SAME final transaction
+                self._ingest(session, run, envelope, dest / "analysis_result.zip", writer)
+                self._set_status(session, run, status="completed", finished_at=datetime.now(timezone.utc))
+                return "completed"
+            except PlatformError as exc:
+                session.rollback()
+                self._terminalize_completion_failure(
+                    error_type=exc.code or "REMOTE_RESULT_INVALID",
+                    error_message=exc.message,
+                )
                 return "interrupted"
-            if self._writer_factory is not None:
-                writer = self._writer_factory(session, run)
-            else:
-                writer = self._writer
-            if writer is None:
+            except Exception:
+                session.rollback()
+                self._terminalize_completion_failure(
+                    error_type="REMOTE_RESULT_INVALID",
+                    error_message="Remote completion failed.",
+                )
                 return "interrupted"
-            # fence + ingest + status commit in the SAME final transaction
-            self._ingest(session, run, envelope, dest / "analysis_result.zip", writer)
-            self._set_status(session, run, status="completed", finished_at=datetime.now(timezone.utc))
-            return "completed"
 
     def _request_json_path(self, batch):
         import tempfile

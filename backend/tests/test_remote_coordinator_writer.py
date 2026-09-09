@@ -166,3 +166,10 @@ def test_completed_cannot_reach_ingest_without_writer(client):
     # Without a writer_factory, completed ingest must not proceed with writer=None.
     assert coord.run() == "interrupted"
     assert ingestor.calls == []
+    # The run must be audited as interrupted, not left pending/running.
+    from app.analysis.model import AnalysisRunModel
+    with client.app.state.database.session_factory() as session:
+        run = session.get(AnalysisRunModel, "run_x")
+        assert run.status == "interrupted"
+        assert run.error_type is not None
+        assert run.finished_at is not None
