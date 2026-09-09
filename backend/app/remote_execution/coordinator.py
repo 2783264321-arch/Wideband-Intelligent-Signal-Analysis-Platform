@@ -323,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import os
 
+    from app.db.base import load_domain_models
     from app.db.session import Database
     from app.remote_execution.identity import (
         resolve_asset_manifest_sha256,
@@ -335,6 +336,9 @@ def main(argv: list[str] | None = None) -> int:
     database_url = os.environ.get("WSP_DATABASE_URL")
     if not database_url:
         raise SystemExit("WSP_DATABASE_URL is not set")
+    # Cold-start bootstrap: register every ORM model BEFORE the first session use
+    # (the AnalysisRunModel mapper references DetectionResultModel by name).
+    load_domain_models()
     database = Database(database_url)
     with database.session_factory() as session:
         from app.analysis.model import AnalysisRunModel
