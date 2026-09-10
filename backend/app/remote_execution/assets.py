@@ -135,6 +135,14 @@ def load_pipeline_asset_manifest(path: Path) -> PipelineAssetManifest:
     return manifest
 
 
+def load_manifest_for_release(manifest_path: Path, expected_sha256: str) -> PipelineAssetManifest:
+    """Strict load then assert self-hash == expected_sha256 (PIPELINE_ASSET_MISMATCH)."""
+    manifest = load_pipeline_asset_manifest(manifest_path)
+    if manifest.asset_manifest_sha256 != expected_sha256:
+        raise _asset_error("asset manifest self-hash does not match the expected release hash.")
+    return manifest
+
+
 def verify_assets(
     manifest: PipelineAssetManifest,
     asset_paths: dict[str, Path],
