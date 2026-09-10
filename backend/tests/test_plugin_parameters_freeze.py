@@ -70,7 +70,11 @@ class FakeJobManager:
 
 
 class FakeProbe:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
     def availability(self, recording, pipeline, source_data_sha256):
+        self.calls.append((recording.id, pipeline.id))
         return ExecutorAvailabilityRead(
             executor="remote_gpu",
             available=True,
@@ -91,7 +95,11 @@ class FakeLauncher:
 
 
 class FakeStore:
+    def __init__(self) -> None:
+        self.resolve_calls: list[tuple[str, str, str | None]] = []
+
     def resolve(self, plugin_id, plugin_version, requested):
+        self.resolve_calls.append((plugin_id, plugin_version, requested))
         release = SimpleNamespace(
             plugin_id=plugin_id,
             plugin_version=plugin_version,
@@ -158,18 +166,18 @@ def _add_recording(client, recording_id="rec_x"):
         session.commit()
 
 
-def _service(client, *, job_manager=None) -> AnalysisService:
+def _service(client, *, job_manager=None, probe=None, store=None, launcher=None) -> AnalysisService:
     registry = PipelineRegistry([ParamPipeline()])
     session = client.app.state.database.session_factory()
     return AnalysisService(
         session,
         registry,
         job_manager or FakeJobManager(),
-        remote_executor_probe=FakeProbe(),
-        remote_coordinator_launcher=FakeLauncher(),
+        remote_executor_probe=probe or FakeProbe(),
+        remote_coordinator_launcher=launcher or FakeLauncher(),
         identity_resolver=_identity_resolver,
         orchestrator_commit_resolver=lambda project_root: RUN,
-        model_release_store=FakeStore(),
+        model_release_store=store or FakeStore(),
         runtime_commit_config=RUN,
         project_root=Path("/tmp"),
         data_root=Path("/tmp/data"),
@@ -311,3 +319,75 @@ def test_remote_run_with_empty_parameters_keeps_legacy_metadata(client):
         parameters={},
     )
     assert run.execution_metadata_json["parameters"] == {}
+
+
+# ---------------------------------------------------------------------------
+# FIX ROUND 1 — reject non-finite numbers at validation (canonical contract)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_validator_rejects_non_finite_numbers(value):
+    from app.pipelines.plugin import validate_plugin_parameters
+
+    with pytest.raises(PlatformError) as exc:
+        validate_plugin_parameters(ParamPipeline().definition, {"threshold": value})
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+def test_validator_still_accepts_finite_numbers():
+    from app.pipelines.plugin import validate_plugin_parameters
+
+    validate_plugin_parameters(ParamPipeline().definition, {"threshold": 0.5, "label": "x"})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_local_run_rejects_non_finite_parameters_before_worker(client, value):
+    _add_recording(client)
+    job_manager = FakeJobManager()
+    service = _service(client, job_manager=job_manager)
+    with pytest.raises(PlatformError) as exc:
+        service.create_run(
+            recording_id="rec_x",
+            pipeline_id="param_test",
+            executor="local_cpu",
+            parameters={"threshold": value},
+        )
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+    assert job_manager.started == []
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_remote_run_rejects_non_finite_parameters_before_side_effects(client, value):
+    _add_recording(client)
+    probe, store, launcher = FakeProbe(), FakeStore(), FakeLauncher()
+    service = _service(client, probe=probe, store=store, launcher=launcher)
+    with pytest.raises(PlatformError) as exc:
+        service.create_run(
+            recording_id="rec_x",
+            pipeline_id="param_test",
+            executor="remote_gpu",
+            parameters={"threshold": value},
+        )
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+    assert probe.calls == []
+    assert store.resolve_calls == []
+    assert launcher.launches == []
+    with client.app.state.database.session_factory() as session:
+        from app.analysis.model import AnalysisRunModel
+
+        assert session.query(AnalysisRunModel).filter(AnalysisRunModel.executor == "remote_gpu").count() == 0
+
+
+def test_api_rejects_non_finite_number_parameter(client):
+    _add_recording(client)
+    response = client.post(
+        "/api/analysis-runs",
+        content=(
+            '{"recording_id":"rec_x","pipeline_id":"stft_energy_detector",'
+            '"executor":"local_cpu","parameters":{"noise_floor_percentile":NaN}}'
+        ),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "PLUGIN_PARAMETERS_INVALID"

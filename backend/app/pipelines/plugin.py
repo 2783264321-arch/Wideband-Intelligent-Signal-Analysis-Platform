@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -109,6 +110,12 @@ def validate_plugin_parameters(
 
 
 def _validate_parameter_value(name: str, spec: Mapping[str, Any], value: Any) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise PlatformError(
+            "PLUGIN_PARAMETERS_INVALID",
+            f"Parameter '{name}' must be a finite number.",
+        )
+
     expected_type = spec.get("type")
     if expected_type is not None:
         if expected_type not in _SUPPORTED_PARAMETER_TYPES:
