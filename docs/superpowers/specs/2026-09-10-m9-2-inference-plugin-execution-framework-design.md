@@ -123,9 +123,9 @@ The unit of integration. A Plugin is a distribution that declares:
 
 - a stable `plugin_id`;
 - one or more immutable PluginVersions;
-- a `PluginDefinition` (capabilities + metadata, torch-free);
+- a `PluginDefinition` (metadata + declarations, torch-free);
 - a parameter schema;
-- execution capabilities / certification status;
+- technical execution capabilities (no certification claim);
 - zero or more `ModelRelease`s;
 - zero or more `DatasetAdapter` bindings;
 - the scientific implementation modules (heavy imports lazy).
@@ -143,9 +143,11 @@ stages, output semantics, or the parameter schema requires a new PluginVersion.
 ### 5.3 ModelRelease
 
 `(plugin_id, plugin_version, model_release_id)` identifies an immutable set of
-trained weights / config / normalization. A new checkpoint, retrain, fine-tune,
-or normalization change under the same architecture produces a new ModelRelease
-with the same PluginVersion. A ModelRelease **references** the existing
+trained weights / config / normalization. A new checkpoint, retrain, fine-tune, normalization, or config change qualifies
+as a new ModelRelease **only when architecture, algorithm behavior contract,
+parameter contract, and output semantics remain unchanged**. If a config change
+alters network structure, behavior, parameters, or output semantics, it requires
+a new **PluginVersion** instead. A ModelRelease **references** the existing
 immutable AssetManifest V1 by its `asset_manifest_sha256`; it does not alter the
 manifest or its hash payload.
 
@@ -162,10 +164,14 @@ payload; a ModelRelease is a separate record that binds a
 ### 5.5 DatasetAdapter
 
 The only component allowed to read a dataset-specific on-disk layout and map it
-to a platform `RecordingInput`. Plugins and executors never parse dataset files
-directly. A DatasetAdapter verifies the frozen recording identity using the
-**recording's dataset label space** (the label semantics that the dataset itself
-defines).
+to a platform `RecordingInput`. A DatasetAdapter verifies the frozen recording
+identity using the **recording's dataset label space** (the label semantics that
+the dataset itself defines).
+
+A Plugin runtime MAY read the IQ bytes at the already-resolved
+`RecordingInput.data_path` for inference. It MUST NOT itself resolve dataset
+layout, search for dataset files, inspect GroundTruth, or construct
+dataset-specific paths.
 
 ### 5.6 ExecutionCapability (Technical Claim)
 
@@ -237,10 +243,10 @@ without a certificate is not offered as runnable.
 ### 6.2 Request/data flow (remote, generic)
 
 ```text
-create_run(recording, plugin_id, plugin_version, model_release_id, executor, params)
+create_run(recording, plugin_id, plugin_version[, model_release_id], executor, params)
   -> PluginRegistry.get(plugin_id, plugin_version)            # torch-free, lazy
   -> validate params against plugin parameter schema         # torch-free
-  -> resolve ModelRelease + referenced AssetManifest V1      # torch-free
+  -> resolve ModelRelease (explicit or default) + AssetManifest V1  # torch-free
   -> derive runnable executor from platform certificates      # torch-free
   -> check input compatibility vs recording dataset label space
   -> select ExecutorProvider for `executor`
@@ -269,7 +275,7 @@ The platform core never branches on a concrete plugin id. The only mappings from
 | Concern | Owner | Must not do |
 |---|---|---|
 | Plugin identity, definition, parameters, assets, technical capabilities | Plugin author | import torch at control-plane import time; self-declare certification; edit control-plane code |
-| Scientific inference | Plugin runtime (separate inference worker) | read DB, SSH, or dataset files directly; run inside the API process |
+| Scientific inference | Plugin runtime (separate inference worker) | read DB/SSH or resolve dataset layout/GroundTruth; run inside the API process (may read the resolved `RecordingInput.data_path` IQ) |
 | Plugin discovery + validation | Platform `PluginRegistry` | embed plugin-specific constants |
 | ModelRelease + AssetManifest V1 resolution | Platform `ModelReleaseStore` | hardcode asset names or paths; change the V1 hash payload |
 | Certification / runnable derivation | Platform `ExecutionCertificate` store | accept plugin-declared certification |
@@ -470,10 +476,12 @@ the same values.
     `model_release_id`;
   - each asset file byte-hash matches the manifest;
   - the deployed runtime commit matches the required commit.
-- Asset file paths come **exclusively** from deployment configuration on the
-  executor side (validated absolute safe POSIX paths). They are never taken from
-  the wire request, the plugin declaration, the ModelRelease record, or the
-  manifest. The manifest stores logical names + SHA256 only. See §11.4.
+- Asset file paths come **exclusively** from a release/manifest-namespaced
+  deployment mapping keyed at least by `(plugin_id, plugin_version,
+  asset_manifest_sha256, logical_asset_name)` (validated absolute safe POSIX
+  paths). They are never taken from the wire request, the plugin declaration,
+  the ModelRelease record, or the manifest. The manifest stores logical names +
+  SHA256 only. See §11.4.
 
 ### 9.4 Same-architecture retraining rule
 
@@ -489,6 +497,40 @@ This requires release/version-scoped AssetManifest V1 resolution (§9.3) and
 removal of the hardcoded manifest path currently in
 `backend/app/main.py:30-35` and
 `backend/app/remote_execution/worker_context.py:110-114`.
+
+### 9.5 Resolved ModelRelease selection (V1)
+
+Certification, executor availability, compatibility projections, and
+`recommended_executor` are all **release-specific**, so a run must resolve a
+concrete ModelRelease before any of them can be evaluated.
+
+V1 selection rule:
+
+```text
+deployment/platform-owned:
+  default_model_release_id[plugin_id, plugin_version]
+
+create_run(recording, plugin_id, plugin_version[, model_release_id], executor, params)
+  requested_release = explicit model_release_id, if provided
+  resolved_release  = requested_release or default_model_release_id
+  resolved_manifest = ModelRelease(resolved_release).asset_manifest_sha256
+```
+
+Rules:
+
+- The platform owns the per-`(plugin_id, plugin_version)`
+  `default_model_release_id`. A normal UI run uses it.
+- API/advanced callers MAY explicitly request a release; the requested release
+  must exist for that plugin version, else `MODEL_RELEASE_NOT_FOUND`.
+- **All** of executor availability, `certified_capabilities`,
+  `executors_supported` / `recommended_executor` projections, input/output
+  compatibility, and certificate lookup use the **resolved** ModelRelease.
+- Retraining + deployment of new assets/ModelRelease + switching the default is
+  a configuration change; no platform code change is required (§9.4).
+- M9.2 requires **no frontend release-management UI**; the default is sufficient
+  for the UI, and explicit selection is an API-level capability.
+- The resolved `model_release_id` and its `asset_manifest_sha256` are frozen
+  into run provenance.
 
 ---
 
@@ -585,6 +627,11 @@ ExecutorRegistry
 capability is runnable only when it is both technically claimed by the plugin and
 covered by a platform `ExecutionCertificate` for the exact release/executor.
 
+`model_release_id` in `certified_capabilities` and `model_release` in
+`availability` are the **resolved** ModelRelease (§9.5). Callers that have not
+selected a release use the platform default for the plugin version, so executor
+projections and availability are always computed against a concrete release.
+
 ### 11.3 RuntimeDescriptor and public package projection
 
 ```text
@@ -632,12 +679,22 @@ credentials are never exposed.
   path;
 - parsing still fails closed on any missing/unsafe field.
 
-**Trusted path mapping.** The logical-asset-name -> absolute-path mapping comes
-exclusively from validated deployment configuration (operator-owned env/config
-on the executor host). It is never derived from the wire request, the plugin
-declaration, the ModelRelease record, or the AssetManifest V1. The platform
-MUST NOT dynamically trust a path value received over the wire. The manifest
-carries logical names + SHA256 only.
+**Trusted path mapping (release/manifest-namespaced).** There is no global
+logical-name -> path map. Deployment configuration provides a namespaced mapping
+keyed at least by:
+
+```text
+(plugin_id, plugin_version, asset_manifest_sha256, logical_asset_name) -> absolute path
+```
+
+or an equivalent manifest-scoped structure. This prevents collisions when
+different plugins (or different ModelReleases of one PluginVersion) reuse logical
+asset names such as `detector_checkpoint`. The mapping comes exclusively from
+validated deployment configuration (operator-owned env/config on the executor
+host). It is never derived from the wire request, the plugin declaration, the
+ModelRelease record, or the AssetManifest V1. The platform MUST NOT dynamically
+trust a path value received over the wire. The manifest carries logical names +
+SHA256 only.
 
 **Readiness probe.** Executor readiness is probed per `RuntimeDescriptor`; the
 platform MUST NOT assume any device is always ready. A `local_cpu`/`local_gpu`
@@ -940,6 +997,9 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
   provenance, while the referenced AssetManifest V1 hash payload is unchanged.
 - Runnable executors are derived from platform-owned certificates, never from a
   plugin-declared boolean.
+- A `(plugin_id, plugin_version)` default ModelRelease resolves when the caller
+  gives no explicit release; executor availability, capability projections, and
+  certificate lookup use that resolved release.
 - The remote `ItemExecutor` is resolved through the registry; no ZoomSpec
   literal dispatch remains.
 - `RuntimeDescriptor` replaces all `cuda:0` / device-0 hardcodes in probe,
@@ -983,11 +1043,13 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
 | M9.2C | `DatasetAdapter` boundary + input-compatibility/output-label-space split + generic remote recording resolver + parameter freeze replacing the hardcoded empty parameters. | A, B |
 | M9.2D | `ExecutorRegistry` + `RuntimeDescriptor` + platform-owned `ExecutionCertificate` store + device resolution replacing `cuda:0`/device-0; separate local inference worker runtime; descriptor-driven availability probe. | A, B, C |
 | M9.2E | ZoomSpec golden migration into the framework; seed golden ModelRelease referencing the unchanged manifest; preserve all scientific/golden tests; record CPU as technically feasible / not certified. | A–D |
-| M9.2F | Second real pipeline gate (CPN-only/YOLO baseline, `cpn_bandwidth_tier_v1` output) implemented CPU-only; no live GPU required. | E |
+| M9.2F | Second real pipeline gate (CPN-only/YOLO baseline, `cpn_bandwidth_tier_v1` output). Development/tests are no-card; the plugin declares the required `remote_gpu` technical capability and is exercised through `remote_gpu` only in the consolidated final live GPU gate (§21.1). | E |
 
 Dependency order: **A → B → C → D → E → F.** Each subtask is independently
-testable; no subtask alone may claim multi-model genericity. A–F default to
-CPU-only / no-card development.
+testable; no subtask alone may claim multi-model genericity. Development and
+tests for A–F are no-card; plugins still declare their real technical
+capabilities (for CPN-only, `remote_gpu`), which are exercised on GPU only in the
+consolidated final live gate (§21.1).
 
 ### 21.1 Final Live GPU Acceptance Gate (consolidated, after A–F)
 
@@ -1029,7 +1091,10 @@ Rules:
 | Input and output label spaces conflated | Separate `input_compatibility` and `output_label_space`; CPN-only gate proves it |
 | Device descriptor spoofing in results | Ingest validates against the run's persisted descriptor, not literals |
 | Private runtime info or paths leak into the public package | Frozen projection (`executor`, `device`, non-sensitive `environment`); full descriptor internal |
-| Trusted asset path injection | Paths from validated deployment config only; wire carries logical names |
+| Trusted asset path injection | Release/manifest-namespaced mapping from validated deployment config only; wire carries logical names |
+| Asset logical-name collision across plugins/releases | Namespace paths by `(plugin_id, plugin_version, asset_manifest_sha256, logical_asset_name)` |
+| Executor projection evaluated before a release is known | Per-version platform default ModelRelease; all projections use the resolved release |
+| Config change wrongly shipped as a ModelRelease | ModelRelease only when architecture/behavior/params/output semantics unchanged; else new PluginVersion |
 | Generalizing provenance weakens identity checks | Keep all M9.1 checks; add Release checks additively; regression tests |
 | Plugin discovery reintroduces control-plane edits | Declarative module-path config / entry points; test that a plugin needs no core edit |
 | Refactoring remote dispatch breaks M9.1 | Mandatory full remote regression suite; incremental migration; single live gate |
@@ -1071,8 +1136,12 @@ Rules:
    API process never imports torch.
 10. Input compatibility uses the recording's dataset label space;
     DetectionResult validation uses the plugin's output label space.
-11. Dataset access happens only through a DatasetAdapter.
+11. Dataset access/layout resolution happens only through a DatasetAdapter; a
+    Plugin runtime may read the resolved `RecordingInput.data_path` IQ.
 12. Device selection happens only through a RuntimeDescriptor.
-13. Trusted asset paths come only from validated deployment configuration.
-14. Legacy version/task identities remain valid; new plugins are recommended to
+13. Trusted asset paths come only from a release/manifest-namespaced deployment
+    mapping; wire values are never trusted as paths.
+14. Every run resolves a concrete ModelRelease (explicit or platform default);
+    availability and executor projections are release-specific.
+15. Legacy version/task identities remain valid; new plugins are recommended to
     use SemVer, not required.
