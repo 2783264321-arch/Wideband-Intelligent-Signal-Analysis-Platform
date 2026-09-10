@@ -1,4 +1,4 @@
-import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, getExecutorAvailability } from "./client";
+import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, getExecutorAvailability, listPipelines } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -88,6 +88,72 @@ test("getExecutorAvailability maps the backend availability contract", async () 
   expect(result.reasonCode).toBeNull();
   expect(result.remoteProfile).toBe("autodl_primary");
   expect(result.recommended).toBe(true);
+});
+
+test("listPipelines maps the wire capability contract into the camelCase domain model", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    expect(url).toContain("/api/pipelines");
+    return new Response(JSON.stringify([
+      {
+        id: "zoomspec_yolo26n_aug_combined_frn_v3",
+        name: "ZoomSpec",
+        version: "1.0.0",
+        label_space: "spacenet_14",
+        recommended_device: "GPU",
+        cpu_supported: false,
+        executors_supported: ["remote_gpu"],
+        recommended_executor: "remote_gpu",
+        stages: ["ls_stft"],
+        inspectable_stages: [],
+        task_capability: "detection_classification",
+        plugin_api_version: 1,
+        output_label_space: "spacenet_14",
+        input_compatibility: ["spacenet_14"],
+        dataset_adapters: ["SpaceNet"],
+        model_release_required: true,
+        technical_execution_capabilities: [
+          { executor: "remote_gpu", device_type: "cuda", precision: "float16" },
+        ],
+        recommended_execution: "remote_gpu",
+      },
+    ]));
+  }));
+
+  const [pipeline] = await listPipelines();
+  expect(pipeline.labelSpace).toBe("spacenet_14");
+  expect(pipeline.pluginApiVersion).toBe(1);
+  expect(pipeline.outputLabelSpace).toBe("spacenet_14");
+  expect(pipeline.inputCompatibility).toEqual(["spacenet_14"]);
+  expect(pipeline.datasetAdapters).toEqual(["SpaceNet"]);
+  expect(pipeline.modelReleaseRequired).toBe(true);
+  expect(pipeline.technicalExecutionCapabilities).toEqual([
+    { executor: "remote_gpu", deviceType: "cuda", precision: "float16" },
+  ]);
+  expect(pipeline.recommendedExecution).toBe("remote_gpu");
+});
+
+test("listPipelines tolerates a legacy backend without capability fields", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([
+    {
+      id: "dummy",
+      name: "Dummy Pipeline",
+      version: "1.0",
+      label_space: "spacenet_14",
+      recommended_device: "CPU",
+      cpu_supported: true,
+      executors_supported: ["local_cpu"],
+      recommended_executor: "local_cpu",
+      stages: [],
+      inspectable_stages: [],
+      task_capability: "classification",
+    },
+  ]))));
+
+  const [pipeline] = await listPipelines();
+  expect(pipeline.pluginApiVersion).toBeUndefined();
+  expect(pipeline.outputLabelSpace).toBeUndefined();
+  expect(pipeline.technicalExecutionCapabilities).toBeUndefined();
+  expect(pipeline.labelSpace).toBe("spacenet_14");
 });
 
 test("createAnalysisRun forwards the requested executor", async () => {

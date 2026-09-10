@@ -76,17 +76,17 @@ export interface PipelineDefinition {
   stages: string[];
   inspectableStages: string[];
   taskCapability: string;
-  plugin_api_version?: number;
-  output_label_space?: string;
-  input_compatibility?: string[];
-  dataset_adapters?: string[];
-  model_release_required?: boolean;
-  technical_execution_capabilities?: {
+  pluginApiVersion?: number;
+  outputLabelSpace?: string;
+  inputCompatibility?: string[];
+  datasetAdapters?: string[];
+  modelReleaseRequired?: boolean;
+  technicalExecutionCapabilities?: {
     executor: string;
-    device_type: string;
+    deviceType: string;
     precision: string;
   }[];
-  recommended_execution?: string | null;
+  recommendedExecution?: string | null;
 }
 
 export type AnalysisRunStatus = "pending" | "running" | "completed" | "failed" | "interrupted";

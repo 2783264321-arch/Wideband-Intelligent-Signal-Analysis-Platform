@@ -259,6 +259,17 @@ interface PipelineDefinitionWire {
   stages: string[];
   inspectable_stages: string[];
   task_capability: string;
+  plugin_api_version?: number;
+  output_label_space?: string;
+  input_compatibility?: string[];
+  dataset_adapters?: string[];
+  model_release_required?: boolean;
+  technical_execution_capabilities?: {
+    executor: string;
+    device_type: string;
+    precision: string;
+  }[];
+  recommended_execution?: string | null;
 }
 
 interface AnalysisRunWire {
@@ -313,6 +324,17 @@ export async function listPipelines(): Promise<import("./types").PipelineDefinit
     stages: item.stages,
     inspectableStages: item.inspectable_stages,
     taskCapability: item.task_capability,
+    pluginApiVersion: item.plugin_api_version,
+    outputLabelSpace: item.output_label_space,
+    inputCompatibility: item.input_compatibility,
+    datasetAdapters: item.dataset_adapters,
+    modelReleaseRequired: item.model_release_required,
+    technicalExecutionCapabilities: item.technical_execution_capabilities?.map((capability) => ({
+      executor: capability.executor,
+      deviceType: capability.device_type,
+      precision: capability.precision,
+    })),
+    recommendedExecution: item.recommended_execution,
   }));
 }
 
