@@ -16,6 +16,8 @@ never affect ``request_sha256``.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
 from uuid import uuid4
 
 from app.remote_execution.canonical import compute_request_sha256
@@ -114,6 +116,7 @@ def freeze_request_provenance(
     asset_manifest_sha256,
     remote_profile,
     model_release_id=None,
+    parameters: Mapping[str, Any] | None = None,
     id_factory=None,
 ) -> dict:
     """Pure provenance construction. Returns the FROZEN REQUEST METADATA dict.
@@ -141,7 +144,7 @@ def freeze_request_provenance(
         "dataset_split": dataset_split,
         "dataset_key": dataset_key,
         "label_space": label_space,
-        "parameters": {},
+        "parameters": dict(parameters) if parameters else {},
     }
     batch = build_batch(metadata)
     metadata["request_sha256"] = batch.request_sha256

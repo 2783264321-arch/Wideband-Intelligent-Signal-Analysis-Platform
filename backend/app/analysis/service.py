@@ -10,6 +10,7 @@ from app.analysis.job_manager import LocalJobManager
 from app.analysis.model import AnalysisRunModel
 from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.errors import PlatformError
+from app.pipelines.plugin import validate_plugin_parameters
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
 from app.remote_execution.executor import RemoteExecutorProbe
@@ -143,6 +144,10 @@ class AnalysisService:
         pipeline = self.registry.get(pipeline_id)
         definition = pipeline.definition
 
+        # The plugin's own parameter schema decides validity; no plugin-specific
+        # parameter branch lives in the control plane.
+        validate_plugin_parameters(definition, parameters)
+
         if executor == "remote_gpu":
             return self._create_remote_gpu_run(recording, definition, parameters, model_release_id)
 
@@ -188,12 +193,6 @@ class AnalysisService:
 
         if "remote_gpu" not in definition.executors_supported:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Selected pipeline does not support remote GPU execution.")
-        # ZoomSpec frozen pipeline accepts only empty parameters.
-        if parameters:
-            raise PlatformError(
-                "PARAMETERS_NOT_SUPPORTED",
-                "The frozen ZoomSpec pipeline does not accept parameters.",
-            )
         if recording.label_space != definition.label_space:
             raise PlatformError("PIPELINE_INCOMPATIBLE", "Selected pipeline cannot run for this recording label space.")
 
@@ -240,6 +239,7 @@ class AnalysisService:
             asset_manifest_sha256=asset_manifest_sha256,
             remote_profile=availability.remote_profile or "remote",
             model_release_id=frozen_model_release_id,
+            parameters=parameters,
         )
         final_metadata = build_coordinator_metadata(frozen_metadata)
         coordinator_token = final_metadata["coordinator_token"]
@@ -251,7 +251,7 @@ class AnalysisService:
             pipeline_version=definition.version,
             executor="remote_gpu",
             status="pending",
-            parameters_json={},
+            parameters_json=dict(parameters),
             execution_metadata_json=final_metadata,
         )
         self.session.add(run)

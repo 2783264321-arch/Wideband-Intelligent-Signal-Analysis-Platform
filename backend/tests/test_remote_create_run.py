@@ -173,14 +173,14 @@ def test_remote_create_run_does_not_reject_cpu_supported_true(client):
     assert launcher.launches == [(run.id, run.execution_metadata_json["coordinator_token"])]
 
 
-def test_remote_create_run_rejects_non_empty_frozen_parameters(client):
+def test_remote_create_run_rejects_parameters_not_in_plugin_schema(client):
     _add_recording(client)
     launcher = FakeLauncher()
     service = _service(client, probe=FakeProbe(available=True), launcher=launcher,
                        pipeline_cls=RemoteCapablePipeline)
     with pytest.raises(PlatformError) as exc:
         service.create_run(recording_id="rec_x", pipeline_id="remote_test", executor="remote_gpu", parameters={"foo": 1})
-    assert exc.value.code in {"PIPELINE_INCOMPATIBLE", "PARAMETERS_NOT_SUPPORTED"}
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
     assert launcher.launches == []
 
 
