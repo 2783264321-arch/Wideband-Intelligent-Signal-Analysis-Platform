@@ -22,7 +22,9 @@
 - ModelRelease records referencing the **unchanged** AssetManifest V1 hash; release-scoped resolution and default-release selection.
 - DatasetAdapter boundary and generic recording resolver.
 - ExecutorRegistry + RuntimeDescriptor + platform-owned ExecutionCertificate; descriptor-driven probe and package projection.
-- Generic `PluginItemExecutor` + runner registry seam; separate local inference worker runtime boundary.
+- Generic `PluginItemExecutor` + runner registry seam; plugin-native local inference worker sharing the same Plugin/ModelRelease/`PluginRuntime` contract (transport/lifecycle differ only).
+- Unified runtime factory contract `PluginHandle.load_runtime(*, assets, runtime_descriptor, output_label_space)`.
+- `runtime_ref`-bound execution certificates (remote commit-bound; local immutable generation).
 - ZoomSpec golden plugin migration (scientific semantics unchanged) + CPU feasibility status recorded, not certified.
 - CPN-only/YOLO bandwidth-tier second plugin proving plugin-only integration.
 
@@ -57,6 +59,7 @@
 | `backend/app/datasets/adapter.py` | C | `DatasetAdapter`, `ResolvedRecordingInput`, `DatasetAdapterRegistry` |
 | `backend/app/remote_execution/runtime.py` | D | `RuntimeDescriptor`, `ExecutionCertificate`, `ExecutionCertificateStore`, `ExecutorProvider`, `ExecutorRegistry` |
 | `backend/app/analysis/local_executor.py` | D | `LocalInferenceWorkerProvider` (separate worker process) |
+| `backend/app/analysis/local_inference_worker.py` | D | generic plugin-native local worker entrypoint |
 | `backend/app/remote_execution/plugin_executor.py` | D | generic `PluginItemExecutor` |
 | `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/plugin.py` | E | ZoomSpec `PLUGIN` + lazy runtime factory |
 | `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/model_releases/golden.json` | B | golden ModelRelease record (references existing manifest) |
@@ -81,7 +84,7 @@
 | `backend/app/remote_execution/canonical.py` | B | omit `None` optional fields so legacy request SHA stays byte-exact |
 | `backend/app/remote_execution/identity.py` | B | manifest hash by (plugin, release) |
 | `backend/app/main.py` | B | manifest/release path wiring (no ZoomSpec literal) |
-| `backend/app/core/config.py` | D | `local_cpu_python_path`, `local_gpu_python_path`, `local_inference_work_root` |
+| `backend/app/core/config.py` | D | local interpreter paths, local runtime generation refs, local asset paths, work root |
 | `backend/app/remote_execution/resolver.py` | C | delegate `resolve_space_net` to `DatasetAdapterRegistry` |
 | `backend/app/analysis/service.py` | C/D | parameter validation, input compatibility, capability dispatch, resolved release |
 | `backend/app/remote_execution/validation.py` | C | label validation via `resolved_output_label_space` |
@@ -113,6 +116,7 @@
 | `backend/tests/test_executor_registry.py` | D |
 | `backend/tests/test_plugin_executor.py` | D |
 | `backend/tests/test_local_worker_provider.py` | D |
+| `backend/tests/test_local_inference_worker.py` | D |
 | `backend/tests/test_zoomspec_plugin.py` | E |
 | `backend/tests/test_cpn_bandwidth_tier_plugin.py` | F |
 | `backend/tests/test_no_plugin_id_in_control_plane.py` | F |
@@ -131,18 +135,26 @@
 
 ## TASK 0 — Record baselines (no code commit)
 
-**Goal:** Freeze the reference values every later task must not move.
+**Goal:** Freeze the reference values every later task must not move, without
+depending on a plan-revision SHA that will always be stale by execution time.
 
 Steps:
-1. Confirm HEAD is `28f12dd` and working tree clean (`git status --short`, `git rev-parse HEAD`).
-2. Record golden manifest hash:
+1. Record the execution start SHA dynamically:
+   `IMPLEMENTATION_START_SHA="$(git rev-parse HEAD)"`.
+2. Assert no production code changed between the approved architecture baseline
+   `28f12dd30587e68e742c788b27271376737f86d0` and `IMPLEMENTATION_START_SHA`:
+   `git diff --name-only 28f12dd30587e68e742c788b27271376737f86d0.."$IMPLEMENTATION_START_SHA"`
+   MUST contain only `docs/**` paths (the M9.2 spec and plan). Any production
+   path (backend/frontend/tests/label_spaces/scripts) appearing here is a
+   stop-and-escalate condition.
+3. Record golden manifest hash:
    `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -c "from pathlib import Path; from app.remote_execution.assets import load_pipeline_asset_manifest; m=load_pipeline_asset_manifest(Path('backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/asset_manifest.json')); print(m.asset_manifest_sha256)"`
    Expected: `16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08`.
-3. Record the **legacy request hash fixture** used by B3. From a fresh interpreter compute:
-   `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -c "from app.remote_execution.request_builder import freeze_request_provenance; m=freeze_request_provenance(local_run_id='run_fixture', recording_fingerprint='a'*64, source_data_sha256='b'*64, dataset_name='SpaceNet', dataset_split='test', dataset_key='0', label_space='spacenet_14', pipeline_id='zoomspec_yolo26n_aug_combined_frn_v3', pipeline_version='1.0.0', required_remote_runtime_commit='c'*40, orchestrator_commit='d'*40, asset_manifest_sha256='16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08', remote_profile='remote', id_factory=lambda: 'id_fixture'); print(m['request_sha256'])"`
+4. Record the **legacy request hash fixture** used by B3. From a fresh interpreter compute:
+   `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -c "from app.remote_execution.request_builder import freeze_request_provenance; m=freeze_request_provenance(local_run_id='run_fixture', recording_fingerprint='a'*64, source_data_sha256='b'*64, dataset_name='SpaceNet', dataset_split='test', dataset_key='0', label_space='spacenet_14', pipeline_id='zoomspec_yolo26n_aug_combined_frn_v3', pipeline_version='1.0.0', required_remote_runtime_commit='5bb5be4b04d04a071bc9d8f4f61172595ecee037', orchestrator_commit='d'*40, asset_manifest_sha256='16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08', remote_profile='remote', id_factory=lambda: 'id_fixture'); print(m['request_sha256'])"`
    Record the printed 64-hex value as `LEGACY_REQUEST_SHA256`. B3 MUST assert this value is unchanged after the wire change.
-4. Run full backend suite and frontend suite; record pass counts.
-5. Confirm `python -c "import sys; import app.pipelines.registry; assert 'torch' not in sys.modules"` from `PYTHONPATH=backend/.venv` passes.
+5. Run full backend suite and frontend suite; record pass counts.
+6. Confirm `python -c "import sys; import app.pipelines.registry; assert 'torch' not in sys.modules"` from `PYTHONPATH=backend/.venv` passes.
 
 **No commit.**
 
@@ -255,10 +267,13 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_p
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TYPE_CHECKING
+from typing import Any, Mapping, Protocol, TYPE_CHECKING
 
 from app.core.errors import PlatformError
 from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, RecordingInput, PLUGIN_API_VERSION
+
+# Resolved, verified logical-asset-name -> absolute local path (executor-owned).
+RuntimeAssets = Mapping[str, Path]
 
 class PluginRuntime(Protocol):
     def execute(
@@ -266,14 +281,22 @@ class PluginRuntime(Protocol):
         recording: RecordingInput,
         parameters: dict[str, Any],
         workspace: Path,
-        runtime: Any = None,
-        assets: Any = None,
     ) -> PipelineOutput: ...
+
+class PluginRuntimeFactory(Protocol):
+    """Lazy factory resolved by PluginHandle.load_runtime (dotted ref)."""
+    def __call__(
+        self,
+        *,
+        assets: RuntimeAssets,
+        runtime_descriptor: Any,          # RuntimeDescriptor (remote_execution.runtime)
+        output_label_space: Any,          # labels.service.LabelSpace
+    ) -> PluginRuntime: ...
 
 class PipelineRuntimeAdapter:
     """Adapts a legacy in-process Pipeline to PluginRuntime (local CPU plugins)."""
     def __init__(self, pipeline: Pipeline) -> None: ...
-    def execute(self, recording, parameters, workspace, runtime=None, assets=None) -> PipelineOutput:
+    def execute(self, recording, parameters, workspace) -> PipelineOutput:
         return self._pipeline.run(recording, parameters, workspace)
 
 @dataclass(frozen=True)
@@ -288,6 +311,19 @@ def require_supported_plugin_api(definition: PipelineDefinition, api_version: in
     """Raise PlatformError('PLUGIN_API_INCOMPATIBLE') if definition.plugin_api_version != api_version."""
 ```
 
+**Frozen factory contract (single interface across A/D/E/F):**
+
+```text
+PluginHandle.load_runtime(*, assets, runtime_descriptor, output_label_space) -> PluginRuntime
+factory(*, assets, runtime_descriptor, output_label_space) -> PluginRuntime
+```
+
+`runtime_descriptor` and `output_label_space` are typed by
+`app.remote_execution.runtime.RuntimeDescriptor` and
+`app.labels.service.LabelSpace`; `plugin.py` imports them only under
+`TYPE_CHECKING` to stay torch-free and cycle-free. Legacy `Dummy`/`STFT` factories
+accept all three keyword arguments and ignore the ones they do not need.
+
 `validate_plugin_parameters` supported subset: top-level `type == "object"`, `properties`, `required`, `additionalProperties is False`, per-property `type` in `{string,number,integer,boolean}`, `enum`, numeric `minimum`/`maximum`, `default` (no default mutation). Empty schema `{}` means "no parameters allowed except `{}`".
 
 **RED test (`backend/tests/test_plugin_parameters.py`, new):**
@@ -300,6 +336,8 @@ def test_required_and_additional_properties(): ...
 def test_enum_and_numeric_bounds(): ...
 def test_api_version_mismatch(): ...                        # PLUGIN_API_INCOMPATIBLE
 def test_pipeline_runtime_adapter_delegates(): ...
+def test_plugin_runtime_factory_signature_is_keyword_only(): ...
+    # inspect.signature of a sample factory has keyword-only assets/runtime_descriptor/output_label_space
 ```
 
 **Expected failure (RED):** `ModuleNotFoundError: app.pipelines.plugin`.
@@ -330,8 +368,10 @@ class PluginHandle:
     declaration: PluginDeclaration
     @property
     def definition(self) -> PipelineDefinition: ...
-    def load_runtime(self) -> PluginRuntime:
-        """Lazy dotted import of runtime_factory_ref; raise if None."""
+    def load_runtime(self, *, assets, runtime_descriptor, output_label_space) -> PluginRuntime:
+        """Lazy dotted import of runtime_factory_ref and invoke with all three
+        keyword-only arguments. Raise PlatformError('EXECUTOR_UNAVAILABLE') if
+        runtime_factory_ref is None."""
 
 class PluginRegistry:
     def __init__(self, declarations: Iterable[PluginDeclaration]) -> None: ...
@@ -359,12 +399,14 @@ def create_plugin_registry() -> PluginRegistry: ...
 ] }
 ```
 
-**Modify** each listed module to expose:
+**Modify** each listed module to expose a lazy factory with the frozen keyword
+signature (unused arguments ignored):
 
 ```python
 from app.pipelines.plugin import PluginDeclaration, PipelineRuntimeAdapter
 PLUGIN = PluginDeclaration(definition=<definition>, runtime_factory_ref="<module>:create_runtime")
-def create_runtime():  # local-capable plugins only
+
+def create_runtime(*, assets=None, runtime_descriptor=None, output_label_space=None):
     return PipelineRuntimeAdapter(<PipelineClass>())
 ```
 
@@ -400,6 +442,9 @@ def test_plugin_modules_json_and_env_merge(monkeypatch): ...
 def test_registry_import_is_torch_free():   # subprocess: import app.pipelines.plugin_registry
     # assert 'torch' not in sys.modules and 'ultralytics' not in sys.modules
 def test_zoom_handle_defers_model_load(): ...   # load_runtime() raises for remote-only
+def test_handle_load_runtime_requires_keyword_assets_descriptor_label_space(): ...
+    # calling load_runtime() without the three keywords raises TypeError
+def test_dummy_handle_load_runtime_accepts_and_ignores_assets(): ...
 def test_zoomspec_declares_remote_gpu_capability_early(): ...
     # definition.technical_execution_capabilities == (ExecutionCapability("remote_gpu","cuda","float16"),)
 def test_zoomspec_input_compatibility_declared_early(): ...
@@ -954,9 +999,16 @@ certificate is never dangling. No `local_cpu` certificate.
 { "certificates": [
   { "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3", "plugin_version": "1.0.0",
     "model_release_id": "golden", "executor": "remote_gpu", "device_type": "cuda",
-    "precision": "float16", "runtime_ref": "remote:m9.1-rtx5090",
+    "precision": "float16",
+    "runtime_ref": "remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
     "evidence_ref": "m9.1-live-gate" } ] }
 ```
+
+`runtime_ref` for remote MUST bind the pinned runtime commit
+(`remote:{required_remote_runtime_commit}`, optionally namespaced by profile).
+Changing `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT` therefore invalidates the
+certificate above. Local providers use an operator-owned immutable generation
+label instead (§D2).
 
 **RED test (`backend/tests/test_runtime_descriptor.py`, `test_execution_certificate.py`):**
 
@@ -964,8 +1016,8 @@ certificate is never dangling. No `local_cpu` certificate.
 def test_public_projection_cpu_and_cuda(): ...
 def test_environment_ref_never_in_public_projection():
     d = RuntimeDescriptor("remote_gpu", "cuda", 0, "float16",
-                          environment_ref="/root/miniconda3", environment_label="m9.1-rtx5090")
-    assert d.public_projection()["environment"] == "m9.1-rtx5090"
+                          environment_ref="/root/miniconda3", environment_label="remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037")
+    assert d.public_projection()["environment"] == "remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037"
     assert d.public_projection()["environment"] != d.environment_ref
     assert d.environment_ref in d.to_metadata()          # internal only
 def test_environment_label_none_projects_none(): ...
@@ -973,6 +1025,8 @@ def test_descriptor_roundtrip_metadata(): ...
 def test_certificate_is_release_and_precision_specific(): ...
 def test_different_runtime_ref_is_uncertified():
     # same plugin/release/executor/device/precision, different runtime_ref -> is_certified False
+def test_remote_certificate_binds_runtime_commit():
+    # cert for remote:<commit_a>; runtime_ref remote:<commit_b> -> is_certified False
 def test_uncertified_capability_filtered_out(): ...
 def test_loading_seed_certificates(): ...
 ```
@@ -1014,36 +1068,47 @@ class ExecutorRegistry:
     def availability(self, definition, model_release, recording) -> ExecutorAvailabilityRead: ...
 ```
 
-- `RemoteGpuExecutorProvider` adapts `SshRemoteExecutorProbe` + `CoordinatorJobManager`; descriptor `executor="remote_gpu", device_type="cuda", precision="float16", environment_ref=<profile name>, environment_label=<profile name>`; `runtime_ref` = the provider's runtime reference (e.g. `"remote:m9.1-rtx5090"`).
-- `LocalCpuExecutorProvider` (create `backend/app/analysis/local_executor.py`) does **not** use the control-plane `sys.executable`. It launches a separate inference worker process with an explicitly configured interpreter and worker root.
+- `RemoteGpuExecutorProvider` adapts `SshRemoteExecutorProbe` + `CoordinatorJobManager`; descriptor `executor="remote_gpu", device_type="cuda", precision="float16", environment_ref=<profile name>, environment_label=<profile name>`; `runtime_ref` MUST bind the pinned runtime commit:
+  `runtime_ref = f"remote:{profile.name}:{profile.required_remote_runtime_commit}"`.
+  Changing `required_remote_runtime_commit` changes `runtime_ref` and therefore invalidates any certificate bound to the old commit.
+- `LocalCpuExecutorProvider` / `LocalGpuExecutorProvider` (create `backend/app/analysis/local_executor.py`) do **not** use the control-plane `sys.executable`. They launch a separate plugin-native inference worker (Task D2B) with an explicitly configured interpreter and worker root.
+- Local `runtime_ref` is an **operator-owned immutable generation label** (`Settings.local_cpu_runtime_ref` / `local_gpu_runtime_ref`), not derived from the mutable path. Changing the interpreter/dependencies/environment generation requires a new ref and a new certificate.
 
 **Explicit local inference config (modify `backend/app/core/config.py`):**
 
 ```python
 class Settings(BaseSettings):
     # ... existing ...
-    local_cpu_python_path: Path | None = None     # WSP_LOCAL_CPU_PYTHON_PATH
-    local_gpu_python_path: Path | None = None     # WSP_LOCAL_GPU_PYTHON_PATH
-    local_inference_work_root: Path | None = None # WSP_LOCAL_INFERENCE_WORK_ROOT
+    local_cpu_python_path: Path | None = None       # WSP_LOCAL_CPU_PYTHON_PATH
+    local_gpu_python_path: Path | None = None       # WSP_LOCAL_GPU_PYTHON_PATH
+    local_cpu_runtime_ref: str | None = None        # WSP_LOCAL_CPU_RUNTIME_REF (immutable generation)
+    local_gpu_runtime_ref: str | None = None        # WSP_LOCAL_GPU_RUNTIME_REF
+    local_inference_work_root: Path | None = None   # WSP_LOCAL_INFERENCE_WORK_ROOT
 ```
 
 **Local launch interface (`backend/app/analysis/local_executor.py`):**
 
 ```python
 class LocalInferenceWorkerProvider:
-    name = "local_cpu"  # or "local_gpu" for the GPU provider
-    def __init__(self, *, interpreter: Path, work_root: Path, job_manager_factory) -> None: ...
+    name = "local_cpu"  # or "local_gpu"
+    def __init__(self, *, interpreter: Path, runtime_ref: str, work_root: Path,
+                 executor_kind: str, job_manager_factory=None) -> None: ...
+    @property
+    def runtime_ref(self) -> str:
+        return self._runtime_ref
     def runtime_descriptor(self) -> RuntimeDescriptor:
-        # environment_ref = str(interpreter) (private); environment_label = "local-cpu"
+        # executor=self.name, device_type="cpu"|"cuda", precision="float32"|"float16",
+        # environment_ref=str(interpreter) (private), environment_label=self._runtime_ref
     def probe(self) -> tuple[bool, str | None]:
         """Run `<interpreter> -c 'import <plugin runtime deps>'` and check work_root;
         return (False, reason) on missing interpreter/deps. Never assume CPU ready."""
     def launch(self, run_id: str, *, coordinator_token: str | None) -> int:
-        # Popen([str(self._interpreter), "-m", "app.analysis.worker", run_id], ...)
+        # Popen([str(self._interpreter), "-m", "app.analysis.local_inference_worker", run_id], ...)
         # shell=False, cwd=backend_root, env includes WSP_PROJECT_ROOT/DATA_ROOT/...
+        # NEVER `app.analysis.worker` and NEVER sys.executable
 ```
 
-- If `local_cpu_python_path` is unset, the provider is not registered and `local_cpu` remains unavailable.
+- If `local_cpu_python_path` or `local_cpu_runtime_ref` is unset, the provider is not registered and `local_cpu` remains unavailable.
 - Control-plane `.venv` stays torch-free; the configured interpreter is a separate ML runtime.
 - `AnalysisService` replaces `if executor == "remote_gpu"` with `provider = executor_registry.provider(executor)`; remote coord launcher comes from the provider.
 - `PipelineDefinition.executors_supported` / `recommended_executor` read-model projections are computed from certified capabilities for the provider's `runtime_ref`.
@@ -1055,8 +1120,13 @@ def test_dispatch_by_provider_not_literal(): ...
 def test_uncertified_executor_unavailable(): ...
 def test_local_provider_uses_configured_interpreter_not_control_plane(monkeypatch):
     # intercept Popen argv; assert argv[0] == configured interpreter and != sys.executable
+def test_local_provider_launches_plugin_native_entrypoint(monkeypatch):
+    # assert argv[1:3] == ["-m", "app.analysis.local_inference_worker"]
 def test_local_provider_unset_interpreter_not_registered(): ...
-def test_local_probe_reports_missing_interpreter_and_missing_deps(): ...
+def test_local_provider_unset_runtime_ref_not_registered(): ...
+def test_remote_runtime_ref_includes_required_commit(): ...
+def test_changing_required_commit_invalidates_certificate(): ...
+def test_changing_local_runtime_ref_invalidates_certificate(): ...
 def test_certified_capabilities_require_matching_runtime_ref(): ...
 def test_projections_reflect_certificates(): ...
 ```
@@ -1074,7 +1144,81 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_e
 
 ---
 
-## TASK D3 — Generic `PluginItemExecutor` + runner seam
+## TASK D2B — Plugin-native local inference worker (shared contract, no SSH)
+
+**Rationale:** local CPU/GPU must execute through the **same** Plugin →
+ModelRelease → assets → RuntimeDescriptor → `PluginHandle.load_runtime` →
+`PluginRuntime.execute` → `AnalysisResultWriter` path as remote. Only transport
+and lifecycle differ. The legacy `app.analysis.worker` (`create_pipeline_registry`
+→ `pipeline.run`) must not be the local execution path for plugin runs.
+
+**First: read before editing**
+- `backend/app/analysis/worker.py` (`_recording_input`, `execute_run`, `AnalysisResultWriter` usage).
+- `backend/app/remote_execution/model_release.py`, `backend/app/datasets/adapter.py`, `backend/app/pipelines/plugin_registry.py`.
+- `backend/app/remote_execution/worker_context.py` (existing trusted-path validation) as the reference for the trusted-local-assets validation style.
+
+D2B defines the **local** resolution sequence directly; the remote equivalent
+(`plugin_executor.py`) is implemented later in D3 and must match it step for step.
+D4 later generalizes the remote namespaced asset mapping; the local mapping uses
+the same namespace shape defined here.
+
+**Interfaces (create `backend/app/analysis/local_inference_worker.py`):**
+
+```python
+def resolve_local_assets(*, deployment_config: Mapping[str, Mapping[str, Path]],
+                         plugin_id: str, plugin_version: str,
+                         asset_manifest_sha256: str) -> Mapping[str, Path]:
+    """Namespace (plugin_id, plugin_version, asset_manifest_sha256) -> logical -> path; fail closed."""
+
+def execute_local_run(run_id: str, settings: Settings | None = None) -> None:
+    # 1 load run + recording from DB
+    # 2 metadata = run.execution_metadata_json
+    # 3 descriptor = RuntimeDescriptor.from_metadata(metadata["runtime_descriptor"])
+    # 4 handle = create_plugin_registry().get(run.pipeline_id, run.pipeline_version)
+    # 5 resolved = model_release_store.resolve_by_manifest_sha(
+    #        run.pipeline_id, run.pipeline_version, metadata["asset_manifest_sha256"])
+    #    verify resolved.model_release_id == metadata["model_release_id"]
+    # 6 assets = resolve_local_assets(settings.local_asset_paths, ...)
+    # 7 label_space = LabelSpaceService(settings.label_space_root).get(
+    #        handle.definition.resolved_output_label_space)   # executor owns resolution
+    # 8 runtime = handle.load_runtime(assets=assets, runtime_descriptor=descriptor,
+    #                                 output_label_space=label_space)
+    # 9 recording_input = _recording_input(recording, settings.data_root)
+    # 10 output = runtime.execute(recording_input, dict(run.parameters_json), workspace)
+    # 11 AnalysisResultWriter(...).persist(output)  # SAME writer as remote
+    # terminal-state handling mirrors worker.execute_run
+
+def main(argv: list[str] | None = None) -> int: ...   # `python -m app.analysis.local_inference_worker <run_id>`
+```
+
+- Add `Settings.local_asset_paths: dict | None` (`WSP_LOCAL_ASSET_PATHS_JSON`), namespaced exactly like the remote mapping, validated as absolute safe local paths.
+- `local_inference_worker` uses the same `AnalysisResultWriter` and terminal-state semantics as the remote ingest path; it never imports torch at module level (lazy through the plugin runtime).
+- Keep legacy `app.analysis.worker` in place for non-plugin/back-compat paths, but the local `ExecutorProvider` launches the new entrypoint.
+- Local and remote share the **plugin contracts**; only transport/lifecycle (SSH+coordinator vs direct worker) differ.
+
+**RED test (`backend/tests/test_local_inference_worker.py`, new):**
+
+```python
+def test_local_worker_resolves_plugin_release_assets_and_descriptor(): ...
+def test_local_worker_calls_handle_load_runtime_with_all_keywords(): ...
+def test_local_worker_uses_output_label_space_from_definition(): ...
+def test_local_worker_uses_shared_analysis_result_writer(): ...
+def test_local_worker_rejects_release_manifest_mismatch(): ...
+def test_local_worker_module_import_is_torch_free(): ...
+```
+
+**Expected failure (RED):** module missing; local provider still launches `app.analysis.worker`.
+
+**GREEN command:**
+```bash
+PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_local_inference_worker.py backend/tests/test_local_worker_provider.py -v
+```
+
+**Commit checkpoint:** `feat: add plugin-native local inference worker`
+
+---
+
+## TASK D3 — Generic `PluginItemExecutor` + runner seam (remote)
 
 **First: read before editing**
 - `backend/app/remote_execution/runner.py:634-650` (`_cli_work`).
@@ -1096,14 +1240,20 @@ class PluginItemExecutor:
         # 5 verify asset manifest + asset bytes (namespaced trusted paths)
         # 6 resolve recording via DatasetAdapter
         # 7 validate parameters against handle.definition.parameter_schema
-        # 8 runtime = handle.load_runtime()   # lazy; only PluginHandle exposes this
-        #   output = runtime.execute(recording_input, item.parameters, workspace, runtime_descriptor, assets)
+        # 8 ensure_asset_manifest verified; label_space = LabelSpaceService.get(
+        #       handle.definition.resolved_output_label_space)   # executor owns this resolution
+        #   runtime = handle.load_runtime(assets=assets,
+        #                                 runtime_descriptor=runtime_descriptor,
+        #                                 output_label_space=label_space)
+        #   output = runtime.execute(recording_input, item.parameters, workspace)
         # 9 build package with handle.definition + runtime_descriptor.public_projection()
         # 10 publish envelope + zip (write-once)
 ```
 
-`PluginItemExecutor` MUST call `PluginHandle.load_runtime()`; there is no
-`PluginRegistry.load_runtime`. Modify `runner._cli_work` to construct
+`PluginItemExecutor` MUST call `PluginHandle.load_runtime(assets=..., runtime_descriptor=..., output_label_space=...)`;
+there is no `PluginRegistry.load_runtime`. The executor resolves the output
+`LabelSpace` (via `LabelSpaceService`) before invoking the factory; the factory
+never resolves label spaces itself. Modify `runner._cli_work` to construct
 `PluginItemExecutor` from the registry seam instead of importing
 `ZoomSpecRemoteItemExecutor`. The runner stays the lifecycle owner.
 
@@ -1113,6 +1263,7 @@ class PluginItemExecutor:
 def test_cli_work_builds_generic_executor(monkeypatch): ...
 def test_plugin_executor_uses_handle_load_runtime(): ...
     # fake registry returns a handle whose load_runtime() is observed
+def test_plugin_executor_passes_assets_descriptor_and_output_label_space(): ...
 def test_plugin_executor_verifies_wire_release_id_and_manifest_hash(): ...
     # batch.pipeline.model_release_id drives release selection; mismatch fails closed
 def test_plugin_executor_fails_closed_on_release_mismatch(): ...
@@ -1232,15 +1383,17 @@ PLUGIN = PluginDeclaration(
     runtime_factory_ref="app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin:build_runtime",
 )
 
-def build_runtime(*, assets: Mapping[str, Path], runtime_descriptor: RuntimeDescriptor, label_space):
+def build_runtime(*, assets, runtime_descriptor, output_label_space):
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.pipeline import ZoomSpecFrozenPipeline
-    return _ZoomSpecRuntime(ZoomSpecFrozenPipeline(...))
+    return _ZoomSpecRuntime(ZoomSpecFrozenPipeline(...), output_label_space=output_label_space)
 ```
 
 `_ZoomSpecRuntime.execute` maps AssetManifest logical names
 (`detector_checkpoint`, `frn_checkpoint`, `ls_stft_normalization`) to constructor
-args and calls the frozen pipeline with `{}` parameters. Torch stays lazily
-imported inside the pipeline modules; `plugin.py` itself is torch-free.
+args and calls the frozen pipeline with `{}` parameters. The executor resolves
+and passes `output_label_space`; the factory does not resolve label spaces.
+Torch stays lazily imported inside the pipeline modules; `plugin.py` itself is
+torch-free.
 
 **Data (modify `backend/app/pipelines/plugin_modules.json`):** replace the
 `.../definition.py` entry with `app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin`
@@ -1406,7 +1559,11 @@ PLUGIN = PluginDeclaration(
 )
 ```
 
-`build_runtime` constructs `CPNBandwidthTierPipeline` from assets + runtime descriptor. The CPN-only plugin **reuses the frozen detector module** (`app.pipelines.zoomspec...detector`) as a shared scientific dependency; it must not import control-plane modules.
+`build_runtime(*, assets, runtime_descriptor, output_label_space)` constructs
+`CPNBandwidthTierPipeline` from the resolved assets + runtime descriptor and uses
+the passed `output_label_space` (never resolving it itself). The CPN-only plugin
+**reuses the frozen detector module** (`app.pipelines.zoomspec...detector`) as a
+shared scientific dependency; it must not import control-plane modules.
 
 **ModelRelease** `backend/app/pipelines/cpn_bandwidth_tier/model_releases/golden.json`
 referencing the CPN package's own AssetManifest V1 (two logical assets:
@@ -1567,6 +1724,7 @@ Rules:
 | §8.5 registry + lazy factory | A2, A3 |
 | §9.5 resolved default release | B1, B4, B5 |
 | §11.1 executor kinds / separate worker | D2 |
+| §11.2 executor registry / local+remote symmetry | D2, D2B |
 | §11.3 RuntimeDescriptor + public projection | D1, D5 |
 | §11.4 namespaced trusted paths + probe | D4 |
 | §11.5 generic PluginItemExecutor | D3, E2 |
@@ -1588,35 +1746,48 @@ Rules:
 **Type/signature consistency:**
 - `PipelineDefinition` extensions (A1) are consumed by A2/A3, B1/B4/B5, C4, D1/D2, E1, F1.
 - `ExecutionCapability` (A1) is consumed by D1 (`certified_capabilities(runtime_ref=...)`), A3 (ZoomSpec remote_gpu) and F1 (CPN remote_gpu).
-- `PluginRuntime.execute(recording, parameters, workspace, runtime=None, assets=None)` (A2) is consumed by D3 and E1; D3 calls `PluginHandle.load_runtime()` (never `PluginRegistry.load_runtime`).
-- `RuntimeDescriptor` (D1) exposes private `environment_ref` + public `environment_label`; `public_projection()` returns only `environment_label`. Consumed by D4 (probe), D5 (publisher/ingestor), D2 (providers).
-- `ExecutionCertificate.runtime_ref` is part of `key()`; `is_certified` and `certified_capabilities` require an exact `runtime_ref`.
-- `ModelReleaseStore.resolve_by_manifest_sha` (B1) is consumed by D3/E2, while new runs also carry the exact `model_release_id` on the wire (B3).
+- `PluginRuntime.execute(recording, parameters, workspace)` and
+  `PluginRuntimeFactory(*, assets, runtime_descriptor, output_label_space)` (A2)
+  are consumed by D2B (local), D3 (remote), E1, F1. Both call
+  `PluginHandle.load_runtime(*, assets, runtime_descriptor, output_label_space)`
+  (never `PluginRegistry.load_runtime`), with the executor resolving the output
+  `LabelSpace` first.
+- `RuntimeDescriptor` (D1) exposes private `environment_ref` + public `environment_label`; `public_projection()` returns only `environment_label`. Consumed by D4 (probe), D5 (publisher/ingestor), D2 (providers), D2B (local worker), D3 (remote executor).
+- `ExecutionCertificate.runtime_ref` is part of `key()`; `is_certified` and `certified_capabilities` require an exact `runtime_ref`. Remote refs bind `required_remote_runtime_commit`; local refs are operator-owned generation labels.
+- `ModelReleaseStore.resolve_by_manifest_sha` (B1) is consumed by D2B/D3/E2, while new runs also carry the exact `model_release_id` on the wire (B3).
 - `ResolvedRecordingInput` (C1) is consumed by D3 and re-exported via resolver (C2).
-- `LocalInferenceWorkerProvider` (D2) takes the configured interpreter (`Settings.local_cpu_python_path` / `local_gpu_python_path`); it never uses `sys.executable`.
+- `LocalInferenceWorkerProvider` (D2) takes the configured interpreter
+  (`Settings.local_cpu_python_path` / `local_gpu_python_path`) and immutable
+  `runtime_ref`; it launches `app.analysis.local_inference_worker` (D2B) and
+  never uses `sys.executable` or `app.analysis.worker`.
 
-**Dependency order:** A→B→C→D→E→F. Within B, B5 (golden release/default) precedes Phase D so D1's seed certificate is never dangling. A3 declares ZoomSpec technical capability before D2 activates certificate-driven projections. C3/C4 consume A2; D3 consumes A3+B1+B5+C1; E consumes D; F consumes E. No forward dependency.
+**Dependency order:** A→B→C→D→E→F. Within B, B5 (golden release/default) precedes Phase D so D1's seed certificate is never dangling. A3 declares ZoomSpec technical capability before D2 activates certificate-driven projections. D2B (local worker) precedes E2 so local and remote share the plugin contract before ZoomSpec migrates. C3/C4 consume A2; D3 consumes A3+B1+B5+C1; E consumes D; F consumes E. No forward dependency.
 
-**YAGNI:** no model registry service, no multi-GPU scheduler, no release UI, no streaming/CDN, no vendor abstraction. `local_gpu` is declared but not implemented (matches spec); `local_cpu` requires an explicitly configured interpreter and is unavailable otherwise. M9.3 excluded.
+**YAGNI:** no model registry service, no multi-GPU scheduler, no release UI, no streaming/CDN, no vendor abstraction. `local_gpu` is declared but not required to be implemented (matches spec); `local_cpu` requires an explicitly configured interpreter + runtime ref and is unavailable otherwise. M9.3 excluded.
 
 **Provenance preservation:**
 - B2 locks the V1 manifest payload and golden hash.
 - B3 adds optional `model_release_id` to the hashed request wire but omits it when `None`, so `build_batch()` reproduces pre-M9.2 `request_sha256` byte-exactly (asserted against the TASK 0 fixture); new runs hash/transmit/verify the exact release id.
 - B1 validates `asset_manifest_path` containment inside the plugin package; asset file paths remain deployment-only.
 - D5 validates package execution against the run's persisted descriptor projection, with a legacy `remote_gpu -> cuda:0` fallback.
+- D1/D2 bind certificates to `runtime_ref`, so a runtime commit or local environment-generation change invalidates the old certificate.
 - No task weakens runtime-commit, fingerprint/source-hash, terminal-immutability, or physical-box/label checks.
 
 **Control-plane edit guard:** F2's guard test is the objective proof that adding a plugin required no control-plane logic edits; `plugin_modules.json`, `model_release_defaults.json`, and `execution_certificates.json` are configuration data, not logic.
 
-**Coordinator/recovery/transport:** untouched. D3 changes only `runner._cli_work` construction; D2 adds providers around existing `SshRemoteExecutorProbe`/`CoordinatorJobManager` without changing their internals, and adds a new `LocalInferenceWorkerProvider` rather than altering `LocalJobManager`.
+**Coordinator/recovery/transport:** untouched. D3 changes only `runner._cli_work` construction; D2 adds providers around existing `SshRemoteExecutorProbe`/`CoordinatorJobManager` without changing their internals, and adds a new `LocalInferenceWorkerProvider` + `local_inference_worker` rather than altering `LocalJobManager` or `app.analysis.worker`.
 
-**Required-fix coverage (architect review):**
+**Required-fix coverage (architect reviews):**
 1. `environment_ref` private / `environment_label` public — D1 + tests.
 2. `runtime_ref` in certificate matching — D1, D2 + tests.
 3. configured local inference interpreter (not `sys.executable`) — D2 + `config.py` + tests.
 4. `model_release_id` wire identity with `None` omission — B3 + TASK 0 fixture + tests.
 5. CPN assets include `ls_stft_normalization` — F1 + tests.
 6. phase ordering (ZoomSpec caps in A3, golden release in B5, D1 non-dangling) — A3, B5, D1.
+7. non-expiring implementation start SHA — TASK 0.
+8. unified `PluginHandle.load_runtime(*, assets, runtime_descriptor, output_label_space)` — A2, A3, D2B, D3, E1, F1 + signature tests.
+9. plugin-native local inference worker (shared contract) — D2B + D2 launch + tests.
+10. hardened `runtime_ref` (remote commit-bound; local immutable generation) — D1, D2 + tests.
 
 ---
 
