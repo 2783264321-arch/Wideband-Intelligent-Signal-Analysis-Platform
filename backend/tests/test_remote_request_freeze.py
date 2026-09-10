@@ -98,19 +98,30 @@ class TestLocalOrchestratorCommit:
 
 
 class TestAssetManifestSha256:
-    def test_resolve_asset_manifest_sha256_uses_loader(self):
+    def test_resolve_asset_manifest_sha256_delegates_to_store_resolve(self):
+        from types import SimpleNamespace
+
         from app.remote_execution.identity import resolve_asset_manifest_sha256
 
-        path = Path("backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/asset_manifest.json")
-        sha = resolve_asset_manifest_sha256(path)
-        assert sha == "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08"
+        calls = []
 
-    def test_resolve_asset_manifest_sha256_bad_path_raises(self, tmp_path):
+        class _Store:
+            def resolve(self, plugin_id, plugin_version, requested):
+                calls.append((plugin_id, plugin_version, requested))
+                return SimpleNamespace(manifest=SimpleNamespace(asset_manifest_sha256="c" * 64))
+
+        sha = resolve_asset_manifest_sha256(_Store(), "zoomspec", "1.0.0", "golden")
+        assert sha == "c" * 64
+        assert calls == [("zoomspec", "1.0.0", "golden")]
+
+    def test_resolve_asset_manifest_sha256_unknown_release_raises(self, tmp_path):
         from app.core.errors import PlatformError
         from app.remote_execution.identity import resolve_asset_manifest_sha256
+        from app.remote_execution.model_release import ModelReleaseStore
 
+        store = ModelReleaseStore(tmp_path / "plugins", {})
         with pytest.raises(PlatformError):
-            resolve_asset_manifest_sha256(tmp_path / "missing.json")
+            resolve_asset_manifest_sha256(store, "missing", "1.0", None)
 
 
 class TestRequestBuilder:

@@ -29,6 +29,7 @@ class AnalysisRunCreate(BaseModel):
     pipeline_id: str
     executor: str = "local_cpu"
     parameters: dict[str, Any] = Field(default_factory=dict)
+    model_release_id: str | None = None
 
 
 class AnalysisRunRead(BaseModel):

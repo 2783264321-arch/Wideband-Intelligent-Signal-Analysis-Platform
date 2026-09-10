@@ -56,6 +56,26 @@ class FakeProbe:
                                         recommended=False)
 
 
+class FakeModelReleaseStore:
+    def __init__(self, release_id: str = "golden"):
+        self.release_id = release_id
+        self.resolve_calls = []
+
+    def resolve(self, plugin_id, plugin_version, requested):
+        from app.remote_execution.model_release import ResolvedModelRelease
+
+        self.resolve_calls.append((plugin_id, plugin_version, requested))
+        release = SimpleNamespace(
+            plugin_id=plugin_id,
+            plugin_version=plugin_version,
+            model_release_id=requested or self.release_id,
+            asset_manifest_path=Path("/tmp/asset_manifest.json"),
+            asset_manifest_sha256=MANIFEST,
+        )
+        manifest = SimpleNamespace(asset_manifest_sha256=MANIFEST)
+        return ResolvedModelRelease(release=release, manifest=manifest)
+
+
 class FakeLauncher:
     def __init__(self):
         self.launches = []
@@ -81,10 +101,6 @@ def _orch_commit_resolver(project_root):
     return RUN
 
 
-def _manifest_resolver(path):
-    return MANIFEST
-
-
 def _add_recording(client, recording_id="rec_x", label_space="spacenet_14"):
     with client.app.state.database.session_factory() as session:
         session.add(RecordingModel(
@@ -107,11 +123,10 @@ def _service(client, *, probe, launcher, pipeline_cls, registry_pipeline=None):
             remote_coordinator_launcher=launcher,
             identity_resolver=_identity_resolver,
             orchestrator_commit_resolver=_orch_commit_resolver,
-            asset_manifest_sha256_resolver=_manifest_resolver,
+            model_release_store=FakeModelReleaseStore(),
             runtime_commit_config=RUN,
             project_root=Path("/tmp"),
             data_root=Path("/tmp/data"),
-            asset_manifest_path=Path("/tmp/asset_manifest.json"),
         )
 
 
@@ -244,11 +259,9 @@ def test_executor_availability_route_success(client):
     client.app.state.remote_coordinator_launcher = FakeLauncher()
     client.app.state.identity_resolver = _identity_resolver
     client.app.state.orchestrator_commit_resolver = _orch_commit_resolver
-    client.app.state.asset_manifest_sha256_resolver = _manifest_resolver
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
-    client.app.state.asset_manifest_path = Path("/tmp/asset_manifest.json")
     response = client.get("/api/executor-availability", params={"recording_id": "rec_x", "pipeline_id": "remote_test"})
     assert response.status_code == 200
     assert response.json()["available"] is True
@@ -261,11 +274,9 @@ def test_executor_availability_route_unavailable(client):
     client.app.state.remote_coordinator_launcher = FakeLauncher()
     client.app.state.identity_resolver = _identity_resolver
     client.app.state.orchestrator_commit_resolver = _orch_commit_resolver
-    client.app.state.asset_manifest_sha256_resolver = _manifest_resolver
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
-    client.app.state.asset_manifest_path = Path("/tmp/asset_manifest.json")
     response = client.get("/api/executor-availability", params={"recording_id": "rec_x", "pipeline_id": "remote_test"})
     assert response.status_code == 200
     assert response.json()["available"] is False

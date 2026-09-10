@@ -20,7 +20,6 @@ from app.core.errors import PlatformError
 from app.ground_truth.model import GroundTruthModel
 from app.imported_runs.fingerprint import build_recording_fingerprint, manifest_recording_for
 from app.recordings.model import RecordingModel
-from app.remote_execution.assets import load_pipeline_asset_manifest
 from app.remote_execution.source_hash import resolve_source_data_sha256
 
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -102,7 +101,11 @@ def resolve_local_orchestrator_commit(project_root: Path) -> str:
     return commit
 
 
-def resolve_asset_manifest_sha256(asset_manifest_path: Path) -> str:
-    """Strict-load the tracked ZoomSpec asset manifest and return its validated self-hash."""
-    manifest = load_pipeline_asset_manifest(asset_manifest_path)
-    return manifest.asset_manifest_sha256
+def resolve_asset_manifest_sha256(store, plugin_id: str, plugin_version: str, requested: str | None = None) -> str:
+    """Resolve a ModelRelease through the store and return its verified manifest self-hash.
+
+    Delegates to ``ModelReleaseStore.resolve`` (explicit requested release or the
+    platform default), which fully verifies the referenced AssetManifest identity
+    and self-hash. Never a reverse/index lookup.
+    """
+    return store.resolve(plugin_id, plugin_version, requested).manifest.asset_manifest_sha256

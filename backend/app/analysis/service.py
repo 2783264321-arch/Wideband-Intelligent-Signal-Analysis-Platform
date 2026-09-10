@@ -37,11 +37,10 @@ class AnalysisService:
         remote_coordinator_launcher=None,
         identity_resolver=None,
         orchestrator_commit_resolver=None,
-        asset_manifest_sha256_resolver=None,
+        model_release_store=None,
         runtime_commit_config=None,
         project_root=None,
         data_root=None,
-        asset_manifest_path=None,
     ):
         self.session = session
         self.registry = registry
@@ -50,11 +49,10 @@ class AnalysisService:
         self.remote_coordinator_launcher = remote_coordinator_launcher
         self.identity_resolver = identity_resolver
         self.orchestrator_commit_resolver = orchestrator_commit_resolver
-        self.asset_manifest_sha256_resolver = asset_manifest_sha256_resolver
+        self.model_release_store = model_release_store
         self.runtime_commit_config = runtime_commit_config
         self.project_root = project_root
         self.data_root = data_root
-        self.asset_manifest_path = asset_manifest_path
 
     def get(self, run_id: str) -> AnalysisRunModel:
         run = self.session.get(AnalysisRunModel, run_id)
@@ -137,6 +135,7 @@ class AnalysisService:
         pipeline_id: str,
         executor: str,
         parameters: dict,
+        model_release_id: str | None = None,
     ) -> AnalysisRunModel:
         recording = self.session.get(RecordingModel, recording_id)
         if recording is None:
@@ -145,7 +144,7 @@ class AnalysisService:
         definition = pipeline.definition
 
         if executor == "remote_gpu":
-            return self._create_remote_gpu_run(recording, definition, parameters)
+            return self._create_remote_gpu_run(recording, definition, parameters, model_release_id)
 
         if executor != "local_cpu":
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Only the local_cpu executor is available in the core slice.")
@@ -179,9 +178,8 @@ class AnalysisService:
             raise PlatformError("ANALYSIS_FAILED", "Unable to start local analysis worker.") from exc
         return run
 
-    def _create_remote_gpu_run(self, recording, definition, parameters) -> AnalysisRunModel:
+    def _create_remote_gpu_run(self, recording, definition, parameters, model_release_id) -> AnalysisRunModel:
         from app.remote_execution.identity import (
-            resolve_asset_manifest_sha256,
             resolve_local_orchestrator_commit,
             resolve_remote_recording_identity,
         )
@@ -210,14 +208,22 @@ class AnalysisService:
         run_id = f"run_{uuid4().hex}"
         if self.remote_executor_probe is None or self.identity_resolver is None:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote executor configuration is incomplete.")
-        if self.orchestrator_commit_resolver is None or self.asset_manifest_sha256_resolver is None:
+        if self.orchestrator_commit_resolver is None or self.model_release_store is None:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote provenance configuration is incomplete.")
         if not self.runtime_commit_config:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote runtime commit is not configured.")
 
+        # Resolve the concrete ModelRelease exactly once; explicit request overrides
+        # the platform default. ``resolve`` fully verifies the referenced manifest
+        # identity and self-hash (never a reverse/index lookup).
+        resolved_release = self.model_release_store.resolve(
+            definition.plugin_id, definition.plugin_version, model_release_id
+        )
+        frozen_model_release_id = resolved_release.release.model_release_id
+        asset_manifest_sha256 = resolved_release.manifest.asset_manifest_sha256
+
         identity = self.identity_resolver(self.session, recording, self.data_root, run_id)
         orchestrator_commit = self.orchestrator_commit_resolver(self.project_root)
-        asset_manifest_sha256 = self.asset_manifest_sha256_resolver(self.asset_manifest_path)
 
         frozen_metadata = freeze_request_provenance(
             local_run_id=run_id,
@@ -233,6 +239,7 @@ class AnalysisService:
             orchestrator_commit=orchestrator_commit,
             asset_manifest_sha256=asset_manifest_sha256,
             remote_profile=availability.remote_profile or "remote",
+            model_release_id=frozen_model_release_id,
         )
         final_metadata = build_coordinator_metadata(frozen_metadata)
         coordinator_token = final_metadata["coordinator_token"]

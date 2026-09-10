@@ -86,11 +86,10 @@ def test_create_app_wires_full_remote_lifecycle_with_valid_config(tmp_path, monk
     assert state.remote_coordinator_launcher is not None
     assert callable(state.identity_resolver)
     assert callable(state.orchestrator_commit_resolver)
-    assert callable(state.asset_manifest_sha256_resolver)
+    assert state.model_release_store is not None
     assert state.runtime_commit_config == RUNTIME_COMMIT
     assert state.project_root == settings.project_root
     assert state.data_root == settings.data_root
-    assert state.asset_manifest_path is not None
     assert state.remote_config_available is True
 
 

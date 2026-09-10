@@ -24,11 +24,10 @@ def _service(request: Request, session) -> AnalysisService:
         remote_coordinator_launcher=getattr(state, "remote_coordinator_launcher", None),
         identity_resolver=getattr(state, "identity_resolver", None),
         orchestrator_commit_resolver=getattr(state, "orchestrator_commit_resolver", None),
-        asset_manifest_sha256_resolver=getattr(state, "asset_manifest_sha256_resolver", None),
         runtime_commit_config=getattr(state, "runtime_commit_config", None),
         project_root=getattr(state, "project_root", None),
         data_root=getattr(state, "data_root", None),
-        asset_manifest_path=getattr(state, "asset_manifest_path", None),
+        model_release_store=getattr(state, "model_release_store", None),
     )
 
 
@@ -58,6 +57,7 @@ def create_analysis_run(payload: AnalysisRunCreate, request: Request):
             pipeline_id=payload.pipeline_id,
             executor=payload.executor,
             parameters=payload.parameters,
+            model_release_id=payload.model_release_id,
         )
 
 

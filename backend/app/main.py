@@ -25,14 +25,45 @@ from app.benchmarks.service import mark_stale_running_evaluations_interrupted
 from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
+from app.remote_execution.model_release import ModelReleaseStore, load_model_release_defaults
 
 
-def _asset_manifest_path(project_root) -> Path:
-    return (
-        Path(project_root)
-        / "backend" / "app" / "pipelines" / "zoomspec_yolo26n_aug_combined_frn_v3"
-        / "asset_manifest.json"
+def _plugins_root() -> Path:
+    return Path(__file__).resolve().parent / "pipelines"
+
+
+def _build_model_release_store() -> ModelReleaseStore:
+    plugins_root = _plugins_root()
+    return ModelReleaseStore(
+        plugins_root,
+        load_model_release_defaults(plugins_root / "model_release_defaults.json"),
     )
+
+
+def _resolve_remote_expected_manifest_sha256(store: ModelReleaseStore, registry) -> str:
+    """Resolve the single platform-default remote manifest identity for the probe.
+
+    The M9.1 readiness probe is plugin-agnostic and validates one manifest hash.
+    It is wired only while exactly one release-required plugin default exists;
+    per-plugin/per-release probes arrive with the descriptor-driven executor work.
+    """
+    from app.remote_execution.identity import resolve_asset_manifest_sha256
+
+    manifests = set()
+    for definition in registry.list():
+        if not definition.model_release_required:
+            continue
+        manifests.add(
+            resolve_asset_manifest_sha256(
+                store, definition.plugin_id, definition.plugin_version, None
+            )
+        )
+    if len(manifests) != 1:
+        raise PlatformError(
+            "MODEL_RELEASE_MISMATCH",
+            "Expected exactly one release-required default model release for the remote readiness probe.",
+        )
+    return next(iter(manifests))
 
 
 def _wire_remote_lifecycle(app, settings) -> None:
@@ -43,7 +74,6 @@ def _wire_remote_lifecycle(app, settings) -> None:
     """
     from app.remote_execution.executor import SshRemoteExecutorProbe
     from app.remote_execution.identity import (
-        resolve_asset_manifest_sha256,
         resolve_local_orchestrator_commit,
         resolve_remote_recording_identity,
     )
@@ -58,27 +88,24 @@ def _wire_remote_lifecycle(app, settings) -> None:
         app.state.remote_coordinator_launcher = None
         app.state.identity_resolver = None
         app.state.orchestrator_commit_resolver = None
-        app.state.asset_manifest_sha256_resolver = None
         app.state.runtime_commit_config = None
         app.state.project_root = settings.project_root
         app.state.data_root = settings.data_root
-        app.state.asset_manifest_path = None
         return
 
-    asset_manifest_path = _asset_manifest_path(settings.project_root)
     try:
-        asset_manifest_sha256 = resolve_asset_manifest_sha256(asset_manifest_path)
+        asset_manifest_sha256 = _resolve_remote_expected_manifest_sha256(
+            app.state.model_release_store, app.state.pipeline_registry
+        )
     except Exception:
         app.state.remote_config_available = False
         app.state.remote_executor_probe = None
         app.state.remote_coordinator_launcher = None
         app.state.identity_resolver = None
         app.state.orchestrator_commit_resolver = None
-        app.state.asset_manifest_sha256_resolver = None
         app.state.runtime_commit_config = None
         app.state.project_root = settings.project_root
         app.state.data_root = settings.data_root
-        app.state.asset_manifest_path = None
         return
 
     transport = SshRunner(profile)
@@ -93,11 +120,9 @@ def _wire_remote_lifecycle(app, settings) -> None:
     app.state.remote_coordinator_launcher = CoordinatorJobManager(settings)
     app.state.identity_resolver = resolve_remote_recording_identity
     app.state.orchestrator_commit_resolver = resolve_local_orchestrator_commit
-    app.state.asset_manifest_sha256_resolver = resolve_asset_manifest_sha256
     app.state.runtime_commit_config = profile.required_remote_runtime_commit
     app.state.project_root = settings.project_root
     app.state.data_root = settings.data_root
-    app.state.asset_manifest_path = asset_manifest_path
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
@@ -106,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.database = Database(settings.database_url)
     app.state.storage = StorageService(settings.data_root)
     app.state.pipeline_registry = create_pipeline_registry()
+    app.state.model_release_store = _build_model_release_store()
     app.state.job_manager = LocalJobManager(settings)
     app.state.benchmark_job_manager = LocalBenchmarkJobManager(settings)
 
