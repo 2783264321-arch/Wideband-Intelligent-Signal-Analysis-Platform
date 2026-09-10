@@ -58,8 +58,8 @@
 | `backend/app/remote_execution/runtime.py` | D | `RuntimeDescriptor`, `ExecutionCertificate`, `ExecutionCertificateStore`, `ExecutorProvider`, `ExecutorRegistry` |
 | `backend/app/analysis/local_executor.py` | D | `LocalInferenceWorkerProvider` (separate worker process) |
 | `backend/app/remote_execution/plugin_executor.py` | D | generic `PluginItemExecutor` |
-| `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/plugin.py` | E | ZoomSpec `PLUGIN` declaration + runtime factory |
-| `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/model_releases/golden.json` | E | golden ModelRelease record (references existing manifest) |
+| `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/plugin.py` | E | ZoomSpec `PLUGIN` + lazy runtime factory |
+| `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/model_releases/golden.json` | B | golden ModelRelease record (references existing manifest) |
 | `backend/app/pipelines/cpn_bandwidth_tier/__init__.py` | F | CPN-only plugin package |
 | `backend/app/pipelines/cpn_bandwidth_tier/plugin.py` | F | CPN-only declaration + runtime factory |
 | `backend/app/pipelines/cpn_bandwidth_tier/pipeline.py` | F | detector-only composition |
@@ -76,10 +76,12 @@
 | `backend/app/analysis/router.py` | A | map new fields in `list_pipelines` |
 | `frontend/src/api/types.ts` | A | optional additive fields |
 | `backend/app/remote_execution/assets.py` | B | manifest-scoped loader helper; V1 payload untouched |
-| `backend/app/remote_execution/request_builder.py` | B/C | thread `model_release_id`; freeze validated parameters |
-| `backend/app/remote_execution/schema.py` | B | optional `model_release_id` on envelope only |
+| `backend/app/remote_execution/request_builder.py` | B/C | thread `model_release_id` (wire + metadata); freeze validated parameters |
+| `backend/app/remote_execution/schema.py` | B | optional `model_release_id` on `RemotePipelineRefV1` + envelope |
+| `backend/app/remote_execution/canonical.py` | B | omit `None` optional fields so legacy request SHA stays byte-exact |
 | `backend/app/remote_execution/identity.py` | B | manifest hash by (plugin, release) |
 | `backend/app/main.py` | B | manifest/release path wiring (no ZoomSpec literal) |
+| `backend/app/core/config.py` | D | `local_cpu_python_path`, `local_gpu_python_path`, `local_inference_work_root` |
 | `backend/app/remote_execution/resolver.py` | C | delegate `resolve_space_net` to `DatasetAdapterRegistry` |
 | `backend/app/analysis/service.py` | C/D | parameter validation, input compatibility, capability dispatch, resolved release |
 | `backend/app/remote_execution/validation.py` | C | label validation via `resolved_output_label_space` |
@@ -101,7 +103,10 @@
 | `backend/tests/test_model_release.py` | B |
 | `backend/tests/test_asset_manifest_v1_frozen.py` | B |
 | `backend/tests/test_request_release_provenance.py` | B |
+| `backend/tests/test_release_wiring.py` | B |
+| `backend/tests/test_zoomspec_golden_release.py` | B |
 | `backend/tests/test_dataset_adapter.py` | C |
+| `backend/tests/test_plugin_parameters_freeze.py` | C |
 | `backend/tests/test_input_output_label_space.py` | C |
 | `backend/tests/test_runtime_descriptor.py` | D |
 | `backend/tests/test_execution_certificate.py` | D |
@@ -111,6 +116,7 @@
 | `backend/tests/test_zoomspec_plugin.py` | E |
 | `backend/tests/test_cpn_bandwidth_tier_plugin.py` | F |
 | `backend/tests/test_no_plugin_id_in_control_plane.py` | F |
+| `backend/tests/test_plugin_genericity.py` | F |
 
 ### Test command conventions
 
@@ -132,8 +138,11 @@ Steps:
 2. Record golden manifest hash:
    `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -c "from pathlib import Path; from app.remote_execution.assets import load_pipeline_asset_manifest; m=load_pipeline_asset_manifest(Path('backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/asset_manifest.json')); print(m.asset_manifest_sha256)"`
    Expected: `16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08`.
-3. Run full backend suite and frontend suite; record pass counts.
-4. Confirm `python -c "import sys; import app.pipelines.registry; assert 'torch' not in sys.modules"` from `PYTHONPATH=backend/.venv` passes.
+3. Record the **legacy request hash fixture** used by B3. From a fresh interpreter compute:
+   `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -c "from app.remote_execution.request_builder import freeze_request_provenance; m=freeze_request_provenance(local_run_id='run_fixture', recording_fingerprint='a'*64, source_data_sha256='b'*64, dataset_name='SpaceNet', dataset_split='test', dataset_key='0', label_space='spacenet_14', pipeline_id='zoomspec_yolo26n_aug_combined_frn_v3', pipeline_version='1.0.0', required_remote_runtime_commit='c'*40, orchestrator_commit='d'*40, asset_manifest_sha256='16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08', remote_profile='remote', id_factory=lambda: 'id_fixture'); print(m['request_sha256'])"`
+   Record the printed 64-hex value as `LEGACY_REQUEST_SHA256`. B3 MUST assert this value is unchanged after the wire change.
+4. Run full backend suite and frontend suite; record pass counts.
+5. Confirm `python -c "import sys; import app.pipelines.registry; assert 'torch' not in sys.modules"` from `PYTHONPATH=backend/.venv` passes.
 
 **No commit.**
 
@@ -359,7 +368,27 @@ def create_runtime():  # local-capable plugins only
     return PipelineRuntimeAdapter(<PipelineClass>())
 ```
 
-For `zoomspec.../definition.py`, `runtime_factory_ref=None` (remote-only; runtime constructed by the remote executor in Phase E).
+For `zoomspec.../definition.py`, declare the **technical capability and input
+compatibility early** (Phase A) so certificate-driven projections can be turned
+on in Phase D without a later identity change, and set
+`runtime_factory_ref=None` (the runtime factory is created in Phase E):
+
+```python
+from app.pipelines.base import ExecutionCapability
+ZOOMSPEC_FROZEN_DEFINITION = PipelineDefinition(
+    # ... existing fields unchanged ...
+    input_compatibility=("spacenet_14",),
+    dataset_adapters=("SpaceNet",),
+    model_release_required=True,
+    technical_execution_capabilities=(ExecutionCapability("remote_gpu", "cuda", "float16"),),
+    recommended_execution="remote_gpu",
+)
+PLUGIN = PluginDeclaration(definition=ZOOMSPEC_FROZEN_DEFINITION, runtime_factory_ref=None)
+```
+
+This preserves the legacy `executors_supported=("remote_gpu",)` /
+`recommended_executor="remote_gpu"` projections until Phase D replaces them with
+certificate-derived projections.
 
 **RED test (`backend/tests/test_plugin_registry.py`, new):**
 
@@ -371,6 +400,10 @@ def test_plugin_modules_json_and_env_merge(monkeypatch): ...
 def test_registry_import_is_torch_free():   # subprocess: import app.pipelines.plugin_registry
     # assert 'torch' not in sys.modules and 'ultralytics' not in sys.modules
 def test_zoom_handle_defers_model_load(): ...   # load_runtime() raises for remote-only
+def test_zoomspec_declares_remote_gpu_capability_early(): ...
+    # definition.technical_execution_capabilities == (ExecutionCapability("remote_gpu","cuda","float16"),)
+def test_zoomspec_input_compatibility_declared_early(): ...
+    # definition.input_compatibility == ("spacenet_14",) and model_release_required is True
 ```
 
 **Expected failure (RED):** registry module missing; modules lack `PLUGIN`.
@@ -461,7 +494,7 @@ class ModelRelease:
     plugin_id: str
     plugin_version: str
     model_release_id: str
-    asset_manifest_path: Path
+    asset_manifest_path: Path          # absolute, resolved inside the plugin package
     asset_manifest_sha256: str
 
 @dataclass(frozen=True)
@@ -470,20 +503,27 @@ class ResolvedModelRelease:
     manifest: PipelineAssetManifest
 
 class ModelReleaseStore:
-    def __init__(self, release_root: Path, defaults: Mapping[tuple[str, str], str]) -> None: ...
+    def __init__(self, plugins_root: Path, defaults: Mapping[tuple[str, str], str]) -> None:
+        """Discover release records at <plugins_root>/<pkg>/model_releases/*.json."""
     def list_releases(self, plugin_id: str, plugin_version: str) -> list[ModelRelease]: ...
     def get(self, plugin_id: str, plugin_version: str, model_release_id: str) -> ModelRelease:
         """Raise PlatformError('MODEL_RELEASE_NOT_FOUND')."""
     def default_release_id(self, plugin_id: str, plugin_version: str) -> str | None: ...
     def resolve(self, plugin_id: str, plugin_version: str, requested: str | None) -> ResolvedModelRelease:
-        """Explicit requested or platform default; verify manifest self-hash == record hash."""
+        """Explicit requested or platform default; validate path containment; verify manifest self-hash == record hash."""
     def resolve_by_manifest_sha(self, plugin_id: str, plugin_version: str, asset_manifest_sha256: str) -> ModelRelease:
-        """Reverse lookup for remote-side release identification; MODEL_RELEASE_MISMATCH otherwise."""
+        """Reverse lookup; raise PlatformError('MODEL_RELEASE_MISMATCH') on zero/multiple matches."""
 
 def load_model_release_defaults(path: Path) -> dict[tuple[str, str], str]: ...
 ```
 
-**Data (create `backend/app/pipelines/model_release_defaults.json`):** initially `{"defaults": {}}` (ZoomSpec golden added in E1).
+**Path-safety rule:** when a record is loaded, `asset_manifest_path` is resolved
+against its plugin package root and MUST be contained within that root
+(`resolved.is_relative_to(plugin_pkg_root)`); symlink/`..` escape or an absolute
+path outside the package raises `PlatformError('MODEL_RELEASE_MISMATCH')`. The
+path is never taken from the wire.
+
+**Data (create `backend/app/pipelines/model_release_defaults.json`):** initially `{"defaults": {}}` (the ZoomSpec golden default is added in B5, before any certificate-driven projection).
 
 **Release record format** (stored at `<plugin_pkg>/model_releases/<release_id>.json`):
 
@@ -503,6 +543,9 @@ def test_resolve_explicit_release(): ...
 def test_unknown_release_raises_not_found(): ...
 def test_manifest_hash_mismatch_raises(): ...
 def test_resolve_by_manifest_sha_roundtrip(): ...
+def test_manifest_path_outside_package_rejected(tmp_path): ...
+def test_manifest_path_parent_escape_rejected(tmp_path): ...
+def test_two_release_ids_may_share_one_manifest_hash(): ...
 ```
 
 **Expected failure (RED):** module missing.
@@ -560,51 +603,72 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_a
 
 ---
 
-## TASK B3 — Thread `model_release_id` provenance (request metadata + envelope only)
+## TASK B3 — Thread `model_release_id` wire + provenance identity
 
-**Design decision (preserve recovery):** `model_release_id` is **not** added to
-`RemoteExecutionBatchV1`/`RemotePipelineRefV1`. Adding an optional field would
-appear in `model_dump` and change `request_sha256`, breaking byte-exact
-`build_batch()` reconstruction for pre-M9.2 orphaned runs. Instead:
+**Design decision (preserve recovery while identifying release on the wire):**
+`model_release_id` **is** part of the internal request wire, but canonical
+serialization MUST omit it when `None`, so a legacy request (built before M9.2)
+still hashes byte-exactly.
 
+- `RemotePipelineRefV1` gains `model_release_id: WireIdentifier | None = None`.
+- `canonical_request_payload` uses `model_dump(exclude={"request_sha256"}, exclude_none=True)`
+  so a `None` optional field contributes nothing. (No other batch field is
+  optional, so this is a no-op for legacy metadata.)
+- `build_batch(metadata)` sets `RemotePipelineRefV1(..., model_release_id=metadata.get("model_release_id"))`.
+- New runs hash, transmit, and verify the exact `model_release_id`; two releases
+  sharing one `asset_manifest_sha256` remain distinguishable by request identity.
 - Local frozen `execution_metadata_json` gains `model_release_id`.
-- Remote resolves the release by `(plugin_id, plugin_version, asset_manifest_sha256)`
-  (already on the wire) via `ModelReleaseStore.resolve_by_manifest_sha` and echoes
-  `model_release_id` in `RemoteExecutionEnvelopeV1`.
+- Remote echoes `model_release_id` in `RemoteExecutionEnvelopeV1`.
 - `result_ingestor` verifies envelope vs local metadata **only when local
-  metadata carries the key** (legacy-safe).
+  metadata carries a non-None key** (legacy-safe).
 
 **First: read before editing**
-- `backend/app/remote_execution/request_builder.py` (`FROZEN_REQUEST_KEYS`, `freeze_request_provenance`).
-- `backend/app/remote_execution/schema.py` (`RemoteExecutionEnvelopeV1`).
+- `backend/app/remote_execution/schema.py` (`RemotePipelineRefV1`, `RemoteExecutionEnvelopeV1`).
+- `backend/app/remote_execution/canonical.py` (`canonical_request_payload`).
+- `backend/app/remote_execution/request_builder.py` (`FROZEN_REQUEST_KEYS`, `freeze_request_provenance`, `_build_batch_content`).
 - `backend/app/remote_execution/result_ingestor.py` (`_REQUIRED_METADATA_KEYS`, `_verify_envelope_identity`).
-- `backend/app/analysis/service.py` (`_create_remote_gpu_run`).
 
 **Interfaces:**
-- `request_builder.freeze_request_provenance(..., model_release_id: str | None = None)` adds `"model_release_id"` to metadata and to `FROZEN_REQUEST_KEYS`; it is **not** passed to `build_batch`.
+- `RemotePipelineRefV1.model_release_id: WireIdentifier | None = None`.
+- `canonical_request_payload(batch)` = `batch.model_dump(exclude={"request_sha256"}, exclude_none=True)`.
+- `request_builder.freeze_request_provenance(..., model_release_id: str | None = None)` adds `"model_release_id"` to metadata and `FROZEN_REQUEST_KEYS`; `_build_batch_content` passes it into `RemotePipelineRefV1`.
 - `RemoteExecutionEnvelopeV1` gains `model_release_id: WireIdentifier | None = None`.
-- `result_ingestor._verify_envelope_identity` adds: if `metadata.get("model_release_id")` is truthy, require `envelope.model_release_id == metadata["model_release_id"]`; else skip (legacy).
+- `result_ingestor._verify_envelope_identity`: if `metadata.get("model_release_id")` is truthy, require equality with `envelope.model_release_id`; else skip (legacy).
 
 **RED test (`backend/tests/test_request_release_provenance.py`, new):**
 
 ```python
-def test_freeze_metadata_includes_model_release_id(): ...
-def test_build_batch_hash_unaffected_by_model_release_id():
-    # build_batch(metadata_without_release) hash == build_batch(metadata_with_release) hash
-def test_legacy_metadata_reconstructs_previous_hash(): ...   # no model_release_id key
+LEGACY_REQUEST_SHA256 = "<recorded in TASK 0>"
+
+def test_legacy_request_hash_byte_exact():
+    batch = build_batch(LEGACY_FIXTURE_METADATA)          # no model_release_id key
+    assert batch.request_sha256 == LEGACY_REQUEST_SHA256
+    assert compute_request_sha256(batch) == LEGACY_REQUEST_SHA256
+
+def test_none_model_release_id_omitted_from_canonical_payload():
+    assert "model_release_id" not in canonical_request_payload(batch)["pipeline"]
+
+def test_two_release_ids_sharing_one_manifest_are_distinguishable():
+    a = build_batch({**LEGACY_FIXTURE_METADATA, "model_release_id": "release_a"})
+    b = build_batch({**LEGACY_FIXTURE_METADATA, "model_release_id": "release_b"})
+    assert a.asset_manifest_sha256 == b.asset_manifest_sha256
+    assert a.request_sha256 != b.request_sha256
+    assert a.pipeline.model_release_id == "release_a"
+
+def test_request_identification_roundtrip_with_release(): ...
 def test_ingest_verifies_release_when_present_and_allows_legacy(): ...
 ```
 
-**Expected failure (RED):** metadata lacks key; schema rejects unknown envelope field.
+**Expected failure (RED):** `RemotePipelineRefV1` rejects `model_release_id`; canonical payload includes `None`; envelope rejects the field.
 
 **GREEN command:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_request_release_provenance.py -v
 ```
 
-**Regression:** `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_remote_request_freeze.py backend/tests/test_remote_result_ingestor.py backend/tests/test_remote_coordinator.py -q`
+**Regression:** `PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_remote_execution_canonical.py backend/tests/test_remote_request_freeze.py backend/tests/test_remote_result_ingestor.py backend/tests/test_remote_coordinator.py -q`
 
-**Commit checkpoint:** `feat: thread model release provenance through request and envelope`
+**Commit checkpoint:** `feat: add model release to request wire identity`
 
 ---
 
@@ -616,7 +680,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 - `backend/app/analysis/service.py` (`asset_manifest_sha256_resolver`, `_create_remote_gpu_run`).
 
 **Interfaces:**
-- `main._wire_remote_lifecycle` builds a `ModelReleaseStore` from `plugin_modules.json` + `model_release_defaults.json` and stores `app.state.model_release_store`; remove the ZoomSpec literal path helper.
+- `main.create_app` builds a `ModelReleaseStore` from `plugin_modules.json` + `model_release_defaults.json` and stores `app.state.model_release_store` **before** the remote-profile try/except, so the store exists even when no remote config is present; remove the ZoomSpec literal path helper.
 - `identity.resolve_asset_manifest_sha256` becomes `resolve_asset_manifest_sha256(store, plugin_id, plugin_version, request) -> str` delegating to `ModelReleaseStore.resolve`.
 - `AnalysisService` accepts `model_release_store` and an optional requested release; resolves once and uses it for `freeze_request_provenance`.
 
@@ -632,6 +696,49 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 ```
 
 **Commit checkpoint:** `feat: wire model release resolution into control plane`
+
+---
+
+## TASK B5 — ZoomSpec golden ModelRelease + default (identity metadata early)
+
+**Rationale:** the golden ModelRelease and its default must exist **before**
+Phase D activates certificate-driven projections, so D1's seeded certificate is
+never dangling and every intermediate commit preserves ZoomSpec remote
+availability.
+
+**First: read before editing**
+- `backend/app/remote_execution/model_release.py` (Task B1).
+- `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/asset_manifest.json`.
+
+**Interfaces (data only; no logic changes):**
+- Create `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/model_releases/golden.json`:
+
+```json
+{ "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3", "plugin_version": "1.0.0",
+  "model_release_id": "golden",
+  "asset_manifest_path": "asset_manifest.json",
+  "asset_manifest_sha256": "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08" }
+```
+
+- Modify `backend/app/pipelines/model_release_defaults.json` to add
+  `["zoomspec_yolo26n_aug_combined_frn_v3", "1.0.0"] -> "golden"`.
+
+**RED test (`backend/tests/test_zoomspec_golden_release.py`, new):**
+
+```python
+def test_golden_release_discovered_and_hash_matches(): ...
+def test_default_resolves_to_golden(): ...
+def test_golden_manifest_payload_still_v1(): ...
+```
+
+**Expected failure (RED):** release record/default absent.
+
+**GREEN command:**
+```bash
+PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_zoomspec_golden_release.py -v
+```
+
+**Commit checkpoint:** `feat: add zoomspec golden model release and default`
 
 ---
 
@@ -802,13 +909,16 @@ class RuntimeDescriptor:
     device_type: str
     device_index: int | None
     precision: str
-    environment_ref: str | None = None
+    environment_ref: str | None = None    # PRIVATE (internal runtime/profile reference)
+    environment_label: str | None = None  # PUBLIC (safe logical label, never a path)
     def public_device(self) -> str | None:
         """'cpu' for cpu; 'cuda:{index}' for cuda; None if unknown."""
     def public_projection(self) -> dict:
+        # environment_ref is NEVER returned here; only the safe label or None.
         return {"executor": self.executor, "device": self.public_device(),
-                "environment": None if self.environment_ref is None else self.environment_ref}
-    def to_metadata(self) -> dict: ...
+                "environment": self.environment_label}
+    def to_metadata(self) -> dict:
+        """Full internal metadata (includes environment_ref) for execution_metadata_json."""
     @classmethod
     def from_metadata(cls, payload: Mapping[str, Any] | None) -> "RuntimeDescriptor | None": ...
 
@@ -817,24 +927,52 @@ class ExecutionCertificate:
     plugin_id: str; plugin_version: str; model_release_id: str
     executor: str; device_type: str; precision: str
     runtime_ref: str; evidence_ref: str
+    def key(self) -> tuple[str, str, str, str, str, str, str]:
+        return (self.plugin_id, self.plugin_version, self.model_release_id,
+                self.executor, self.device_type, self.precision, self.runtime_ref)
 
 class ExecutionCertificateStore:
     def __init__(self, certificates: Iterable[ExecutionCertificate]) -> None: ...
-    def is_certified(self, *, plugin_id, plugin_version, model_release_id, executor, device_type, precision) -> bool: ...
+    def is_certified(self, *, plugin_id, plugin_version, model_release_id,
+                     executor, device_type, precision, runtime_ref) -> bool:
+        """True only when ALL fields, including runtime_ref, match exactly."""
     def certified_capabilities(self, *, plugin_id, plugin_version, model_release_id,
-                               technical: Iterable[ExecutionCapability]) -> list[ExecutionCapability]: ...
+                               runtime_ref: str,
+                               technical: Iterable[ExecutionCapability]) -> list[ExecutionCapability]:
+        """Filter technical capabilities to those with an exact runtime_ref-matching certificate."""
 
 def load_execution_certificates(path: Path) -> list[ExecutionCertificate]: ...
 ```
 
-**Data (create `backend/app/pipelines/execution_certificates.json`):** seeded with the M9.1-accepted ZoomSpec golden `remote_gpu`/cuda/float16 certificate (evidence `m9.1-live-gate`) so Phase E does not regress remote availability. No `local_cpu` certificate.
+**Data (create `backend/app/pipelines/execution_certificates.json`):** seeded with
+the M9.1-accepted ZoomSpec **golden** release `remote_gpu`/cuda/float16
+certificate and its runtime reference (evidence `m9.1-live-gate`), so Phase D
+activates certificate-driven projections against an existing release and the
+certificate is never dangling. No `local_cpu` certificate.
+
+```json
+{ "certificates": [
+  { "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3", "plugin_version": "1.0.0",
+    "model_release_id": "golden", "executor": "remote_gpu", "device_type": "cuda",
+    "precision": "float16", "runtime_ref": "remote:m9.1-rtx5090",
+    "evidence_ref": "m9.1-live-gate" } ] }
+```
 
 **RED test (`backend/tests/test_runtime_descriptor.py`, `test_execution_certificate.py`):**
 
 ```python
 def test_public_projection_cpu_and_cuda(): ...
+def test_environment_ref_never_in_public_projection():
+    d = RuntimeDescriptor("remote_gpu", "cuda", 0, "float16",
+                          environment_ref="/root/miniconda3", environment_label="m9.1-rtx5090")
+    assert d.public_projection()["environment"] == "m9.1-rtx5090"
+    assert d.public_projection()["environment"] != d.environment_ref
+    assert d.environment_ref in d.to_metadata()          # internal only
+def test_environment_label_none_projects_none(): ...
 def test_descriptor_roundtrip_metadata(): ...
 def test_certificate_is_release_and_precision_specific(): ...
+def test_different_runtime_ref_is_uncertified():
+    # same plugin/release/executor/device/precision, different runtime_ref -> is_certified False
 def test_uncertified_capability_filtered_out(): ...
 def test_loading_seed_certificates(): ...
 ```
@@ -855,7 +993,8 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 **First: read before editing**
 - `backend/app/analysis/service.py:80-131,147-220`.
 - `backend/app/remote_execution/executor.py` (`RemoteExecutorProbe`, `SshRemoteExecutorProbe`).
-- `backend/app/analysis/job_manager.py` (`LocalJobManager`).
+- `backend/app/analysis/job_manager.py` (`LocalJobManager` — uses control-plane `sys.executable`; must not be used for plugin inference).
+- `backend/app/core/config.py` (`Settings`).
 
 **Interfaces (extend `backend/app/remote_execution/runtime.py`):**
 
@@ -871,21 +1010,54 @@ class ExecutorRegistry:
                  certificates: ExecutionCertificateStore) -> None: ...
     def provider(self, executor: str) -> ExecutorProvider: ...   # EXECUTION_CAPABILITY_UNAVAILABLE
     def technical_capabilities(self, definition) -> list[ExecutionCapability]: ...
-    def certified_capabilities(self, definition, model_release_id) -> list[ExecutionCapability]: ...
+    def certified_capabilities(self, definition, model_release_id, runtime_ref) -> list[ExecutionCapability]: ...
     def availability(self, definition, model_release, recording) -> ExecutorAvailabilityRead: ...
 ```
 
-- `RemoteGpuExecutorProvider` adapts `SshRemoteExecutorProbe` + `CoordinatorJobManager`; descriptor `remote_gpu/cuda/<index>/float16`.
-- `LocalCpuExecutorProvider` (create `backend/app/analysis/local_executor.py`) adapts `LocalJobManager`; descriptor `local_cpu/cpu/None/float32`; readiness probe checks the configured interpreter and required module imports in a subprocess (never assumes CPU ready).
+- `RemoteGpuExecutorProvider` adapts `SshRemoteExecutorProbe` + `CoordinatorJobManager`; descriptor `executor="remote_gpu", device_type="cuda", precision="float16", environment_ref=<profile name>, environment_label=<profile name>`; `runtime_ref` = the provider's runtime reference (e.g. `"remote:m9.1-rtx5090"`).
+- `LocalCpuExecutorProvider` (create `backend/app/analysis/local_executor.py`) does **not** use the control-plane `sys.executable`. It launches a separate inference worker process with an explicitly configured interpreter and worker root.
+
+**Explicit local inference config (modify `backend/app/core/config.py`):**
+
+```python
+class Settings(BaseSettings):
+    # ... existing ...
+    local_cpu_python_path: Path | None = None     # WSP_LOCAL_CPU_PYTHON_PATH
+    local_gpu_python_path: Path | None = None     # WSP_LOCAL_GPU_PYTHON_PATH
+    local_inference_work_root: Path | None = None # WSP_LOCAL_INFERENCE_WORK_ROOT
+```
+
+**Local launch interface (`backend/app/analysis/local_executor.py`):**
+
+```python
+class LocalInferenceWorkerProvider:
+    name = "local_cpu"  # or "local_gpu" for the GPU provider
+    def __init__(self, *, interpreter: Path, work_root: Path, job_manager_factory) -> None: ...
+    def runtime_descriptor(self) -> RuntimeDescriptor:
+        # environment_ref = str(interpreter) (private); environment_label = "local-cpu"
+    def probe(self) -> tuple[bool, str | None]:
+        """Run `<interpreter> -c 'import <plugin runtime deps>'` and check work_root;
+        return (False, reason) on missing interpreter/deps. Never assume CPU ready."""
+    def launch(self, run_id: str, *, coordinator_token: str | None) -> int:
+        # Popen([str(self._interpreter), "-m", "app.analysis.worker", run_id], ...)
+        # shell=False, cwd=backend_root, env includes WSP_PROJECT_ROOT/DATA_ROOT/...
+```
+
+- If `local_cpu_python_path` is unset, the provider is not registered and `local_cpu` remains unavailable.
+- Control-plane `.venv` stays torch-free; the configured interpreter is a separate ML runtime.
 - `AnalysisService` replaces `if executor == "remote_gpu"` with `provider = executor_registry.provider(executor)`; remote coord launcher comes from the provider.
-- `PipelineDefinition.executors_supported` / `recommended_executor` read-model projections are computed from certified capabilities.
+- `PipelineDefinition.executors_supported` / `recommended_executor` read-model projections are computed from certified capabilities for the provider's `runtime_ref`.
 
 **RED test (`backend/tests/test_executor_registry.py`, `test_local_worker_provider.py`):**
 
 ```python
 def test_dispatch_by_provider_not_literal(): ...
 def test_uncertified_executor_unavailable(): ...
-def test_local_cpu_provider_probes_interpreter(monkeypatch): ...
+def test_local_provider_uses_configured_interpreter_not_control_plane(monkeypatch):
+    # intercept Popen argv; assert argv[0] == configured interpreter and != sys.executable
+def test_local_provider_unset_interpreter_not_registered(): ...
+def test_local_probe_reports_missing_interpreter_and_missing_deps(): ...
+def test_certified_capabilities_require_matching_runtime_ref(): ...
 def test_projections_reflect_certificates(): ...
 ```
 
@@ -918,22 +1090,31 @@ class PluginItemExecutor:
     def execute(self, item, job_root: Path) -> None:
         # 1 verify batch runtime commit vs worker
         # 2 validate request_sha256
-        # 3 resolve plugin handle; verify pipeline id/version
-        # 4 resolve model release by asset_manifest_sha256
+        # 3 handle = plugin_registry.get(batch.pipeline.id, batch.pipeline.version)
+        #   verify batch.pipeline.model_release_id and definition id/version
+        # 4 resolve model release (by wire model_release_id; verify asset_manifest_sha256)
         # 5 verify asset manifest + asset bytes (namespaced trusted paths)
         # 6 resolve recording via DatasetAdapter
-        # 7 validate parameters against plugin schema
-        # 8 load plugin runtime; execute with RuntimeDescriptor
-        # 9 build package with resolved definition + descriptor projection
+        # 7 validate parameters against handle.definition.parameter_schema
+        # 8 runtime = handle.load_runtime()   # lazy; only PluginHandle exposes this
+        #   output = runtime.execute(recording_input, item.parameters, workspace, runtime_descriptor, assets)
+        # 9 build package with handle.definition + runtime_descriptor.public_projection()
         # 10 publish envelope + zip (write-once)
 ```
 
-Modify `runner._cli_work` to construct `PluginItemExecutor` from the registry seam instead of importing `ZoomSpecRemoteItemExecutor`. The runner stays the lifecycle owner.
+`PluginItemExecutor` MUST call `PluginHandle.load_runtime()`; there is no
+`PluginRegistry.load_runtime`. Modify `runner._cli_work` to construct
+`PluginItemExecutor` from the registry seam instead of importing
+`ZoomSpecRemoteItemExecutor`. The runner stays the lifecycle owner.
 
 **RED test (`backend/tests/test_plugin_executor.py`, new; update `test_remote_runner_work_wiring.py`):**
 
 ```python
 def test_cli_work_builds_generic_executor(monkeypatch): ...
+def test_plugin_executor_uses_handle_load_runtime(): ...
+    # fake registry returns a handle whose load_runtime() is observed
+def test_plugin_executor_verifies_wire_release_id_and_manifest_hash(): ...
+    # batch.pipeline.model_release_id drives release selection; mismatch fails closed
 def test_plugin_executor_fails_closed_on_release_mismatch(): ...
 def test_plugin_executor_fails_closed_on_asset_mismatch(): ...
 def test_plugin_executor_fails_closed_on_parameter_invalid(): ...
@@ -1031,39 +1212,35 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 # PHASE E — ZoomSpec Golden Migration
 
-## TASK E1 — ZoomSpec `PLUGIN` declaration + golden ModelRelease
+## TASK E1 — ZoomSpec runtime factory + plugin module registration
+
+**Rationale:** the ZoomSpec technical capability (A3), golden ModelRelease, and
+default (B5) already exist. E1 creates only the lazy runtime factory and points
+the plugin registry at it, so identity metadata is not first created inside the
+certificate-driven phase.
 
 **First: read before editing**
-- `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/{definition.py,pipeline.py,asset_manifest.json}`.
+- `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/{definition.py,pipeline.py,asset_manifest.json,model_releases/golden.json}`.
 - `backend/app/pipelines/plugin.py`, `backend/app/remote_execution/model_release.py`.
 
 **Interfaces (create `.../plugin.py`):**
 
 ```python
-ZOOMSPEC_DEFINITION = ZOOMSPEC_FROZEN_DEFINITION  # reuse; add input_compatibility=("spacenet_14",),
-                                                  # dataset_adapters=("SpaceNet",),
-                                                  # model_release_required=True,
-                                                  # technical_execution_capabilities=(ExecutionCapability("remote_gpu","cuda","float16"),)
-PLUGIN = PluginDeclaration(definition=ZOOMSPEC_DEFINITION,
-                           runtime_factory_ref="app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin:build_runtime")
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition import ZOOMSPEC_FROZEN_DEFINITION
+PLUGIN = PluginDeclaration(
+    definition=ZOOMSPEC_FROZEN_DEFINITION,   # already carries technical caps + input compat (A3)
+    runtime_factory_ref="app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin:build_runtime",
+)
 
 def build_runtime(*, assets: Mapping[str, Path], runtime_descriptor: RuntimeDescriptor, label_space):
     from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.pipeline import ZoomSpecFrozenPipeline
     return _ZoomSpecRuntime(ZoomSpecFrozenPipeline(...))
 ```
 
-`_ZoomSpecRuntime.execute` maps AssetManifest logical names to constructor args and calls the frozen pipeline with `{}` parameters.
-
-**Data (create `.../model_releases/golden.json`):**
-
-```json
-{ "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3", "plugin_version": "1.0.0",
-  "model_release_id": "golden",
-  "asset_manifest_path": "asset_manifest.json",
-  "asset_manifest_sha256": "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08" }
-```
-
-**Data (modify `backend/app/pipelines/model_release_defaults.json`):** add `("zoomspec_yolo26n_aug_combined_frn_v3","1.0.0") -> "golden"`.
+`_ZoomSpecRuntime.execute` maps AssetManifest logical names
+(`detector_checkpoint`, `frn_checkpoint`, `ls_stft_normalization`) to constructor
+args and calls the frozen pipeline with `{}` parameters. Torch stays lazily
+imported inside the pipeline modules; `plugin.py` itself is torch-free.
 
 **Data (modify `backend/app/pipelines/plugin_modules.json`):** replace the
 `.../definition.py` entry with `app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin`
@@ -1075,19 +1252,19 @@ the JSON points at `plugin.py`).
 
 ```python
 def test_zoomspec_plugin_declaration_matches_frozen_definition(): ...
-def test_golden_release_references_unchanged_manifest_hash(): ...
-def test_default_release_resolves_to_golden(): ...
-def test_plugin_declaration_import_is_torch_free(): ...   # subprocess
+def test_zoomspec_runtime_factory_ref_resolves_and_is_torch_free_at_import(): ...
+def test_plugin_declaration_import_is_torch_free(): ...   # subprocess: import plugin module
+def test_golden_release_still_present_from_b5(): ...
 ```
 
-**Expected failure (RED):** no plugin declaration / release record.
+**Expected failure (RED):** no `build_runtime` / `plugin.py`; `plugin_modules.json` still points at `definition.py`.
 
 **GREEN command:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_zoomspec_plugin.py -v
 ```
 
-**Commit checkpoint:** `feat: register zoomspec golden plugin and model release`
+**Commit checkpoint:** `feat: add zoomspec plugin runtime factory`
 
 ---
 
@@ -1099,7 +1276,9 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 - `backend/tests/test_zoomspec_remote_executor.py`, `backend/tests/test_remote_live_loop.py`.
 
 **Interfaces:**
-- `PluginItemExecutor` resolves the ZoomSpec runtime via `PluginRegistry.load_runtime()` + `ModelReleaseStore.resolve_by_manifest_sha`.
+- `PluginItemExecutor` resolves the ZoomSpec runtime via
+  `PluginHandle.load_runtime()` (never `PluginRegistry.load_runtime`) +
+  `ModelReleaseStore.resolve_by_manifest_sha`.
 - `build_analysis_package_zip(output, recording_name, dataset_name, runtime_descriptor, pipeline_definition, label_space)`.
 - Delete `zoomspec_executor.py`; update imports in `runner.py` (already D3) and all tests.
 
@@ -1192,8 +1371,19 @@ class CPNBandwidthTierPipeline(Pipeline):
     @property
     def definition(self) -> PipelineDefinition: ...
     def run(self, recording, parameters, workspace) -> PipelineOutput:
-        # build_ls_stft_spectrogram -> CPNDetector.detect_batch -> DetectionPayload(class_id=tier, class_name=tier_name)
+        # build_ls_stft_spectrogram(iq, ..., normalization=normalization, ...)
+        # -> CPNDetector.detect_batch -> DetectionPayload(class_id=tier, class_name=tier_name)
         # No AHLP/FRN. Output label space = cpn_bandwidth_tier_v1.
+```
+
+The runtime requires LS-STFT normalization, so its ModelRelease/AssetManifest
+MUST declare at least `detector_checkpoint` **and** `ls_stft_normalization`. The
+CPN package owns its own AssetManifest V1 with two logical assets:
+
+```json
+{ "pipeline_id": "cpn_bandwidth_tier", "pipeline_version": "1.0.0",
+  "assets": { "detector_checkpoint": "<sha256>", "ls_stft_normalization": "<sha256>" },
+  "asset_manifest_sha256": "<self-hash computed at implementation time>" }
 ```
 
 **Create `backend/app/pipelines/cpn_bandwidth_tier/plugin.py`:**
@@ -1218,12 +1408,18 @@ PLUGIN = PluginDeclaration(
 
 `build_runtime` constructs `CPNBandwidthTierPipeline` from assets + runtime descriptor. The CPN-only plugin **reuses the frozen detector module** (`app.pipelines.zoomspec...detector`) as a shared scientific dependency; it must not import control-plane modules.
 
-**ModelRelease** `backend/app/pipelines/cpn_bandwidth_tier/model_releases/golden.json` referencing the existing detector checkpoint as its AssetManifest V1 (a new `asset_manifest.json` in the CPN package with one logical asset `detector_checkpoint`, self-hash computed at implementation time).
+**ModelRelease** `backend/app/pipelines/cpn_bandwidth_tier/model_releases/golden.json`
+referencing the CPN package's own AssetManifest V1 (two logical assets:
+`detector_checkpoint`, `ls_stft_normalization`) and its self-hash computed at
+implementation time. `build_runtime` loads the normalization asset into an
+`LSSTFTNormalization` and passes it to `CPNBandwidthTierPipeline`.
 
 **RED test (`backend/tests/test_cpn_bandwidth_tier_plugin.py`, new):**
 
 ```python
 def test_cpn_plugin_definition_input_output_split(): ...
+def test_cpn_manifest_declares_detector_and_normalization_assets(): ...
+def test_cpn_release_resolves_and_manifest_hash_matches(): ...
 def test_cpn_pipeline_maps_tiers_to_label_space(): ...
 def test_cpn_plugin_import_is_torch_free_at_declaration(): ...
 ```
@@ -1363,13 +1559,13 @@ Rules:
 |---|---|
 | §5.1 Plugin declaration | A2, A3 |
 | §5.2 PluginVersion (opaque) | A1, A3 |
-| §5.3 ModelRelease vs PluginVersion | B1, E1 |
-| §5.4/§9.2 AssetManifest V1 frozen | B2, E1 |
+| §5.3 ModelRelease vs PluginVersion | B1, B5, E1 |
+| §5.4/§9.2 AssetManifest V1 frozen | B2, B5, F1 |
 | §5.5/§10 DatasetAdapter | C1, C2 |
-| §5.6/§8.4/§9/§18 Certification | D1, D2, E3 |
+| §5.6/§8.4/§9/§18 Certification | A3, B5, D1, D2, E3 |
 | §5.7/§8.2/§10.3/§17 input vs output label space | C4, F1 |
 | §8.5 registry + lazy factory | A2, A3 |
-| §9.5 resolved default release | B1, B4 |
+| §9.5 resolved default release | B1, B4, B5 |
 | §11.1 executor kinds / separate worker | D2 |
 | §11.3 RuntimeDescriptor + public projection | D1, D5 |
 | §11.4 namespaced trusted paths + probe | D4 |
@@ -1390,25 +1586,37 @@ Rules:
 **Placeholder scan:** no `TODO`/`TBD`/`FIXME`; every task names exact files, interfaces, RED tests, GREEN commands, and a commit checkpoint. The only deferred value is the CPN AssetManifest self-hash, which is necessarily computed at implementation time and is explicitly noted in F1.
 
 **Type/signature consistency:**
-- `PipelineDefinition` extensions (A1) are consumed by A2/A3, B1/B4, C4, D1/D2, E1, F1.
-- `ExecutionCapability` (A1) is consumed by D1 (`certified_capabilities`) and E1/F1 declarations.
-- `PluginRuntime.execute(recording, parameters, workspace, runtime=None, assets=None)` (A2) is consumed by D3 and E1.
-- `RuntimeDescriptor.public_projection()` (D1) is consumed by D5 (publisher + ingestor) and D4 (probe).
+- `PipelineDefinition` extensions (A1) are consumed by A2/A3, B1/B4/B5, C4, D1/D2, E1, F1.
+- `ExecutionCapability` (A1) is consumed by D1 (`certified_capabilities(runtime_ref=...)`), A3 (ZoomSpec remote_gpu) and F1 (CPN remote_gpu).
+- `PluginRuntime.execute(recording, parameters, workspace, runtime=None, assets=None)` (A2) is consumed by D3 and E1; D3 calls `PluginHandle.load_runtime()` (never `PluginRegistry.load_runtime`).
+- `RuntimeDescriptor` (D1) exposes private `environment_ref` + public `environment_label`; `public_projection()` returns only `environment_label`. Consumed by D4 (probe), D5 (publisher/ingestor), D2 (providers).
+- `ExecutionCertificate.runtime_ref` is part of `key()`; `is_certified` and `certified_capabilities` require an exact `runtime_ref`.
+- `ModelReleaseStore.resolve_by_manifest_sha` (B1) is consumed by D3/E2, while new runs also carry the exact `model_release_id` on the wire (B3).
 - `ResolvedRecordingInput` (C1) is consumed by D3 and re-exported via resolver (C2).
+- `LocalInferenceWorkerProvider` (D2) takes the configured interpreter (`Settings.local_cpu_python_path` / `local_gpu_python_path`); it never uses `sys.executable`.
 
-**Dependency order:** A→B→C→D→E→F with explicit `Depends on` semantics; B4 consumes A3+B1; C3/C4 consume A2; D3 consumes A3+B1+C1; E consumes D; F consumes E. No forward dependency.
+**Dependency order:** A→B→C→D→E→F. Within B, B5 (golden release/default) precedes Phase D so D1's seed certificate is never dangling. A3 declares ZoomSpec technical capability before D2 activates certificate-driven projections. C3/C4 consume A2; D3 consumes A3+B1+B5+C1; E consumes D; F consumes E. No forward dependency.
 
-**YAGNI:** no model registry service, no multi-GPU scheduler, no release UI, no streaming/CDN, no vendor abstraction. `local_gpu` is declared but not implemented (matches spec). M9.3 excluded.
+**YAGNI:** no model registry service, no multi-GPU scheduler, no release UI, no streaming/CDN, no vendor abstraction. `local_gpu` is declared but not implemented (matches spec); `local_cpu` requires an explicitly configured interpreter and is unavailable otherwise. M9.3 excluded.
 
 **Provenance preservation:**
 - B2 locks the V1 manifest payload and golden hash.
-- B3 deliberately keeps `model_release_id` off the hashed request batch so `build_batch()` reproduces pre-M9.2 `request_sha256` byte-exactly; the envelope field is optional and ingest verifies it only when local metadata has it (legacy-safe).
-- D5 validates package execution against the run's persisted descriptor, with a legacy `remote_gpu -> cuda:0` fallback.
+- B3 adds optional `model_release_id` to the hashed request wire but omits it when `None`, so `build_batch()` reproduces pre-M9.2 `request_sha256` byte-exactly (asserted against the TASK 0 fixture); new runs hash/transmit/verify the exact release id.
+- B1 validates `asset_manifest_path` containment inside the plugin package; asset file paths remain deployment-only.
+- D5 validates package execution against the run's persisted descriptor projection, with a legacy `remote_gpu -> cuda:0` fallback.
 - No task weakens runtime-commit, fingerprint/source-hash, terminal-immutability, or physical-box/label checks.
 
-**Control-plane edit guard:** F2's guard test is the objective proof that adding a plugin required no control-plane logic edits; `plugin_modules.json` and `model_release_defaults.json` are configuration data, not logic.
+**Control-plane edit guard:** F2's guard test is the objective proof that adding a plugin required no control-plane logic edits; `plugin_modules.json`, `model_release_defaults.json`, and `execution_certificates.json` are configuration data, not logic.
 
-**Coordinator/recovery/transport:** untouched. D3 changes only `runner._cli_work` construction; D2 adds providers around existing `SshRemoteExecutorProbe`/`CoordinatorJobManager`/`LocalJobManager` without changing their internals.
+**Coordinator/recovery/transport:** untouched. D3 changes only `runner._cli_work` construction; D2 adds providers around existing `SshRemoteExecutorProbe`/`CoordinatorJobManager` without changing their internals, and adds a new `LocalInferenceWorkerProvider` rather than altering `LocalJobManager`.
+
+**Required-fix coverage (architect review):**
+1. `environment_ref` private / `environment_label` public — D1 + tests.
+2. `runtime_ref` in certificate matching — D1, D2 + tests.
+3. configured local inference interpreter (not `sys.executable`) — D2 + `config.py` + tests.
+4. `model_release_id` wire identity with `None` omission — B3 + TASK 0 fixture + tests.
+5. CPN assets include `ls_stft_normalization` — F1 + tests.
+6. phase ordering (ZoomSpec caps in A3, golden release in B5, D1 non-dangling) — A3, B5, D1.
 
 ---
 
