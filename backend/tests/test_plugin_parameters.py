@@ -109,6 +109,58 @@ def test_default_is_not_injected_into_parameters():
     assert parameters == {}
 
 
+# ---------------------------------------------------------------------------
+# FIX ROUND 2 — enforce the closed A2 parameter-schema subset
+# ---------------------------------------------------------------------------
+
+
+def test_non_empty_schema_requires_object_type():
+    schema = {"type": "array", "properties": {}, "additionalProperties": False}
+    with pytest.raises(PlatformError) as excinfo:
+        validate_plugin_parameters(_definition(parameter_schema=schema), {})
+    assert excinfo.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+def test_non_empty_schema_requires_explicit_additional_properties_false():
+    for schema in (
+        {"type": "object", "properties": {"threshold": {"type": "number"}}},
+        {
+            "type": "object",
+            "properties": {"threshold": {"type": "number"}},
+            "additionalProperties": True,
+        },
+    ):
+        with pytest.raises(PlatformError) as excinfo:
+            validate_plugin_parameters(_definition(parameter_schema=schema), {})
+        assert excinfo.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+def test_non_empty_schema_requires_properties_mapping():
+    schema = {
+        "type": "object",
+        "properties": [("threshold", {"type": "number"})],
+        "additionalProperties": False,
+    }
+    with pytest.raises(PlatformError) as excinfo:
+        validate_plugin_parameters(_definition(parameter_schema=schema), {})
+    assert excinfo.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [{}, {"type": "array"}, {"type": "object"}, {"type": "null"}, [1, 2]],
+)
+def test_non_empty_schema_requires_declared_scalar_types(spec):
+    schema = {
+        "type": "object",
+        "properties": {"x": spec},
+        "additionalProperties": False,
+    }
+    with pytest.raises(PlatformError) as excinfo:
+        validate_plugin_parameters(_definition(parameter_schema=schema), {})
+    assert excinfo.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
 def test_api_version_mismatch():
     with pytest.raises(PlatformError) as excinfo:
         require_supported_plugin_api(_definition(plugin_api_version=PLUGIN_API_VERSION + 1))

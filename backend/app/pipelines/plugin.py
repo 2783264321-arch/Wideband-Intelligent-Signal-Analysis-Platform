@@ -81,14 +81,7 @@ def validate_plugin_parameters(
             )
         return
 
-    if schema.get("type") != "object":
-        raise PlatformError(
-            "PLUGIN_PARAMETERS_INVALID",
-            "Parameter schema must declare a top-level type of 'object'.",
-        )
-
-    properties = schema.get("properties", {})
-    additional_allowed = schema.get("additionalProperties", True) is not False
+    properties = _validate_parameter_schema(schema)
 
     for name in schema.get("required", []):
         if name not in parameters:
@@ -100,13 +93,49 @@ def validate_plugin_parameters(
     for name, value in parameters.items():
         spec = properties.get(name)
         if spec is None:
-            if not additional_allowed:
-                raise PlatformError(
-                    "PLUGIN_PARAMETERS_INVALID",
-                    f"Unexpected parameter '{name}'.",
-                )
-            continue
+            raise PlatformError(
+                "PLUGIN_PARAMETERS_INVALID",
+                f"Unexpected parameter '{name}'.",
+            )
         _validate_parameter_value(name, spec, value)
+
+
+def _validate_parameter_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate a non-empty parameter schema against the closed A2 subset.
+
+    Supported: a top-level ``object`` with ``additionalProperties`` exactly
+    ``False`` and declared properties whose spec is an object with an explicit
+    scalar ``type`` (string/number/integer/boolean). No nested/array/object
+    parameters are supported; unsupported schemas fail closed.
+    """
+    if schema.get("type") != "object":
+        raise PlatformError(
+            "PLUGIN_PARAMETERS_INVALID",
+            "Parameter schema must declare a top-level type of 'object'.",
+        )
+    if schema.get("additionalProperties") is not False:
+        raise PlatformError(
+            "PLUGIN_PARAMETERS_INVALID",
+            "Parameter schema must set additionalProperties to false.",
+        )
+    properties = schema.get("properties", {})
+    if not isinstance(properties, Mapping):
+        raise PlatformError(
+            "PLUGIN_PARAMETERS_INVALID",
+            "Parameter schema 'properties' must be an object.",
+        )
+    for name, spec in properties.items():
+        if not isinstance(spec, Mapping):
+            raise PlatformError(
+                "PLUGIN_PARAMETERS_INVALID",
+                f"Parameter '{name}' schema must be an object.",
+            )
+        if spec.get("type") not in _SUPPORTED_PARAMETER_TYPES:
+            raise PlatformError(
+                "PLUGIN_PARAMETERS_INVALID",
+                f"Parameter '{name}' must declare a scalar type.",
+            )
+    return properties
 
 
 def _validate_parameter_value(name: str, spec: Mapping[str, Any], value: Any) -> None:

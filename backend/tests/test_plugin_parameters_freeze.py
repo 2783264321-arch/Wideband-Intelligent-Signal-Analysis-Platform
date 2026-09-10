@@ -10,6 +10,7 @@ own ``parameter_schema`` decides validity.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,22 @@ class ParamPipeline(Pipeline):
 
     def run(self, recording: RecordingInput, parameters: dict, workspace: Path) -> PipelineOutput:
         raise AssertionError("test pipeline must not execute")
+
+
+# FIX ROUND 2 — a schema outside the closed A2 subset (additionalProperties
+# defaults to allowed) must be rejected before any parameter can reach hashing.
+_UNSUPPORTED_PERMISSIVE_SCHEMA = {
+    "type": "object",
+    "properties": {"threshold": {"type": "number"}},
+}
+
+
+class UnsupportedSchemaPipeline(ParamPipeline):
+    @property
+    def definition(self) -> PipelineDefinition:
+        return replace(
+            ParamPipeline().definition, parameter_schema=_UNSUPPORTED_PERMISSIVE_SCHEMA
+        )
 
 
 class FakeJobManager:
@@ -166,8 +183,10 @@ def _add_recording(client, recording_id="rec_x"):
         session.commit()
 
 
-def _service(client, *, job_manager=None, probe=None, store=None, launcher=None) -> AnalysisService:
-    registry = PipelineRegistry([ParamPipeline()])
+def _service(
+    client, *, job_manager=None, probe=None, store=None, launcher=None, pipeline_cls=ParamPipeline
+) -> AnalysisService:
+    registry = PipelineRegistry([pipeline_cls()])
     session = client.app.state.database.session_factory()
     return AnalysisService(
         session,
@@ -391,3 +410,68 @@ def test_api_rejects_non_finite_number_parameter(client):
     )
     assert response.status_code == 400, response.text
     assert response.json()["error"]["code"] == "PLUGIN_PARAMETERS_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# FIX ROUND 2 — enforce the closed A2 subset so unsupported/nested values can
+# never reach canonical request hashing.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"threshold": 0.5},
+        {"unknown": float("nan")},
+        {"threshold": [float("nan")]},
+        {"threshold": {"nested": float("inf")}},
+    ],
+)
+def test_unsupported_permissive_schema_fails_closed(params):
+    from app.pipelines.plugin import validate_plugin_parameters
+
+    with pytest.raises(PlatformError) as exc:
+        validate_plugin_parameters(UnsupportedSchemaPipeline().definition, params)
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"unknown": float("nan")},
+        {"unknown": {"nested": float("inf")}},
+        {"threshold": [float("nan")]},
+        {"threshold": {"nested": float("inf")}},
+    ],
+)
+def test_supported_schema_rejects_unknown_and_nested_non_finite(params):
+    from app.pipelines.plugin import validate_plugin_parameters
+
+    with pytest.raises(PlatformError) as exc:
+        validate_plugin_parameters(ParamPipeline().definition, params)
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+def test_unsupported_schema_never_reaches_canonical_hashing(client, monkeypatch):
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "app.remote_execution.request_builder.compute_request_sha256",
+        lambda batch: calls.append(batch) or "0" * 64,
+    )
+    _add_recording(client)
+    probe, store, launcher = FakeProbe(), FakeStore(), FakeLauncher()
+    service = _service(
+        client, probe=probe, store=store, launcher=launcher, pipeline_cls=UnsupportedSchemaPipeline
+    )
+    with pytest.raises(PlatformError) as exc:
+        service.create_run(
+            recording_id="rec_x",
+            pipeline_id="param_test",
+            executor="remote_gpu",
+            parameters={"unknown": float("nan")},
+        )
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+    assert calls == []
+    assert probe.calls == []
+    assert store.resolve_calls == []
+    assert launcher.launches == []
