@@ -340,9 +340,27 @@ retained as the compatibility projection used by existing API/frontend and the
 result writer. `input_compatibility` is evaluated against the **recording's
 dataset label space**, independently of `output_label_space` (§10).
 
-`executors_supported` and `recommended_executor` remain in the read model as
-derived compatibility projections of `technical_execution_capabilities` /
-`recommended_execution`, filtered by the platform's certified certificates.
+`executors_supported` and `recommended_executor` are the
+**deployment-qualified executor projection** (configuration + certification, not
+live readiness):
+
+- `executors_supported` = a plugin's declared `technical_execution_capabilities`
+  ∩ an executor for which this deployment has a **registered provider** ∩ an
+  **exact `ExecutionCertificate`** for the default resolved release
+  (`model_release_id=None` for release-less plugins). It is computed from
+  configuration and certification only and MUST NOT trigger SSH/probe I/O.
+- `recommended_executor` is `definition.recommended_execution` **only when** that
+  executor is in `executors_supported`; otherwise it is `None`. The platform
+  never substitutes a different executor.
+- `executors_supported` does **not** imply live probe readiness. Whether an
+  executor can run *right now* for a specific recording remains the
+  responsibility of executor availability / `create_run` (§9.5, §11.2).
+- `technical_execution_capabilities` remains the declared technical truth.
+  `cpu_supported` is legacy technical metadata only and MUST NOT imply that
+  `local_cpu` is runnable.
+
+`PipelineDefinitionRead.recommended_executor` is therefore `str | None` (frontend
+`recommendedExecutor: string | null`).
 
 ### 8.3 Parameter schema
 
@@ -507,7 +525,9 @@ removal of the hardcoded manifest path currently in
 
 Certification, executor availability, compatibility projections, and
 `recommended_executor` are all **release-specific**, so a run must resolve a
-concrete ModelRelease before any of them can be evaluated.
+concrete ModelRelease before any of them can be evaluated. For a
+release-less/code-only plugin (`model_release_required=False`) the resolved
+release is `None` and projections/certification use `model_release_id=None`.
 
 V1 selection rule:
 
@@ -529,7 +549,8 @@ Rules:
   must exist for that plugin version, else `MODEL_RELEASE_NOT_FOUND`.
 - **All** of executor availability, `certified_capabilities`,
   `executors_supported` / `recommended_executor` projections, input/output
-  compatibility, and certificate lookup use the **resolved** ModelRelease.
+  compatibility, and certificate lookup use the **resolved** ModelRelease
+  (`model_release_id=None` for release-less plugins).
 - Retraining + deployment of new assets/ModelRelease + switching the default is
   a configuration change; no platform code change is required (§9.4).
 - M9.2 requires **no frontend release-management UI**; the default is sufficient
@@ -627,15 +648,27 @@ ExecutorRegistry
 ```
 
 `AnalysisService` dispatches by capability, not by the literal string
-`remote_gpu` (`backend/app/analysis/service.py:147,191`). The existing
-`RemoteExecutorProbe` protocol is one `ExecutorProvider` implementation. A
-capability is runnable only when it is both technically claimed by the plugin and
-covered by a platform `ExecutionCertificate` for the exact release/executor.
+`remote_gpu` (`backend/app/analysis/service.py:147,191`). `create_run` validates
+and launches the **exact requested executor**; it never auto-substitutes another
+certified executor. The existing `RemoteExecutorProbe` protocol is one
+`ExecutorProvider` implementation. A capability is runnable only when it is both
+technically claimed by the plugin and covered by a platform
+`ExecutionCertificate` for the exact release/executor.
 
 `model_release_id` in `certified_capabilities` and `model_release` in
-`availability` are the **resolved** ModelRelease (§9.5). Callers that have not
-selected a release use the platform default for the plugin version, so executor
-projections and availability are always computed against a concrete release.
+`availability` are the **resolved** ModelRelease (§9.5); release-less plugins use
+`model_release_id=None`. Callers that have not selected a release use the platform
+default for the plugin version, so executor projections and availability are
+always computed against a concrete release (or `None` for release-less plugins).
+
+`ExecutorRegistry` also exposes an **exact-executor availability seam** (for
+example an `availability(plugin_definition, model_release, recording, executor)`
+method) that checks the requested executor's technical capability, exact
+certificate, provider `runtime_ref`, and provider probe. `/api/executor-availability`
+may accept an optional `executor` query parameter with a backward-compatible
+default of `remote_gpu`. The deployment-qualified `executors_supported` projection
+(§8.2) is **not** live readiness; only this seam answers recording/runtime-specific
+availability.
 
 ### 11.3 RuntimeDescriptor and public package projection
 
@@ -834,7 +867,9 @@ provenance without weakening any of them.
 
 1. `PipelineDefinitionRead` additions are optional so an older frontend keeps
    working; the current `executors_supported` / `recommended_executor` fields
-   are retained as projections.
+   are retained as the deployment-qualified projection (§8.2).
+   `recommended_executor` becomes nullable (`str | None`); `executors_supported`
+   remains a list (empty when nothing is deployment-qualified).
 2. `PluginDefinition.id` remains the API-visible identity; existing
    `AnalysisRun.pipeline_id` values are unchanged.
 3. Existing completed ZoomSpec runs remain valid. Their `model_release_id` is
@@ -953,8 +988,9 @@ Rules:
    precision, runtime reference)`. Certificates are platform-owned (§5.9).
 3. Only certified combinations are offered for run creation and exposed as
    runnable in the frontend.
-4. ZoomSpec `local_cpu` remains without a certificate; the compatibility
-   projection `cpu_supported` continues to read `False`.
+4. ZoomSpec `local_cpu` remains without a certificate; `cpu_supported` is legacy
+   technical metadata only and MUST NOT imply `local_cpu` is runnable. The
+   deployment-qualified `executors_supported` projection (§8.2) is the runnable set.
 5. A certificate is created only after an explicit platform gate records:
    accuracy within an agreed tolerance versus the reference device, an agreed
    latency envelope, and a reproducible evidence reference. Because
@@ -1004,7 +1040,8 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
   plugin-declared boolean.
 - A `(plugin_id, plugin_version)` default ModelRelease resolves when the caller
   gives no explicit release; executor availability, capability projections, and
-  certificate lookup use that resolved release.
+  certificate lookup use that resolved release (`model_release_id=None` for
+  release-less plugins).
 - The remote `ItemExecutor` is resolved through the registry; no ZoomSpec
   literal dispatch remains.
 - `RuntimeDescriptor` replaces all `cuda:0` / device-0 hardcodes in probe,
@@ -1098,7 +1135,7 @@ Rules:
 | Private runtime info or paths leak into the public package | Frozen projection (`executor`, `device`, non-sensitive `environment`); full descriptor internal |
 | Trusted asset path injection | Release/manifest-namespaced mapping from validated deployment config only; wire carries logical names |
 | Asset logical-name collision across plugins/releases | Namespace paths by `(plugin_id, plugin_version, asset_manifest_sha256, logical_asset_name)` |
-| Executor projection evaluated before a release is known | Per-version platform default ModelRelease; all projections use the resolved release |
+| Executor projection evaluated before a release is known | Per-version platform default ModelRelease; projections use the resolved release (`None` for release-less) |
 | Config change wrongly shipped as a ModelRelease | ModelRelease only when architecture/behavior/params/output semantics unchanged; else new PluginVersion |
 | Generalizing provenance weakens identity checks | Keep all M9.1 checks; add Release checks additively; regression tests |
 | Plugin discovery reintroduces control-plane edits | Declarative module-path config / entry points; test that a plugin needs no core edit |
@@ -1146,7 +1183,8 @@ Rules:
 12. Device selection happens only through a RuntimeDescriptor.
 13. Trusted asset paths come only from a release/manifest-namespaced deployment
     mapping; wire values are never trusted as paths.
-14. Every run resolves a concrete ModelRelease (explicit or platform default);
-    availability and executor projections are release-specific.
+14. Every run resolves a ModelRelease (explicit or platform default, or `None`
+    for release-less plugins); availability and executor projections are
+    release-specific.
 15. Legacy version/task identities remain valid; new plugins are recommended to
     use SemVer, not required.

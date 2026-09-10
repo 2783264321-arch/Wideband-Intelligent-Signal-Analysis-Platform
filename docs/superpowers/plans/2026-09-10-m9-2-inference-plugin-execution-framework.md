@@ -215,7 +215,7 @@ class PipelineDefinition:
         return self.output_label_space or self.label_space
 ```
 
-`recommended_device`, `cpu_supported`, `executors_supported`, `recommended_executor` remain as compatibility projections.
+`recommended_device`, `cpu_supported`, `executors_supported`, `recommended_executor` remain as projections. Read-model executor projection semantics (deployment-qualified `executors_supported`; nullable `recommended_executor`; `cpu_supported` is legacy technical metadata only) are fixed by the D2C A+ ruling below.
 
 **RED test (`backend/tests/test_plugin_definition.py`, new):**
 
@@ -1055,9 +1055,31 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
   local resolution sequence (no SSH).
 - **D2B.5:** CPU acceptance gate and seed a real local CPU certificate for the
   accepted local runtime generation.
-- **D2C:** cut `AnalysisService` + certified read-model projections over to registry
-  dispatch (only after local certification exists, so the Dummy/STFT baseline is
-  preserved).
+- **D2C:** cut `AnalysisService` + the **deployment-qualified** read-model
+  projections over to registry dispatch (only after local certification exists, so
+  the Dummy/STFT baseline is preserved). Ruling (A+):
+  - `executors_supported` = declared `technical_execution_capabilities` ∩ a
+    registered provider ∩ exact `ExecutionCertificate` for the default resolved
+    release (`model_release_id=None` for release-less plugins). It is a
+    configuration/certification projection, **not** live probe readiness, and must
+    not trigger SSH/probe I/O.
+  - `recommended_executor` = `definition.recommended_execution` **only when** it is
+    in `executors_supported`, else `None`. Backend `PipelineDefinitionRead` field is
+    `recommended_executor: str | None`; frontend `recommendedExecutor: string | null`.
+    Never substitute another executor.
+  - `technical_execution_capabilities` stays the declared truth; `cpu_supported` is
+    legacy technical metadata only and never implies `local_cpu` is runnable.
+  - Frontend `executorPolicy` derives runnable choices only from
+    `executorsSupported` ([] => disabled; local-only => local_cpu; remote-only =>
+    remote availability; dual => recommendation/fallback); never infer `local_cpu`
+    from `cpuSupported`.
+  - `create_run` validates and launches the **exact requested executor**; no
+    auto-substitution. Add an exact-executor `ExecutorRegistry` availability seam;
+    `/api/executor-availability` may accept an optional `executor` query parameter
+    with a backward-compatible default of `remote_gpu`.
+  - Generic API tests inject fake certified providers/registry; never restore
+    `LocalJobManager`/`app.analysis.worker` and never hardcode `/root/miniconda3`.
+    D2B.5 remains the real subprocess acceptance evidence.
 
 **Code-only contract:** if `model_release_required=False`, the resolved
 `model_release_id` is `None`. An `ExecutionCertificate` may bind
@@ -1132,8 +1154,8 @@ class LocalInferenceWorkerProvider:
 
 - If `local_cpu_python_path` or `local_cpu_runtime_ref` is unset, the provider is not registered and `local_cpu` remains unavailable.
 - Control-plane `.venv` stays torch-free; the configured interpreter is a separate ML runtime.
-- **(D2C cutover, not D2A)** `AnalysisService` replaces `if executor == "remote_gpu"` with `provider = executor_registry.provider(executor)`; remote coord launcher comes from the provider.
-- **(D2C cutover, not D2A)** `PipelineDefinition.executors_supported` / `recommended_executor` read-model projections are computed from certified capabilities for the provider's `runtime_ref`.
+- **(D2C cutover, not D2A)** `AnalysisService` resolves the release, then validates and dispatches the **exact requested executor** through `provider = executor_registry.provider(executor)` (no auto-substitution); remote coord launcher comes from the provider.
+- **(D2C cutover, not D2A)** `PipelineDefinition.executors_supported` / `recommended_executor` are the deployment-qualified projection (declared technical capability ∩ registered provider ∩ exact certificate for the default resolved release), not live readiness; `recommended_executor` is `None` unless `recommended_execution` is in `executors_supported`.
 
 **RED test (`backend/tests/test_executor_registry.py`, `test_local_worker_provider.py`):**
 
@@ -1479,7 +1501,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 **Interfaces:**
 - ZoomSpec `PipelineDefinition.technical_execution_capabilities` includes `local_cpu/cpu/float32` (technical claim only).
 - `execution_certificates.json` does **not** contain a ZoomSpec `local_cpu` certificate.
-- Read-model `cpu_supported` projection stays `False` because `local_cpu` is uncertified.
+- Read-model `cpu_supported` stays `False` (legacy technical metadata; it never implies local runnability).
 
 **RED test (`backend/tests/test_zoomspec_plugin.py` extension):**
 
