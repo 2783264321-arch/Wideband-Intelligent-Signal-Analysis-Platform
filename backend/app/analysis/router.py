@@ -9,6 +9,7 @@ from app.analysis.schema import (
     PipelineDefinitionRead,
 )
 from app.analysis.service import AnalysisService
+from app.pipelines.base import PipelineDefinition
 
 router = APIRouter(tags=["analysis"])
 
@@ -33,7 +34,20 @@ def _service(request: Request, session) -> AnalysisService:
 
 @router.get("/api/pipelines", response_model=list[PipelineDefinitionRead])
 def list_pipelines(request: Request):
-    return [PipelineDefinitionRead(**{**asdict(item), "stages": list(item.stages), "inspectable_stages": list(item.inspectable_stages)}) for item in request.app.state.pipeline_registry.list()]
+    return [_pipeline_read_model(definition) for definition in request.app.state.pipeline_registry.list()]
+
+
+def _pipeline_read_model(definition: PipelineDefinition) -> PipelineDefinitionRead:
+    payload = asdict(definition)
+    resolved_label_space = definition.resolved_output_label_space
+    payload["label_space"] = resolved_label_space
+    payload["output_label_space"] = resolved_label_space
+    payload["stages"] = list(definition.stages)
+    payload["inspectable_stages"] = list(definition.inspectable_stages)
+    payload["technical_execution_capabilities"] = [
+        asdict(capability) for capability in definition.technical_execution_capabilities
+    ]
+    return PipelineDefinitionRead(**payload)
 
 
 @router.post("/api/analysis-runs", response_model=AnalysisRunRead, status_code=201)

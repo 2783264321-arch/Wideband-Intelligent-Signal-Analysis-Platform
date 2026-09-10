@@ -63,6 +63,13 @@ class PipelineDefinitionRead(BaseModel):
     task_capability: str
     executors_supported: list[str]
     recommended_executor: str
+    plugin_api_version: int = 1
+    output_label_space: str
+    input_compatibility: list[str] = []
+    dataset_adapters: list[str] = []
+    model_release_required: bool = False
+    technical_execution_capabilities: list[dict] = []
+    recommended_execution: str | None = None
 
 
 class ExecutorAvailabilityRead(BaseModel):
