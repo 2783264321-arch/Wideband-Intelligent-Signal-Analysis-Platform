@@ -76,7 +76,8 @@ re-hashed or rewritten.
 1. Define a **Pipeline Plugin** identity and an immutable **PluginVersion**.
 2. Define a separate immutable **ModelRelease** identity for
    checkpoint/config/normalization changes under an unchanged PluginVersion.
-3. Define a **generic AssetManifest** with plugin-declared logical asset names.
+3. Define a **frozen generic AssetManifest V1** with plugin-declared logical
+   asset names, referenced (not modified) by an immutable ModelRelease.
 4. Define the **DatasetAdapter -> RecordingInput** boundary.
 5. Define a declarative **Plugin parameter schema** and **execution
    capabilities**.
@@ -144,39 +145,64 @@ stages, output semantics, or the parameter schema requires a new PluginVersion.
 `(plugin_id, plugin_version, model_release_id)` identifies an immutable set of
 trained weights / config / normalization. A new checkpoint, retrain, fine-tune,
 or normalization change under the same architecture produces a new ModelRelease
-with the same PluginVersion. Its cryptographic binding is the
-`asset_manifest_sha256`.
+with the same PluginVersion. A ModelRelease **references** the existing
+immutable AssetManifest V1 by its `asset_manifest_sha256`; it does not alter the
+manifest or its hash payload.
 
-### 5.4 AssetManifest
+### 5.4 AssetManifest V1 (Frozen Shape)
 
-A generic, plugin-declared mapping from **logical asset names** to SHA256
-identities for one ModelRelease. Logical names are defined by the plugin (for
-example `detector_checkpoint`, `frn_checkpoint`, `ls_stft_normalization`,
-`frozen_config`), not by the platform. The manifest self-hash excludes itself.
+The AssetManifest V1 shape and canonical hash payload are **frozen**. It is a
+plugin-declared mapping from **logical asset names** to SHA256 identities
+(logical names defined by the plugin, for example `detector_checkpoint`,
+`frn_checkpoint`, `ls_stft_normalization`, `frozen_config`). The manifest
+self-hash excludes itself. `model_release_id` is **not** part of the manifest
+payload; a ModelRelease is a separate record that binds a
+`model_release_id` to an existing `asset_manifest_sha256`.
 
 ### 5.5 DatasetAdapter
 
 The only component allowed to read a dataset-specific on-disk layout and map it
 to a platform `RecordingInput`. Plugins and executors never parse dataset files
-directly.
+directly. A DatasetAdapter verifies the frozen recording identity using the
+**recording's dataset label space** (the label semantics that the dataset itself
+defines).
 
-### 5.6 ExecutionCapability
+### 5.6 ExecutionCapability (Technical Claim)
 
-A declared, certified-able execution target: `local_cpu`, `local_gpu`,
-`remote_gpu`. A capability is a claim subject to certification (§18); declaring
-it does not activate it.
+A plugin's **technical** execution claim: `local_cpu`, `local_gpu`, or
+`remote_gpu`, with a device type and precision. A technical claim is not a
+runnable grant; runnable status is derived by the platform from a platform-owned
+`ExecutionCertificate` (§5.9, §18). A plugin MUST NOT self-declare
+`certified`/runnable.
 
-### 5.7 RuntimeDescriptor
+### 5.7 Input Compatibility vs Output Label Space
+
+Two distinct concepts MUST NOT be conflated:
+
+- **input compatibility** — which recording/dataset label spaces and dataset
+  adapters a plugin accepts (for example a SpaceNet `spacenet_14` recording);
+- **output label space** — the label semantics of the plugin's final
+  `DetectionResult` classes (for example `spacenet_14` or
+  `cpn_bandwidth_tier_v1`).
+
+A plugin may accept `spacenet_14` recordings and emit a different output label
+space. DetectionResult validation always uses the **output label space**.
+
+### 5.8 RuntimeDescriptor
 
 A concrete execution instance description (`executor`, `device_type`,
 `device_index`, `precision`, `environment_ref`) that replaces device literals
-such as `cuda:0` and `_DEVICE_INDEX = 0`.
+such as `cuda:0` and `_DEVICE_INDEX = 0`. Only a defined public projection of a
+RuntimeDescriptor enters the Analysis Package; the full descriptor stays in
+internal provenance (§11.3).
 
-### 5.8 ExecutionCertificate
+### 5.9 ExecutionCertificate (Platform-Owned)
 
-Evidence record that a `(plugin, plugin_version, model_release, capability,
-device_type)` combination has passed an acceptance gate. A capability without a
-certificate is not offered by the platform.
+A platform-owned evidence record, precisely bound to `(plugin_id,
+plugin_version, model_release_id, executor, device_type, precision, runtime
+reference)`, that a combination has passed an acceptance gate. Certificates are
+created and owned by the platform, never by a plugin declaration. A combination
+without a certificate is not offered as runnable.
 
 ---
 
@@ -200,10 +226,11 @@ certificate is not offered by the platform.
                 │ local_cpu / local_gpu             │ remote_gpu (SSH)
                 ▼                                   ▼
 ┌───────────────────────────────┐   ┌───────────────────────────────────┐
-│ Local plugin runtime           │   │ Remote plugin runtime             │
-│  PluginExecutor registry       │   │  runner work: PluginItemExecutor  │
-│  lazy ML imports               │   │  PluginRegistry + ExecutorRegistry │
-│  DatasetAdapter -> RecordingIn │   │  DatasetAdapter -> RecordingInput  │
+│ Local inference worker         │   │ Remote plugin runtime             │
+│  (separate process + ML env)   │   │  runner work: PluginItemExecutor  │
+│  PluginExecutor registry       │   │  PluginRegistry + ExecutorRegistry │
+│  lazy ML imports               │   │  DatasetAdapter -> RecordingInput  │
+│  DatasetAdapter -> RecordingIn │   │                                    │
 └───────────────────────────────┘   └───────────────────────────────────┘
 ```
 
@@ -211,21 +238,23 @@ certificate is not offered by the platform.
 
 ```text
 create_run(recording, plugin_id, plugin_version, model_release_id, executor, params)
-  -> PluginRegistry.get(plugin_id, plugin_version)            # torch-free
+  -> PluginRegistry.get(plugin_id, plugin_version)            # torch-free, lazy
   -> validate params against plugin parameter schema         # torch-free
-  -> resolve ModelRelease + AssetManifest (pack+release)     # torch-free
+  -> resolve ModelRelease + referenced AssetManifest V1      # torch-free
+  -> derive runnable executor from platform certificates      # torch-free
+  -> check input compatibility vs recording dataset label space
   -> select ExecutorProvider for `executor`
   -> RuntimeDescriptor built by provider
   -> freeze provenance (request_sha256, model_release_id, asset_manifest_sha256)
-  -> launch coordinator (remote) or worker (local)
+  -> launch coordinator (remote) or inference worker (local)
        remote: runner resolves PluginItemExecutor for plugin_id
                -> DatasetAdapter resolves RecordingInput
-               -> AssetManifest resolution by (plugin_id, version, manifest_sha)
+               -> AssetManifest V1 resolution by (plugin_id, version, manifest_sha)
                -> PipelineExecution(... RuntimeDescriptor ...)
-               -> PipelineOutput
+               -> PipelineOutput (Detections in output_label_space)
                -> Analysis Package v1 zip + envelope (write-once)
-       local:  same scientific path without SSH
-  -> ingest -> AnalysisResultWriter -> SAME AnalysisRun
+       local:  same scientific path in a separate inference worker (no SSH)
+  -> ingest -> AnalysisResultWriter (output_label_space) -> SAME AnalysisRun
 ```
 
 ### 6.3 Invariant
@@ -239,12 +268,14 @@ The platform core never branches on a concrete plugin id. The only mappings from
 
 | Concern | Owner | Must not do |
 |---|---|---|
-| Plugin identity, definition, parameters, assets, capabilities | Plugin author | import torch at control-plane import time; edit control-plane code |
-| Scientific inference | Plugin runtime | read DB, SSH, or dataset files directly |
+| Plugin identity, definition, parameters, assets, technical capabilities | Plugin author | import torch at control-plane import time; self-declare certification; edit control-plane code |
+| Scientific inference | Plugin runtime (separate inference worker) | read DB, SSH, or dataset files directly; run inside the API process |
 | Plugin discovery + validation | Platform `PluginRegistry` | embed plugin-specific constants |
-| ModelRelease + AssetManifest resolution | Platform `ModelReleaseStore` | hardcode asset names or paths |
+| ModelRelease + AssetManifest V1 resolution | Platform `ModelReleaseStore` | hardcode asset names or paths; change the V1 hash payload |
+| Certification / runnable derivation | Platform `ExecutionCertificate` store | accept plugin-declared certification |
 | Execution selection + RuntimeDescriptor | Platform `ExecutorRegistry` | hardcode `cuda:0` / device 0 |
-| Dataset resolution | `DatasetAdapter` implementer | expose GroundTruth to inference |
+| Local inference worker runtime | Platform deployment config | live in the API process / control-plane `.venv` |
+| Dataset resolution + input compatibility | `DatasetAdapter` + platform compatibility check | expose GroundTruth to inference; conflate input and output label spaces |
 | AnalysisRun lifecycle / provenance / ingest | Platform control plane | change frozen M9.1 semantics |
 | Remote transport | Platform `SshRunner` | accept request-controlled paths/secrets |
 | Read model + UI | Platform frontend | hardcode plugin ids or device strings |
@@ -257,9 +288,14 @@ The platform core never branches on a concrete plugin id. The only mappings from
 
 ```text
 plugin_id:      ^[a-z0-9][a-z0-9_]{0,127}$     (stable, global within platform)
-plugin_version: ^[0-9]+\.[0-9]+\.[0-9]+$       (semver)
+plugin_version: opaque immutable identifier   (recommended: SemVer x.y.z)
 plugin_api_version: integer (M9.2 = 1)
 ```
+
+`plugin_version` is treated as an **immutable opaque version identifier**.
+SemVer is **recommended** for new plugins but is **not mandatory**, so existing
+historical identities such as `1.0` remain valid and unchanged. The platform
+MUST NOT parse or reorder version semantics.
 
 `plugin_id` replaces the current `PipelineDefinition.id` as the primary identity.
 The existing read-model field `id` remains an alias for `plugin_id` so the
@@ -272,23 +308,30 @@ The runtime `PipelineDefinition` (backend) and `PipelineDefinitionRead`
 
 ```text
 plugin_id            (= existing `id`)
-plugin_version       (= existing `version`)
+plugin_version       (= existing `version`; opaque)
 plugin_api_version   (new)
 name
-label_space
-task_capability      (detection_localization | detection_classification)
+label_space          (= output label space; retained for compatibility)
+output_label_space   (new; authoritative output label space for DetectionResult validation)
+input_compatibility  (new; accepted recording/dataset label spaces + required adapters)
+task_capability      (classification | detection_localization | detection_classification)
 stages
 inspectable_stages
 parameter_schema     (new; JSON Schema object; {} means no parameters)
-execution_capabilities   (new; ordered tuple)
-recommended_execution    (new; one of the capabilities)
-model_release_required   (new; bool)
-dataset_adapters         (new; tuple of adapter ids)
+technical_execution_capabilities   (new; ordered tuple of ExecutionCapability)
+recommended_execution              (new; a technically supported executor)
+model_release_required             (new; bool)
+dataset_adapters                   (new; tuple of adapter ids)
 ```
 
+`label_space` and `output_label_space` are the same value; `label_space` is
+retained as the compatibility projection used by existing API/frontend and the
+result writer. `input_compatibility` is evaluated against the **recording's
+dataset label space**, independently of `output_label_space` (§10).
+
 `executors_supported` and `recommended_executor` remain in the read model as
-derived compatibility projections of `execution_capabilities` /
-`recommended_execution`.
+derived compatibility projections of `technical_execution_capabilities` /
+`recommended_execution`, filtered by the platform's certified certificates.
 
 ### 8.3 Parameter schema
 
@@ -299,38 +342,42 @@ parameters before run creation **without importing plugin scientific code**.
 Frozen plugins declare an empty object schema. This replaces the hardcoded
 `"parameters": {}` in `backend/app/remote_execution/request_builder.py:140`.
 
-### 8.4 Execution capabilities
+### 8.4 Technical execution capabilities (plugin-declared, no certification)
 
-A plugin declares which executors it can run on:
+A plugin declares only its **technical** execution claims:
 
 ```text
-execution_capabilities = (
-  ExecutionCapability(
-    executor="remote_gpu",
-    device_type="cuda",
-    precision="float16",
-    certified=True,
-    certificate_ref="...",
-  ),
-  ExecutionCapability(
-    executor="local_cpu",
-    device_type="cpu",
-    precision="float32",
-    technically_feasible=True,
-    certified=False,
-  ),
+technical_execution_capabilities = (
+  ExecutionCapability(executor="remote_gpu", device_type="cuda", precision="float16"),
+  ExecutionCapability(executor="local_cpu",  device_type="cpu",  precision="float32"),
 )
+recommended_execution = "remote_gpu"
 ```
 
-A declared-but-uncertified capability is visible as metadata but MUST NOT be
-offered as runnable. `recommended_execution` MUST reference a certified
-capability.
+Rules:
+
+- A plugin MUST NOT declare `certified`, `runnable`, or a certificate reference.
+- The platform computes the runnable set as
+  `technical_execution_capabilities ∩ certified certificates` for the exact
+  `(plugin_id, plugin_version, model_release_id, executor, device_type,
+  precision)` tuple.
+- Because certification is release-specific, the same PluginVersion may expose
+  different runnable executors for different ModelReleases.
+- `recommended_execution` is only meaningful after certification; the read model
+  MUST NOT present an uncertified executor as runnable.
+
+### 8.4.1 Certification is platform-owned
+
+An `ExecutionCertificate` is created only by the platform's acceptance process
+(§18, §21.1). It binds `(plugin_id, plugin_version, model_release_id, executor,
+device_type, precision, runtime reference)`. A plugin cannot create, widen, or
+override a certificate.
 
 ### 8.5 Plugin registry seam
 
 ```text
 PluginRegistry
-  .get(plugin_id, plugin_version) -> PluginHandle (definition + factory ref)
+  .get(plugin_id, plugin_version) -> PluginHandle (definition + lazy factory ref)
   .list() -> [PluginDefinition]
 ```
 
@@ -341,8 +388,12 @@ PluginRegistry
   appends a dotted path to configuration, not logic to `registry.py`.
   Out-of-tree plugins MAY use an `importlib.metadata` entry-point group
   (`wisa.pipeline_plugins`); this is optional packaging, not required for M9.2.
-- The scientific `Pipeline` is constructed only by a plugin runtime inside a
-  workspace (local worker or remote executor), never by the control plane.
+- A declaration module exposes metadata and **lazy references only** (dotted
+  factory paths / callables resolved at execution time). It MUST NOT import
+  scientific or heavy modules (`torch`, `ultralytics`, detector/FRN/STFT code)
+  at module import. The scientific `Pipeline` is constructed only by a plugin
+  runtime inside a workspace (local inference worker or remote executor), never
+  by the control plane.
 
 ---
 
@@ -360,21 +411,24 @@ A ModelRelease records:
 ```text
 model_release_id
 plugin_id / plugin_version
-asset_manifest (see §9.2)
+asset_manifest_sha256   (reference to an existing AssetManifest V1)
 created_at (informational)
 notes (informational, e.g. training run reference)
 ```
 
-Changing weights/config/normalization creates a **new ModelRelease**, not a new
+Changing weights/config/normalization creates a **new ModelRelease** that
+references a **new AssetManifest V1** (new `asset_manifest_sha256`), not a new
 PluginVersion. Changing code or architecture creates a **new PluginVersion**.
 
-### 9.2 Generic AssetManifest
+### 9.2 AssetManifest V1 (hash payload frozen)
+
+AssetManifest V1 is unchanged from M9.1. Its canonical payload and self-hash are
+frozen; `model_release_id` MUST NOT be added to it.
 
 ```json
 {
-  "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3",
-  "plugin_version": "1.0.0",
-  "model_release_id": "golden-2026-08",
+  "pipeline_id": "zoomspec_yolo26n_aug_combined_frn_v3",
+  "pipeline_version": "1.0.0",
   "assets": {
     "detector_checkpoint": "<sha256>",
     "frn_checkpoint": "<sha256>",
@@ -385,37 +439,55 @@ PluginVersion. Changing code or architecture creates a **new PluginVersion**.
 }
 ```
 
-The canonical payload (excluding `asset_manifest_sha256`) adds
-`model_release_id` to the M9.1 payload. The hashing and self-exclusion rules in
-`backend/app/remote_execution/assets.py` are preserved; only the field set grows.
-Logical asset names are free-form strings validated as non-empty identifiers.
+The existing ZoomSpec `asset_manifest_sha256`
+(`16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08`) MUST
+remain byte-identical for the unchanged golden assets.
+
+A ModelRelease is a **separate record** that binds a `model_release_id` to a
+`plugin_id`/`plugin_version` and an `asset_manifest_sha256`. The two identities
+are frozen and verified independently:
+
+- `model_release_id` — logical release identity (frozen in run provenance);
+- `asset_manifest_sha256` — cryptographic asset identity (verified against the
+  actual AssetManifest V1 and asset bytes).
+
+The legacy manifest field names `pipeline_id`/`pipeline_version` remain the
+wire-level keys for compatibility; `plugin_id`/`plugin_version` are aliases over
+the same values.
 
 ### 9.3 Resolution and verification
 
-- Local control plane resolves `(plugin_id, plugin_version)` -> plugin
-  declaration -> release directory -> manifest. The selected release's
-  `asset_manifest_sha256` is frozen into run provenance.
-- Remote runtime resolves the same manifest by `(plugin_id, plugin_version,
-  asset_manifest_sha256)` and verifies:
-  - the manifest exists for the plugin/version;
-  - its self-hash equals the request's `asset_manifest_sha256`;
-  - its `model_release_id` equals the request's `model_release_id`;
+- Local control plane resolves `(plugin_id, plugin_version, model_release_id)`
+  -> ModelRelease record -> referenced `asset_manifest_sha256`. The referenced
+  hash is frozen into run provenance.
+- Remote runtime resolves the ModelRelease and its AssetManifest V1 by
+  `(plugin_id, plugin_version, asset_manifest_sha256)` and verifies:
+  - the referenced AssetManifest V1 exists for the plugin/version;
+  - its self-hash equals the request's `asset_manifest_sha256` (V1 payload is
+    unchanged, so the hash is computed exactly as in M9.1);
+  - the ModelRelease record's `asset_manifest_sha256` equals the manifest
+    self-hash, and its `model_release_id` equals the request's
+    `model_release_id`;
   - each asset file byte-hash matches the manifest;
   - the deployed runtime commit matches the required commit.
-- Asset file paths are deployment configuration (executor side), never wire
-  input. See §12.4.
+- Asset file paths come **exclusively** from deployment configuration on the
+  executor side (validated absolute safe POSIX paths). They are never taken from
+  the wire request, the plugin declaration, the ModelRelease record, or the
+  manifest. The manifest stores logical names + SHA256 only. See §11.4.
 
 ### 9.4 Same-architecture retraining rule
 
 ```text
 new retrained checkpoint
-  -> new ModelRelease manifest (new asset_manifest_sha256)
-  -> new AnalysisRun records new model_release_id
+  -> new AssetManifest V1 (new asset_manifest_sha256)
+  -> new ModelRelease referencing that hash
+  -> new AnalysisRun records new model_release_id + asset_manifest_sha256
   -> PluginVersion unchanged; platform code unchanged
 ```
 
-This requires version-scoped manifest resolution (§9.3) and removal of the
-hardcoded manifest path currently in `backend/app/main.py:30-35` and
+This requires release/version-scoped AssetManifest V1 resolution (§9.3) and
+removal of the hardcoded manifest path currently in
+`backend/app/main.py:30-35` and
 `backend/app/remote_execution/worker_context.py:110-114`.
 
 ---
@@ -443,6 +515,9 @@ RecordingInput  (existing dataclass)
 - A DatasetAdapter is the only component that reads dataset layout.
 - It MUST verify the same double identity as today
   (`recording_fingerprint_v1` + exact raw `source_data_sha256`).
+- The fingerprint/identity check uses the **recording's dataset label space**
+  (the label semantics defined by the dataset), independent of the plugin's
+  output label space.
 - GroundTruth is inspected only for fingerprint verification and MUST NOT reach
   inference.
 - Adapters are selected by `dataset_name`; `resolve_space_net` becomes the
@@ -450,11 +525,30 @@ RecordingInput  (existing dataclass)
 - The local path already satisfies the boundary: the Recording model is mapped
   to `RecordingInput` in `backend/app/analysis/worker.py`.
 
-### 10.3 Plugin binding
+### 10.3 Plugin binding and input compatibility
 
-A plugin declares `dataset_adapters` (for example `("spacenet",)`). The
-executor resolves the adapter by `recording.dataset_name`; a plugin that does
-not support the dataset fails closed before model construction.
+A plugin declares two independent things:
+
+```text
+input_compatibility   (accepted recording/dataset label spaces + required adapters)
+output_label_space    (label semantics of the emitted DetectionResult classes)
+```
+
+The executor resolves the adapter by `recording.dataset_name` and checks the
+recording's dataset label space against `input_compatibility`; a plugin that
+does not accept the dataset fails closed before model construction.
+`output_label_space` is used only for DetectionResult/label validation and never
+to gate input compatibility.
+
+Example (CPN-only, §17):
+
+```text
+input_compatibility = ("spacenet_14",)   # SpaceNet recording identity
+output_label_space  = "cpn_bandwidth_tier_v1"
+```
+
+A plugin may accept `spacenet_14` recordings and emit a different output label
+space. DetectionResult validation always uses `output_label_space`.
 
 ---
 
@@ -464,31 +558,37 @@ not support the dataset fails closed before model construction.
 
 | Executor | Where it runs | Heavy deps | Selection |
 |---|---|---|---|
-| `local_cpu` | In-process/worker on the API host | none required beyond plugin deps | capability must be certified |
-| `local_gpu` | Local worker on a GPU host | torch/CUDA | capability must be certified |
+| `local_cpu` | A **separate configured inference worker process** using its own ML interpreter; never the API process | plugin runtime deps (may include torch on the ML interpreter) | platform certificate required |
+| `local_gpu` | Same separate inference worker model on a GPU host | torch/CUDA on the ML interpreter | platform certificate required |
 | `remote_gpu` | Detached remote worker over SSH | torch/CUDA/ultralytics | asset + runtime probe required |
 
-`local_gpu` is introduced by the abstraction but is **not required to be
-implemented** in M9.2; it exists so the framework does not assume all GPU work
-is remote.
+`local_cpu` and `local_gpu` are **out-of-process inference workers**, not
+in-process calls. The API process and control plane (repo `.venv`) never import
+torch, even for `local_cpu`; the worker is configured with its own interpreter
+and dependencies. `local_gpu` is introduced by the abstraction but is **not
+required to be implemented** in M9.2; it exists so the framework does not assume
+all GPU work is remote.
 
 ### 11.2 ExecutorRegistry
 
 ```text
 ExecutorRegistry
   .provider(executor_name) -> ExecutorProvider
-  .capabilities(plugin_definition) -> [ExecutionCapability]
-  .availability(plugin_definition, runtime_descriptor, recording) -> Availability
+  .technical_capabilities(plugin_definition) -> [ExecutionCapability]
+  .certified_capabilities(plugin_id, plugin_version, model_release_id) -> [ExecutionCapability]
+  .availability(plugin_definition, model_release, runtime_descriptor, recording) -> Availability
 ```
 
 `AnalysisService` dispatches by capability, not by the literal string
 `remote_gpu` (`backend/app/analysis/service.py:147,191`). The existing
-`RemoteExecutorProbe` protocol is one `ExecutorProvider` implementation.
+`RemoteExecutorProbe` protocol is one `ExecutorProvider` implementation. A
+capability is runnable only when it is both technically claimed by the plugin and
+covered by a platform `ExecutionCertificate` for the exact release/executor.
 
-### 11.3 RuntimeDescriptor
+### 11.3 RuntimeDescriptor and public package projection
 
 ```text
-RuntimeDescriptor
+RuntimeDescriptor (internal)
   executor:       local_cpu | local_gpu | remote_gpu
   device_type:    cpu | cuda
   device_index:   int | None
@@ -497,18 +597,29 @@ RuntimeDescriptor
 ```
 
 - Built by the selected `ExecutorProvider` (from `RemoteProfile` for remote,
-  from configuration for local).
+  from local inference-worker deployment config for local).
 - Passed to plugin pipeline construction instead of integer `0`.
-- Serialized into `Analysis Package` `ExecutionMetadata` (executor, device,
-  environment) and persisted in `execution_metadata_json`.
+- Persisted in full in `execution_metadata_json` (internal provenance).
 - `backend/app/remote_execution/result_ingestor.py:150` MUST validate the
   package execution metadata against the run's persisted `RuntimeDescriptor`,
   not the literal `cuda:0`.
-- `backend/app/remote_execution/probe.py` checks readiness for the descriptor's
-  device type/index (CPU always ready; CUDA requires availability of that
-  index).
 
-### 11.4 Remote asset + runtime context
+**Public Analysis Package projection (frozen v1 boundary, unchanged).** Only a
+minimal, non-sensitive projection enters the public package
+`ExecutionMetadata`:
+
+```text
+executor    = executor
+device      = "cpu" | "cuda:N"        (N = device_index when device_type = cuda)
+environment = non-sensitive logical label, or None
+```
+
+`precision`, `environment_ref`, interpreter/runtime paths, profile references,
+and any deployment/asset paths remain internal and MUST NOT appear in the public
+package, the public API, or the envelope's public projection. Paths, secrets, and
+credentials are never exposed.
+
+### 11.4 Remote asset + runtime context and trusted path mapping
 
 `RemoteWorkerContext` is generalized:
 
@@ -520,6 +631,21 @@ RuntimeDescriptor
 - it still carries **no** SSH/credential reference and no request-controlled
   path;
 - parsing still fails closed on any missing/unsafe field.
+
+**Trusted path mapping.** The logical-asset-name -> absolute-path mapping comes
+exclusively from validated deployment configuration (operator-owned env/config
+on the executor host). It is never derived from the wire request, the plugin
+declaration, the ModelRelease record, or the AssetManifest V1. The platform
+MUST NOT dynamically trust a path value received over the wire. The manifest
+carries logical names + SHA256 only.
+
+**Readiness probe.** Executor readiness is probed per `RuntimeDescriptor`; the
+platform MUST NOT assume any device is always ready. A `local_cpu`/`local_gpu`
+probe verifies the configured inference interpreter, the plugin's runtime
+dependencies, and the resolved assets. A `remote_gpu` probe verifies the pinned
+runtime commit, asset manifest + bytes, dataset root, and the descriptor's CUDA
+device index. The existing `backend/app/remote_execution/probe.py` device-0
+assumption is replaced by descriptor-driven checks.
 
 ### 11.5 ItemExecutor / Plugin registry seam
 
@@ -549,9 +675,16 @@ ZoomSpec becomes one registered plugin, not a special case.
 - The control plane (`backend/app/analysis`, `backend/app/pipelines` registry
   declarations, `backend/app/remote_execution` except the lazy `work`/`probe`
   bodies, `backend/app/main.py`) MUST remain torch/ultralytics-free.
+- `local_cpu` and `local_gpu` are **separate inference worker processes** with
+  their own configured ML interpreter. The API process and the repo `.venv`
+  control plane MUST NEVER import torch/ultralytics, including for `local_cpu`.
+  "CPU" refers to the worker runtime, not the API process.
 - Plugin declaration modules MUST import without torch. Heavy imports are lazy
   inside execution methods (the pattern already used by
   `zoomspec.../detector.py`, `frn.py`, `preprocessing.py`).
+- Plugin declaration modules MUST expose only metadata + lazy factory
+  references; they MUST NOT import scientific/heavy modules at declaration
+  import time.
 - The runner module import MUST remain GPU-library-free; lazy imports stay
   inside `_cli_probe` / `_cli_work`.
 - Enforced by import-boundary tests (existing precedent:
@@ -572,8 +705,11 @@ crash the control plane. New/renamed codes:
 | `PLUGIN_PARAMETERS_INVALID` | parameters violate plugin schema |
 | `MODEL_RELEASE_NOT_FOUND` | release unknown for plugin version |
 | `MODEL_RELEASE_MISMATCH` | remote release/manifest hash disagreement |
-| `EXECUTION_CAPABILITY_UNAVAILABLE` | executor not certified/available for plugin |
+| `EXECUTION_CAPABILITY_UNAVAILABLE` | executor technically unsupported by plugin |
+| `EXECUTION_NOT_CERTIFIED` | executor lacks a platform certificate for the release |
 | `RUNTIME_DESCRIPTOR_INVALID` | malformed/unsupported descriptor |
+| `INPUT_INCOMPATIBLE` | recording dataset label space not accepted by plugin |
+| `OUTPUT_LABEL_SPACE_INVALID` | output label space unknown/invalid for the plugin |
 | `DATASET_ADAPTER_NOT_FOUND` | no adapter for `dataset_name` |
 | `DATASET_ADAPTER_INCOMPATIBLE` | adapter cannot satisfy plugin dataset binding |
 | `REMOTE_WORKER_CONTEXT_INVALID` | existing; extended for generic asset config |
@@ -592,20 +728,31 @@ provenance without weakening any of them.
 
 1. The canonical request identity scheme (`compute_request_sha256` over the
    canonical payload) is unchanged.
-2. `asset_manifest_sha256` remains the cryptographic asset identity and is
-   verified end-to-end (control plane, probe, remote executor, ingest).
+2. AssetManifest V1's canonical hash payload is unchanged. Its
+   `asset_manifest_sha256` remains the cryptographic asset identity and is
+   verified end-to-end (control plane, probe, remote executor, ingest). The
+   unchanged ZoomSpec golden hash `16cc0534...` MUST remain valid.
 3. `plugin_id` and `plugin_version` remain frozen into the request, envelope,
    package, and run.
-4. `model_release_id` is added to the frozen request metadata and the remote
-   envelope, and is verified against the manifest's own `model_release_id`.
+4. `model_release_id` is a separate immutable identity that **references** an
+   existing `asset_manifest_sha256`. It is frozen into the request metadata and
+   the remote envelope, and is verified against the ModelRelease record's bound
+   manifest hash; it is never added to the AssetManifest V1 payload.
 5. A completed AnalysisRun is immutable. Ingest is idempotent for equal payload
    SHA and conflicts otherwise.
 6. Runtime commit verification remains mandatory before inference.
-7. Physical-box and label validation remain mandatory on ingest.
+7. Physical-box validation remains mandatory on ingest; label validation uses
+   the plugin's `output_label_space` (which equals the frozen `label_space`
+   projection).
 8. `failed`/`interrupted`/`completed` runs are never overwritten.
 9. Parameters are frozen into provenance after schema validation; no
    post-freeze mutation.
 10. GroundTruth never reaches inference.
+11. Trusted asset paths come only from validated deployment configuration, never
+    from the wire, plugin declaration, ModelRelease, or AssetManifest.
+12. The public Analysis Package projection exposes only `executor`, `device`
+    (`cpu`/`cuda:N`), and a non-sensitive `environment` label; precision and
+    private runtime/environment references stay internal.
 
 ### 14.1 Wire compatibility
 
@@ -633,10 +780,20 @@ provenance without weakening any of them.
    recorded for new runs; historical rows are not rewritten.
 4. Algorithm Integration Standard v1 §14 (checkpoint change => new Pipeline
    version) is refined by this spec: under the plugin framework, a checkpoint/
-   config/normalization change is a new **ModelRelease**, not necessarily a new
-   PluginVersion. This is the single deliberate semantic refinement of the v1
-   standard and MUST be reflected in the standard's next revision note.
-5. Analysis Package v1, benchmark manifests, imported-batch identities, and
+   config/normalization change is a new **ModelRelease** referencing a new
+   AssetManifest V1, not necessarily a new PluginVersion. This is the single
+   deliberate semantic refinement of the v1 standard and MUST be reflected in
+   the standard's next revision note.
+5. Legacy version identities are preserved. `plugin_version` is an opaque
+   immutable identifier; existing `"1.0"` values (STFTEnergy, Dummy) remain
+   valid. SemVer is recommended for new plugins only.
+6. Legacy task capabilities are preserved. `task_capability` continues to
+   accept existing values including `classification`; new capabilities are
+   additive.
+7. `label_space` remains a valid API field and equals `output_label_space`.
+   Existing plugins keep their current output label space. Input compatibility
+   is evaluated separately and must not change existing accepted recordings.
+8. Analysis Package v1, benchmark manifests, imported-batch identities, and
    Algorithm Lab comparisons remain unchanged.
 
 ---
@@ -650,11 +807,12 @@ control plane.**
 |---|---|---|
 | 1 | Introduce `PluginDefinition`/registry types additively; existing ZoomSpec definition maps onto them | none (behavior unchanged) |
 | 2 | Wrap ZoomSpec scientific modules behind the plugin declaration; keep numeric constants and orchestration identical | low; covered by existing ZoomSpec tests |
-| 3 | Seed one ModelRelease from the current `asset_manifest.json`; preserve all four logical names and SHAs | low |
+| 3 | Seed one ModelRelease record that references the current unchanged `asset_manifest.json` (`16cc0534...`); preserve all four logical names and SHAs | low |
 | 4 | Move remote executor dispatch to the generic PluginItemExecutor registry seam | medium; covered by `test_remote_runner_work_wiring.py` |
-| 5 | Generalize worker context assets + RuntimeDescriptor; validate ingest against persisted descriptor | medium; covered by remote result tests |
+| 5 | Generalize worker context assets + RuntimeDescriptor; separate local inference worker runtime; validate ingest against persisted descriptor | medium; covered by remote result tests |
 | 6 | Add the CPN-only second plugin (§17) | low |
 | 7 | Record ZoomSpec CPU status as technically feasible / not certified (§18) | none |
+| 8 | Run the consolidated final live GPU acceptance gate (§21.1) before pinning a new runtime | medium; CPU-only work through A–F otherwise |
 
 No step changes ZoomSpec inference numerics. Golden tests
 (`test_zoomspec_full_pipeline.py`, `test_zoomspec_cpn_detector.py`,
@@ -676,7 +834,24 @@ Rationale:
 - Exercises a different pipeline composition (detector -> physical proposals ->
   postprocess) without AHLP/FRN.
 - Proves Plugin-only integration and executor genericity.
-- Provides a useful `detection_localization` baseline for Algorithm Lab.
+- Proves the input/output label-space split: the CPN detector emits three
+  bandwidth tiers (narrow/mid/wide), which are **not** SpaceNet classes.
+
+Expression under the framework:
+
+```text
+plugin_id          = cpn_bandwidth_tier
+input_compatibility = ("spacenet_14",)              # SpaceNet recording identity
+dataset_adapters    = ("spacenet",)
+output_label_space  = "cpn_bandwidth_tier_v1"       # class_id 0/1/2 -> narrow/mid/wide
+task_capability     = "detection_classification"
+executor            = "remote_gpu" (certificate required before runnable)
+```
+
+The plugin accepts SpaceNet `spacenet_14` recordings but validates its
+`DetectionResult` classes against `cpn_bandwidth_tier_v1`, independent of the
+recording's dataset label space. This is the concrete case that the input/output
+split (§10.3) makes expressible.
 
 Candidate ranking (from Gate 0):
 
@@ -708,16 +883,27 @@ Gate-0 evidence:
 
 Rules:
 
-1. `technically_feasible` and `certified` are distinct fields.
-2. Only `certified` capabilities are offered for run creation and exposed as
+1. A plugin declares `technical_execution_capabilities` only. `certified` is
+   never a plugin-declared boolean.
+2. Runnable status is **derived by the platform** from an
+   `ExecutionCertificate` bound to the exact
+   `(plugin_id, plugin_version, model_release_id, executor, device_type,
+   precision, runtime reference)`. Certificates are platform-owned (§5.9).
+3. Only certified combinations are offered for run creation and exposed as
    runnable in the frontend.
-3. ZoomSpec `local_cpu` remains `certified=False`; `cpu_supported` continues to
-   read `False` in the compatibility projection.
-4. A capability becomes certified only after an explicit gate records:
+4. ZoomSpec `local_cpu` remains without a certificate; the compatibility
+   projection `cpu_supported` continues to read `False`.
+5. A certificate is created only after an explicit platform gate records:
    accuracy within an agreed tolerance versus the reference device, an agreed
-   latency envelope, and a reproducible evidence reference — captured in an
-   `ExecutionCertificate`.
-5. The two-environment boundary is preserved: the repo `.venv` control plane
+   latency envelope, and a reproducible evidence reference. Because
+   certification is release-specific, retraining invalidates prior CPU
+   certificates for that plugin version until re-certified.
+6. `local_cpu`/`local_gpu` execute in a separate configured inference worker
+   process/runtime; the API process never runs inference and stays torch-free.
+7. CPU readiness is probed, not assumed: the worker's interpreter, the plugin's
+   runtime dependencies, and the resolved assets must all be available
+   (see §11.4). The presence of a CPU does not by itself establish readiness.
+8. The two-environment boundary is preserved: the repo `.venv` control plane
    has no torch; the ML runtime is separate (`/root/miniconda3/bin/python` is
    the formal inference runtime). CPU certification never imports ML libraries
    into the control plane.
@@ -743,18 +929,26 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
 ### 20.1 Framework
 
 - `PluginRegistry` resolves a plugin by `(plugin_id, plugin_version)` with no
-  torch/ultralytics imported in the control plane.
+  torch/ultralytics imported in the control plane; declaration modules expose
+  metadata + lazy factory references only.
 - A new plugin is added by declaring it (module path/config + manifest) with
   **zero** edits to control-plane logic.
 - Parameters are validated against the declared schema before freeze; frozen
   plugins require `{}`.
 - `model_release_id` is frozen, transmitted, verified, and persisted for new
   runs; same PluginVersion with different weights yields a distinct run
-  provenance.
+  provenance, while the referenced AssetManifest V1 hash payload is unchanged.
+- Runnable executors are derived from platform-owned certificates, never from a
+  plugin-declared boolean.
 - The remote `ItemExecutor` is resolved through the registry; no ZoomSpec
   literal dispatch remains.
 - `RuntimeDescriptor` replaces all `cuda:0` / device-0 hardcodes in probe,
-  executor, package publisher, and result ingestor.
+  executor, package publisher, and result ingestor; the public package exposes
+  only `executor`, `device` (`cpu`/`cuda:N`), and non-sensitive `environment`.
+- Input compatibility is evaluated against the recording's dataset label space;
+  DetectionResult validation uses `output_label_space`.
+- `local_cpu`/`local_gpu` run in a separate inference worker process; the API
+  process and repo `.venv` remain torch-free.
 - The control plane and runner imports remain GPU-library-free.
 
 ### 20.2 Compatibility / regression
@@ -767,8 +961,16 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
 
 ### 20.3 Second pipeline gate
 
-- CPN-only/YOLO baseline is integrated as a plugin and runs through the same
+- CPN-only/YOLO baseline is integrated as a plugin with
+  `input_compatibility=("spacenet_14",)` and
+  `output_label_space="cpn_bandwidth_tier_v1"`, and runs through the same
   executor/ingest path, with no new platform persistence path.
+
+### 20.4 Final live GPU acceptance
+
+- The consolidated live gate in §21.1 passes before any new runtime pin.
+- `5bb5be4` remains the historical accepted runtime baseline; it is not
+  modified or reused as the M9.2 runtime.
 
 ---
 
@@ -776,15 +978,44 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
 
 | Subtask | Scope | Depends on |
 |---|---|---|
-| M9.2A | Plugin identity + PluginVersion + `PluginDefinition` extensions + declarative `PluginRegistry` + parameter-schema validation. Additive; no behavior change. | — |
-| M9.2B | `ModelRelease` + generic `AssetManifest` + version/release-scoped resolution and verification locally and remotely; thread `model_release_id` through provenance and wire additively. | A |
-| M9.2C | `DatasetAdapter` boundary + generic remote recording resolver + parameter freeze replacing the hardcoded empty parameters. | A, B |
-| M9.2D | `ExecutorRegistry` + `RuntimeDescriptor` + device resolution replacing `cuda:0`/device-0; generalized availability probe; CPU certification model. | A, B, C |
-| M9.2E | ZoomSpec golden migration into the framework; seed golden ModelRelease; preserve all scientific/golden tests; record CPU status as feasible-not-certified. | A–D |
-| M9.2F | Second real pipeline gate (CPN-only/YOLO baseline) + end-to-end acceptance; final self-review of provenance invariants. | E |
+| M9.2A | Plugin identity + PluginVersion (opaque) + `PluginDefinition` extensions (input compatibility, output label space, parameter schema, technical capabilities) + declarative `PluginRegistry` with lazy factory references. Additive; no behavior change. | — |
+| M9.2B | `ModelRelease` + frozen AssetManifest V1 + version/release-scoped resolution and verification locally and remotely; thread `model_release_id` through provenance and wire additively. | A |
+| M9.2C | `DatasetAdapter` boundary + input-compatibility/output-label-space split + generic remote recording resolver + parameter freeze replacing the hardcoded empty parameters. | A, B |
+| M9.2D | `ExecutorRegistry` + `RuntimeDescriptor` + platform-owned `ExecutionCertificate` store + device resolution replacing `cuda:0`/device-0; separate local inference worker runtime; descriptor-driven availability probe. | A, B, C |
+| M9.2E | ZoomSpec golden migration into the framework; seed golden ModelRelease referencing the unchanged manifest; preserve all scientific/golden tests; record CPU as technically feasible / not certified. | A–D |
+| M9.2F | Second real pipeline gate (CPN-only/YOLO baseline, `cpn_bandwidth_tier_v1` output) implemented CPU-only; no live GPU required. | E |
 
 Dependency order: **A → B → C → D → E → F.** Each subtask is independently
-testable; no subtask alone may claim multi-model genericity.
+testable; no subtask alone may claim multi-model genericity. A–F default to
+CPU-only / no-card development.
+
+### 21.1 Final Live GPU Acceptance Gate (consolidated, after A–F)
+
+M9.2 modifies runner dispatch, probe, worker context, remote result validation,
+and asset/device resolution — all on the real remote runtime path. Passing
+`pytest` alone does not declare the new runtime production-ready. Run one
+consolidated live gate after the CPU-only implementation (A–F) is complete:
+
+```text
+1. real SSH probe (remote runtime reachable, assets/commit/dataset valid)
+2. ZoomSpec golden remote inference (existing frozen semantics)
+3. CPN-only remote inference through the generic plugin/executor seam
+4. package <-> DB parity for both runs (detections, label spaces, provenance)
+5. appropriate Algorithm Lab verification
+```
+
+Rules:
+
+- The gate is the only place a new runtime pin is allowed to replace the
+  historical accepted baseline `5bb5be4`; `5bb5be4` is retained as the
+  historical accepted runtime.
+- If the implementation does **not** touch coordinator/recovery/transport, the
+  full M9.1 Gate B suite need not be rerun mechanically; if it does touch those,
+  the acceptance scope is escalated accordingly.
+- CPU-only work through A–F MUST NOT consume GPU; the live gate is a single
+  consolidated event.
+- The gate records an `ExecutionCertificate` (where applicable) and the runtime
+  pin in the acceptance evidence.
 
 ---
 
@@ -792,13 +1023,19 @@ testable; no subtask alone may claim multi-model genericity.
 
 | Risk | Mitigation |
 |---|---|
-| Generalizing provenance weakens identity checks | Keep all M9.1 checks; add Release checks additively; regression tests |
-| Plugin discovery reintroduces control-plane edits | Declarative module-path config / entry points; test that a dummy plugin needs no core edit |
-| Asset path genericity creates path-injection risk | Validate env/config paths as absolute safe POSIX; wire carries logical names only |
+| AssetManifest V1 hash changes and invalidates golden identity | ModelRelease references `asset_manifest_sha256`; V1 payload frozen; golden `16cc0534...` asserted |
+| Plugin self-certifies a runnable path | Plugin declares technical capability only; platform-owned release-specific `ExecutionCertificate` |
+| Control plane imports torch for `local_cpu` | Separate inference worker runtime; API process/.venv torch-free; import-boundary tests |
+| Input and output label spaces conflated | Separate `input_compatibility` and `output_label_space`; CPN-only gate proves it |
 | Device descriptor spoofing in results | Ingest validates against the run's persisted descriptor, not literals |
-| Refactoring remote dispatch breaks M9.1 | Mandatory full remote regression suite; incremental migration steps |
-| CPU work leaks torch into control plane | Import-boundary tests; ML runtime kept separate |
-| CPN-only gate expands scope | Reuse existing detector/checkpoint; localization-only; no new training |
+| Private runtime info or paths leak into the public package | Frozen projection (`executor`, `device`, non-sensitive `environment`); full descriptor internal |
+| Trusted asset path injection | Paths from validated deployment config only; wire carries logical names |
+| Generalizing provenance weakens identity checks | Keep all M9.1 checks; add Release checks additively; regression tests |
+| Plugin discovery reintroduces control-plane edits | Declarative module-path config / entry points; test that a plugin needs no core edit |
+| Refactoring remote dispatch breaks M9.1 | Mandatory full remote regression suite; incremental migration; single live gate |
+| Live changes go untested on real runtime | Consolidated final live GPU acceptance gate (§21.1) |
+| CPU work leaks torch into control plane | Import-boundary tests; separate ML runtime |
+| CPN-only gate expands scope | Reuse existing detector/checkpoint; no new training; bandwidth-tier output |
 | Premature auto-policy | Explicitly deferred (§19); certification required first |
 | ModelRelease vs PluginVersion confusion | Explicit rules in §5.2/§5.3 and compatibility refinement in §15 |
 
@@ -821,14 +1058,21 @@ testable; no subtask alone may claim multi-model genericity.
 2. Plugin declarations are torch-free; heavy ML imports are lazy and runtime-only.
 3. `(plugin_id, plugin_version)` is immutable behavior; `model_release_id` is
    immutable assets under that behavior.
-4. `asset_manifest_sha256` is the cryptographic asset identity, verified
-   end-to-end.
+4. AssetManifest V1 is frozen; `asset_manifest_sha256` is the cryptographic
+   asset identity, verified end-to-end, and a ModelRelease merely references it.
 5. The canonical request hash scheme, runtime-commit check, atomic ingest,
-   terminal immutability, and physical-box/label validation are frozen.
-6. Analysis Package v1 is unchanged; ModelRelease is internal execution
-   provenance.
+   terminal immutability, and physical-box validation are frozen.
+6. Analysis Package v1 is unchanged; its public execution projection is only
+   `executor`, `device`, and a non-sensitive `environment` label.
 7. Exactly one result persistence path.
-8. A capability is offered only when certified; technical executability alone
-   never activates it.
-9. Dataset access happens only through a DatasetAdapter.
-10. Device selection happens only through a RuntimeDescriptor.
+8. Runnable execution is derived from platform-owned, release-specific
+   certificates; a plugin cannot self-certify.
+9. `local_cpu`/`local_gpu` run in a separate inference worker; the control-plane
+   API process never imports torch.
+10. Input compatibility uses the recording's dataset label space;
+    DetectionResult validation uses the plugin's output label space.
+11. Dataset access happens only through a DatasetAdapter.
+12. Device selection happens only through a RuntimeDescriptor.
+13. Trusted asset paths come only from validated deployment configuration.
+14. Legacy version/task identities remain valid; new plugins are recommended to
+    use SemVer, not required.
