@@ -16,9 +16,14 @@ import pytest
 
 from app.benchmarks.manifest import ManifestGroundTruth, ManifestRecording
 from app.core.errors import PlatformError
+from app.datasets.adapter import SpaceNetDatasetAdapter, create_dataset_adapter_registry
 from app.imported_runs.fingerprint import build_recording_fingerprint
 from app.pipelines.base import RecordingInput
-from app.remote_execution.resolver import ResolvedSpaceNetInput, resolve_space_net
+from app.remote_execution.resolver import (
+    ResolvedSpaceNetInput,
+    resolve_recording,
+    resolve_space_net,
+)
 
 LABEL_ROOT = Path(__file__).resolve().parents[2] / "label_spaces"
 OBS_LOW_MHZ = 2401.0
@@ -318,3 +323,70 @@ def test_missing_sample(tmp_path: Path):
     with pytest.raises(PlatformError) as exc:
         _resolve(tmp_path, key="missing")
     assert exc.value.code == "SPACENET_SAMPLE_NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# C2. generic dispatch + legacy shim equivalence
+# ---------------------------------------------------------------------------
+
+
+def _require_recording_kwargs(bin_path: Path) -> dict:
+    return {
+        "split": "test",
+        "key": "a",
+        "label_space": "spacenet_14",
+        "expected_fingerprint": _expected_fingerprint(bin_path),
+        "expected_source_hash": hashlib.sha256(bin_path.read_bytes()).hexdigest(),
+        "label_space_root": LABEL_ROOT,
+    }
+
+
+def test_resolve_recording_dispatches_by_dataset_name(tmp_path: Path):
+    bin_path, _ = _write_sample(tmp_path)
+    registry = create_dataset_adapter_registry([SpaceNetDatasetAdapter(tmp_path)])
+
+    resolved = resolve_recording(
+        registry, dataset_name="SpaceNet", **_require_recording_kwargs(bin_path)
+    )
+
+    assert isinstance(resolved, ResolvedSpaceNetInput)
+    assert resolved.recording_input.id == "a"
+    assert resolved.recording_input.data_path == bin_path
+
+
+def test_unknown_dataset_raises(tmp_path: Path):
+    registry = create_dataset_adapter_registry()
+    with pytest.raises(PlatformError) as exc:
+        resolve_recording(
+            registry,
+            dataset_name="UnknownDataset",
+            split="test",
+            key="a",
+            label_space="spacenet_14",
+            expected_fingerprint="0" * 64,
+            expected_source_hash="0" * 64,
+            label_space_root=LABEL_ROOT,
+        )
+    assert exc.value.code == "DATASET_ADAPTER_NOT_FOUND"
+
+
+def test_shim_and_adapter_path_are_equivalent(tmp_path: Path):
+    bin_path, _ = _write_sample(tmp_path)
+    kwargs = _require_recording_kwargs(bin_path)
+
+    shim = resolve_space_net(dataset_root=tmp_path, **kwargs)
+
+    registry = create_dataset_adapter_registry([SpaceNetDatasetAdapter(tmp_path)])
+    generic = resolve_recording(registry, dataset_name="SpaceNet", **kwargs)
+
+    assert shim.recording_fingerprint == generic.recording_fingerprint
+    assert shim.source_data_sha256 == generic.source_data_sha256
+    assert shim.recording_input == generic.recording_input
+    assert isinstance(shim, ResolvedSpaceNetInput)
+    assert isinstance(generic, ResolvedSpaceNetInput)
+
+    # GroundTruth still never reaches the inference-facing input via either path.
+    for resolved in (shim, generic):
+        assert not hasattr(resolved, "ground_truth")
+        assert not hasattr(resolved.recording_input, "ground_truth")
+        assert "ground_truth" not in vars(resolved.recording_input)
