@@ -2,24 +2,29 @@ from pathlib import Path
 from typing import Any
 
 from app.pipelines.base import DetectionPayload, Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
+from app.pipelines.plugin import PipelineRuntimeAdapter, PluginDeclaration
 from app.pipelines.stft_energy.detector import detect_stft_energy
 from app.recordings.reader import read_segment_from_path
+
+
+def _definition() -> PipelineDefinition:
+    return PipelineDefinition(
+        id="stft_energy_detector",
+        name="STFT Energy Detector",
+        version="1.0",
+        label_space="signal_presence_v1",
+        recommended_device="CPU",
+        cpu_supported=True,
+        stages=("stft", "noise_floor", "threshold", "morphology", "connected_components", "confidence"),
+        inspectable_stages=(),
+        task_capability="detection_localization",
+    )
 
 
 class STFTEnergyDetectorPipeline(Pipeline):
     @property
     def definition(self) -> PipelineDefinition:
-        return PipelineDefinition(
-            id="stft_energy_detector",
-            name="STFT Energy Detector",
-            version="1.0",
-            label_space="signal_presence_v1",
-            recommended_device="CPU",
-            cpu_supported=True,
-            stages=("stft", "noise_floor", "threshold", "morphology", "connected_components", "confidence"),
-            inspectable_stages=(),
-            task_capability="detection_localization",
-        )
+        return _definition()
 
     def run(self, recording: RecordingInput, parameters: dict[str, Any], workspace: Path) -> PipelineOutput:
         workspace.mkdir(parents=True, exist_ok=True)
@@ -52,3 +57,14 @@ class STFTEnergyDetectorPipeline(Pipeline):
                 "region_count": len(regions),
             },
         )
+
+
+def create_runtime(*, assets=None, runtime_descriptor=None, output_label_space=None):
+    del assets, runtime_descriptor, output_label_space
+    return PipelineRuntimeAdapter(STFTEnergyDetectorPipeline())
+
+
+PLUGIN = PluginDeclaration(
+    definition=_definition(),
+    runtime_factory_ref="app.pipelines.stft_energy.pipeline:create_runtime",
+)

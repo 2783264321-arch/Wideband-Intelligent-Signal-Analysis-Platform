@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from app.core.errors import PlatformError
-from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
+from app.pipelines.base import ExecutionCapability, Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
+from app.pipelines.plugin import PluginDeclaration
 
 ZOOMSPEC_FROZEN_DEFINITION = PipelineDefinition(
     id="zoomspec_yolo26n_aug_combined_frn_v3",
@@ -26,7 +27,14 @@ ZOOMSPEC_FROZEN_DEFINITION = PipelineDefinition(
     task_capability="detection_classification",
     executors_supported=("remote_gpu",),
     recommended_executor="remote_gpu",
+    input_compatibility=("spacenet_14",),
+    dataset_adapters=("SpaceNet",),
+    model_release_required=True,
+    technical_execution_capabilities=(ExecutionCapability("remote_gpu", "cuda", "float16"),),
+    recommended_execution="remote_gpu",
 )
+
+PLUGIN = PluginDeclaration(definition=ZOOMSPEC_FROZEN_DEFINITION, runtime_factory_ref=None)
 
 
 class ZoomSpecRemoteOnlyPipeline(Pipeline):
