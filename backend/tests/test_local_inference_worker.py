@@ -38,6 +38,12 @@ _CPU_DESCRIPTOR = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _local_runtime_generation(monkeypatch):
+    """Worker requires the launching provider's immutable runtime generation."""
+    monkeypatch.setenv("WSP_LOCAL_INFERENCE_RUNTIME_REF", "local:gen-1")
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         project_root=REPO_ROOT,
@@ -355,6 +361,73 @@ def test_resolve_local_assets_relative_path_fails_closed():
             asset_manifest_sha256="a" * 64,
         )
     assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+# ---------------------------------------------------------------------------
+# D2B FIX ROUND 1 — runtime generation binding + terminal immutability
+# ---------------------------------------------------------------------------
+
+
+def test_local_worker_requires_runtime_generation_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("WSP_LOCAL_INFERENCE_RUNTIME_REF", raising=False)
+    settings = _settings(tmp_path)
+    database = _database(settings)
+    definition = _definition(plugin_id="code_only", model_release_required=False, label_space="signal_presence_v1")
+    _add_run(database, run_id="run_nogen", pipeline_id="code_only", metadata={"runtime_descriptor": _CPU_DESCRIPTOR})
+    with pytest.raises(PlatformError) as exc:
+        _run(database, settings, _FakeHandle(definition), _FakeStore(), "run_nogen")
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
+    assert _status(database, "run_nogen").status == "failed"
+
+
+def test_local_worker_rejects_runtime_generation_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("WSP_LOCAL_INFERENCE_RUNTIME_REF", "local:gen-2")
+    settings = _settings(tmp_path)
+    database = _database(settings)
+    definition = _definition(plugin_id="code_only", model_release_required=False, label_space="signal_presence_v1")
+    _add_run(database, run_id="run_gen", pipeline_id="code_only", metadata={"runtime_descriptor": _CPU_DESCRIPTOR})
+    handle = _FakeHandle(definition)
+    with pytest.raises(PlatformError) as exc:
+        _run(database, settings, handle, _FakeStore(), "run_gen")
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
+    # fail closed before any runtime construction/execution
+    assert handle.load_runtime_calls == []
+    assert handle.runtime.calls == []
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed", "interrupted"])
+def test_local_worker_does_not_reexecute_terminal_run(tmp_path, terminal_status):
+    settings = _settings(tmp_path)
+    database = _database(settings)
+    definition = _definition(plugin_id="code_only", model_release_required=False, label_space="signal_presence_v1")
+    _add_run(database, run_id="run_terminal", pipeline_id="code_only", metadata={"runtime_descriptor": _CPU_DESCRIPTOR})
+    with database.session_factory() as session:
+        run = session.get(AnalysisRunModel, "run_terminal")
+        run.status = terminal_status
+        run.error_type = "KEEP_TYPE"
+        run.error_message = "keep_message"
+        session.commit()
+
+    handle = _FakeHandle(definition)
+    _run(database, settings, handle, _FakeStore(), "run_terminal")
+
+    assert handle.load_runtime_calls == []
+    assert handle.runtime.calls == []
+    run = _status(database, "run_terminal")
+    assert run.status == terminal_status
+    assert run.error_type == "KEEP_TYPE"
+    assert run.error_message == "keep_message"
+
+
+def test_local_worker_pending_run_still_executes(tmp_path):
+    settings = _settings(tmp_path)
+    database = _database(settings)
+    definition = _definition(plugin_id="code_only", model_release_required=False, label_space="signal_presence_v1")
+    _add_run(database, run_id="run_pending", pipeline_id="code_only", metadata={"runtime_descriptor": _CPU_DESCRIPTOR})
+    handle = _FakeHandle(definition)
+    _run(database, settings, handle, _FakeStore(), "run_pending")
+    assert len(handle.runtime.calls) == 1
+    assert _status(database, "run_pending").status == "completed"
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import os
 from pathlib import Path
 import sys
 import traceback
@@ -38,6 +39,9 @@ from app.remote_execution.validation import AnalysisResultWriter
 from app.storage.service import StorageService
 
 logger = logging.getLogger(__name__)
+
+_RUNTIME_GENERATION_ENV = "WSP_LOCAL_INFERENCE_RUNTIME_REF"
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
 def _plugins_root() -> Path:
@@ -125,6 +129,20 @@ def _resolve_descriptor(metadata: Mapping, run: AnalysisRunModel) -> RuntimeDesc
             "RUNTIME_DESCRIPTOR_INVALID",
             "Runtime descriptor executor does not match the run executor.",
         )
+    # Authoritative local execution-time generation check: the launching provider's
+    # immutable generation env MUST equal the frozen descriptor's generation label.
+    # environment_ref (the private interpreter path) is intentionally NOT compared.
+    actual_generation = os.environ.get(_RUNTIME_GENERATION_ENV, "")
+    if not actual_generation:
+        raise PlatformError(
+            "RUNTIME_DESCRIPTOR_INVALID",
+            f"{_RUNTIME_GENERATION_ENV} is not set for the local inference worker.",
+        )
+    if actual_generation != descriptor.environment_label:
+        raise PlatformError(
+            "RUNTIME_DESCRIPTOR_INVALID",
+            "Local runtime generation does not match the frozen runtime descriptor.",
+        )
     return descriptor
 
 
@@ -192,6 +210,9 @@ def execute_local_run(
             run = session.get(AnalysisRunModel, run_id)
             if run is None:
                 raise PlatformError("ANALYSIS_RUN_NOT_FOUND", "Analysis run was not found.", 404)
+            # Terminal runs are immutable: never reset or re-execute them.
+            if run.status in _TERMINAL_STATUSES:
+                return
             recording = session.get(RecordingModel, run.recording_id)
             if recording is None:
                 raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
@@ -232,7 +253,8 @@ def execute_local_run(
         logger.error("Local inference worker failed for %s\n%s", run_id, traceback.format_exc())
         with database.session_factory() as recovery_session:
             run = recovery_session.get(AnalysisRunModel, run_id)
-            if run is not None:
+            # Recovery must never rewrite an already-terminal run.
+            if run is not None and run.status not in _TERMINAL_STATUSES:
                 run.status = "failed"
                 if isinstance(exc, PlatformError):
                     run.error_type = exc.code
