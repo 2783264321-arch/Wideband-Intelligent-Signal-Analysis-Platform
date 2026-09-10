@@ -1,10 +1,11 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="WSP_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="WSP_", extra="ignore", populate_by_name=True)
 
     project_root: Path = Path(__file__).resolve().parents[3]
     data_root: Path | None = None
@@ -18,6 +19,11 @@ class Settings(BaseSettings):
     local_cpu_runtime_ref: str | None = None  # WSP_LOCAL_CPU_RUNTIME_REF (immutable generation)
     local_gpu_runtime_ref: str | None = None  # WSP_LOCAL_GPU_RUNTIME_REF
     local_inference_work_root: Path | None = None  # WSP_LOCAL_INFERENCE_WORK_ROOT
+    # Namespaced trusted local asset mapping (release-bound plugins only):
+    # {"<plugin_id>/<plugin_version>/<asset_manifest_sha256>": {logical: /abs/path}}
+    local_asset_paths: dict | None = Field(
+        default=None, validation_alias="WSP_LOCAL_ASSET_PATHS_JSON"
+    )
 
     def model_post_init(self, __context) -> None:
         project_root = self.project_root.resolve()

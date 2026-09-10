@@ -12,6 +12,7 @@ launch.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -40,11 +41,13 @@ class LocalInferenceWorkerProvider:
         runtime_ref: str,
         work_root: Path | None,
         executor_kind: str,
+        settings: Settings | None = None,
     ) -> None:
         self._interpreter = Path(interpreter)
         self._runtime_ref = runtime_ref
         self._work_root = Path(work_root) if work_root is not None else None
         self._executor_kind = executor_kind
+        self._settings = settings
         self._device_type, self._precision = (
             ("cuda", "float16") if executor_kind == "local_gpu" else ("cpu", "float32")
         )
@@ -124,6 +127,13 @@ class LocalInferenceWorkerProvider:
     def launch(self, run_id: str, *, coordinator_token: str | None) -> int:
         env = os.environ.copy()
         env["WSP_LOCAL_INFERENCE_RUNTIME_REF"] = self._runtime_ref
+        if self._settings is not None:
+            env["WSP_PROJECT_ROOT"] = str(self._settings.project_root)
+            env["WSP_DATA_ROOT"] = str(self._settings.data_root)
+            env["WSP_LABEL_SPACE_ROOT"] = str(self._settings.label_space_root)
+            env["WSP_DATABASE_URL"] = str(self._settings.database_url)
+            if self._settings.local_asset_paths is not None:
+                env["WSP_LOCAL_ASSET_PATHS_JSON"] = json.dumps(self._settings.local_asset_paths)
         process = subprocess.Popen(
             [str(self._interpreter), "-m", _WORKER_MODULE, run_id],
             cwd=_BACKEND_ROOT,
@@ -150,5 +160,6 @@ def build_local_providers(settings: Settings) -> dict[str, LocalInferenceWorkerP
             runtime_ref=runtime_ref,
             work_root=settings.local_inference_work_root,
             executor_kind=executor_kind,
+            settings=settings,
         )
     return providers

@@ -1,5 +1,6 @@
 """TASK D2 — local inference-worker providers use a configured ML interpreter."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -122,3 +123,40 @@ def test_probe_reports_missing_interpreter(tmp_path):
     ok, reason = provider.probe()
     assert ok is False
     assert reason
+
+
+def test_launch_propagates_required_worker_env(tmp_path, monkeypatch):
+    interpreter = _fake_interpreter(tmp_path)
+    asset_map = {"p/1.0/" + "a" * 64: {"w": "/abs/w.bin"}}
+    settings = _settings(
+        tmp_path,
+        local_cpu_python_path=interpreter,
+        local_cpu_runtime_ref="local-gen-1",
+        local_asset_paths=asset_map,
+    )
+    provider = LocalInferenceWorkerProvider(
+        interpreter=interpreter,
+        runtime_ref="local-gen-1",
+        work_root=tmp_path,
+        executor_kind="local_cpu",
+        settings=settings,
+    )
+    captured = {}
+
+    class FakeProcess:
+        pid = 7
+
+    def fake_popen(argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr("app.analysis.local_executor.subprocess.Popen", fake_popen)
+    provider.launch("run_env", coordinator_token=None)
+
+    env = captured["env"]
+    assert env["WSP_PROJECT_ROOT"] == str(settings.project_root)
+    assert env["WSP_DATA_ROOT"] == str(settings.data_root)
+    assert env["WSP_LABEL_SPACE_ROOT"] == str(settings.label_space_root)
+    assert env["WSP_DATABASE_URL"] == str(settings.database_url)
+    assert env["WSP_LOCAL_INFERENCE_RUNTIME_REF"] == "local-gen-1"
+    assert json.loads(env["WSP_LOCAL_ASSET_PATHS_JSON"]) == asset_map
