@@ -15,13 +15,15 @@ local CPU inference runtime (D2B/D2B.5) before any local certificate was issued.
 | Python | `3.12.3` |
 | numpy | `2.3.2` |
 | scipy | `1.18.0` |
-| Environment fingerprint | `a1237f8faae7` (sha256 of sorted JSON `{python,numpy,scipy}` truncated to 12 hex) |
+| Generation material digest (Python/NumPy/SciPy) | `a1237f8faae7` (sha256 of sorted JSON `{python,numpy,scipy}` truncated to 12 hex) |
 | Frozen `runtime_ref` | `local:autodl_primary:cpu:a1237f8faae7` |
 
-The fingerprint/`runtime_ref` is derived from the immutable interpreter +
-dependency versions, never from the mutable interpreter path. The base
+The digest is derived **only** from those three recorded versions
+(Python/NumPy/SciPy) and never from the mutable interpreter path. The base
 interpreter's package set differs from the control-plane venv (numpy 2.3.2 vs
-2.5.2), so this is a genuinely separate ML runtime.
+2.5.2), so this is a genuinely separate ML runtime. The digest is **generation
+material** used by the operator to choose the generation label; it is **not** an
+exhaustive content-addressed fingerprint of the worker environment.
 
 ## Acceptance method
 
@@ -69,8 +71,12 @@ The ZoomSpec golden `remote_gpu` certificate is unchanged.
 
 ## Re-certification rule
 
-Changing the interpreter or its dependency versions changes the fingerprint and
-therefore the `runtime_ref`; the existing local certificates no longer match and
-local CPU execution must be re-accepted and re-certified. Certificates are
-platform-owned and are never derived from the interpreter path or plugin
-declarations.
+`runtime_ref` is an **operator/platform-owned immutable generation identity**,
+not an automatic fingerprint of the complete worker environment. Any change to
+the interpreter, its environment, or its dependencies — **including dependencies
+not represented in the Python/NumPy/SciPy digest** (for example SQLAlchemy,
+Pydantic, FastAPI) — requires the operator to issue a new `runtime_ref` and
+re-run acceptance and certification; the existing local certificates then no
+longer match. The digest is only generation material for the label and must not
+be treated as exhaustive. Certificates are platform-owned and are never derived
+from the interpreter path or plugin declarations.
