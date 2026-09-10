@@ -1,0 +1,7 @@
+{
+  "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3",
+  "plugin_version": "1.0.0",
+  "model_release_id": "golden",
+  "asset_manifest_path": "asset_manifest.json",
+  "asset_manifest_sha256": "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08"
+}
