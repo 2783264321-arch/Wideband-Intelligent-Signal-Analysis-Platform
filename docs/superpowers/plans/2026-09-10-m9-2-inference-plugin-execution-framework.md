@@ -1000,15 +1000,16 @@ certificate is never dangling. No `local_cpu` certificate.
   { "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3", "plugin_version": "1.0.0",
     "model_release_id": "golden", "executor": "remote_gpu", "device_type": "cuda",
     "precision": "float16",
-    "runtime_ref": "remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
+    "runtime_ref": "remote:autodl_primary:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
     "evidence_ref": "m9.1-live-gate" } ] }
 ```
 
-`runtime_ref` for remote MUST bind the pinned runtime commit
-(`remote:{required_remote_runtime_commit}`, optionally namespaced by profile).
-Changing `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT` therefore invalidates the
-certificate above. Local providers use an operator-owned immutable generation
-label instead (§D2).
+`runtime_ref` for remote MUST be the canonical profile-namespaced form
+`remote:{profile.name}:{required_remote_runtime_commit}` (the deployment-profile
+identity combined with the pinned code commit; the same commit on two different
+profiles MUST NOT share a certificate). Changing either the profile or
+`WSP_REMOTE_REQUIRED_RUNTIME_COMMIT` therefore invalidates the certificate above.
+Local providers use an operator-owned immutable generation label instead (§D2).
 
 **RED test (`backend/tests/test_runtime_descriptor.py`, `test_execution_certificate.py`):**
 
@@ -1016,8 +1017,8 @@ label instead (§D2).
 def test_public_projection_cpu_and_cuda(): ...
 def test_environment_ref_never_in_public_projection():
     d = RuntimeDescriptor("remote_gpu", "cuda", 0, "float16",
-                          environment_ref="/root/miniconda3", environment_label="remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037")
-    assert d.public_projection()["environment"] == "remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037"
+                          environment_ref="/root/miniconda3", environment_label="remote:autodl_primary:5bb5be4b04d04a071bc9d8f4f61172595ecee037")
+    assert d.public_projection()["environment"] == "remote:autodl_primary:5bb5be4b04d04a071bc9d8f4f61172595ecee037"
     assert d.public_projection()["environment"] != d.environment_ref
     assert d.environment_ref in d.to_metadata()          # internal only
 def test_environment_label_none_projects_none(): ...

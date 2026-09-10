@@ -8,7 +8,7 @@ from app.core.errors import PlatformError
 from app.remote_execution.runtime import RuntimeDescriptor
 
 RUNTIME_COMMIT = "5bb5be4b04d04a071bc9d8f4f61172595ecee037"
-RUNTIME_REF = f"remote:{RUNTIME_COMMIT}"
+RUNTIME_REF = f"remote:autodl_primary:{RUNTIME_COMMIT}"
 
 
 def _cuda() -> RuntimeDescriptor:

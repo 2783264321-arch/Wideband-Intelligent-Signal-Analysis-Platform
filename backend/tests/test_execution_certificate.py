@@ -18,8 +18,9 @@ PLUGIN_VERSION = "1.0.0"
 RELEASE = "golden"
 RUNTIME_COMMIT_A = "5bb5be4b04d04a071bc9d8f4f61172595ecee037"
 RUNTIME_COMMIT_B = "0" * 40
-RUNTIME_REF_A = f"remote:{RUNTIME_COMMIT_A}"
-RUNTIME_REF_B = f"remote:{RUNTIME_COMMIT_B}"
+RUNTIME_PROFILE = "autodl_primary"
+RUNTIME_REF_A = f"remote:{RUNTIME_PROFILE}:{RUNTIME_COMMIT_A}"
+RUNTIME_REF_B = f"remote:{RUNTIME_PROFILE}:{RUNTIME_COMMIT_B}"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CERT_PATH = _REPO_ROOT / "backend" / "app" / "pipelines" / "execution_certificates.json"
 
@@ -136,7 +137,7 @@ def test_remote_certificate_binds_runtime_commit():
         executor="remote_gpu",
         device_type="cuda",
         precision="float16",
-        runtime_ref=f"remote:{'1' * 40}",
+        runtime_ref=f"remote:{RUNTIME_PROFILE}:{'1' * 40}",
     )
 
 
@@ -191,6 +192,34 @@ def test_loading_seed_certificates():
         device_type="cuda",
         precision="float16",
         runtime_ref=RUNTIME_REF_A,
+    )
+
+
+def test_seed_certificate_uses_namespaced_profile_runtime_ref():
+    """Canonical remote runtime_ref is remote:{profile.name}:{commit} (D2 form)."""
+    certificate = load_execution_certificates(_CERT_PATH)[0]
+    assert certificate.runtime_ref == f"remote:{RUNTIME_PROFILE}:{RUNTIME_COMMIT_A}"
+
+    store = ExecutionCertificateStore([certificate])
+    # The profile name is part of the certified runtime identity: the same commit
+    # under a different/absent profile must NOT inherit the certificate.
+    assert not store.is_certified(
+        plugin_id=PLUGIN_ID,
+        plugin_version=PLUGIN_VERSION,
+        model_release_id=RELEASE,
+        executor="remote_gpu",
+        device_type="cuda",
+        precision="float16",
+        runtime_ref=f"remote:{RUNTIME_COMMIT_A}",
+    )
+    assert not store.is_certified(
+        plugin_id=PLUGIN_ID,
+        plugin_version=PLUGIN_VERSION,
+        model_release_id=RELEASE,
+        executor="remote_gpu",
+        device_type="cuda",
+        precision="float16",
+        runtime_ref=f"remote:other_profile:{RUNTIME_COMMIT_A}",
     )
 
 

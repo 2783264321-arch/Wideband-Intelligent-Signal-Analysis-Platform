@@ -7,7 +7,7 @@
       "executor": "remote_gpu",
       "device_type": "cuda",
       "precision": "float16",
-      "runtime_ref": "remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
+      "runtime_ref": "remote:autodl_primary:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
       "evidence_ref": "m9.1-live-gate"
     }
   ]
