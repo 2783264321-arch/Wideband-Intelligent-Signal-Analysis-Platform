@@ -14,7 +14,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.analysis.schema import ExecutorAvailabilityRead
+import pytest
+from pydantic import ValidationError
+
+from app.analysis.schema import AnalysisRunCreate, ExecutorAvailabilityRead
 from app.analysis.service import AnalysisService
 from app.core.config import Settings
 from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
@@ -315,3 +318,75 @@ def test_api_read_does_not_expose_release_internals(client):
     assert "asset_manifest_path" not in serialized
     assert "/private/deployment" not in serialized
     assert "asset_manifest_sha256" not in serialized
+
+
+# ---------------------------------------------------------------- FIX ROUND 1
+# Explicit model_release_id must be validated at the API boundary against the
+# ModelRelease id contract BEFORE service/store resolution. Empty/malformed
+# values must fail request validation; None keeps the platform default.
+
+
+def _configure_remote_app(client, store):
+    client.app.state.pipeline_registry = PipelineRegistry([RemoteCapablePipeline()])
+    client.app.state.model_release_store = store
+    client.app.state.remote_executor_probe = FakeProbe()
+    client.app.state.remote_coordinator_launcher = FakeLauncher()
+    client.app.state.identity_resolver = _identity_resolver
+    client.app.state.orchestrator_commit_resolver = _orch_commit_resolver
+    client.app.state.runtime_commit_config = RUN
+    client.app.state.project_root = Path("/tmp")
+    client.app.state.data_root = Path("/tmp/data")
+
+
+def test_analysis_run_create_allows_none_and_valid_release_ids():
+    assert AnalysisRunCreate(recording_id="r", pipeline_id="p").model_release_id is None
+    for valid in ("golden", "golden.v2", "v1_0", "a", "a" * 128):
+        payload = AnalysisRunCreate(recording_id="r", pipeline_id="p", model_release_id=valid)
+        assert payload.model_release_id == valid
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["", " ", "Upper", "-leading", ".leading", "_leading", "with space", "@bad@", "a" * 129],
+)
+def test_analysis_run_create_rejects_invalid_release_ids(invalid):
+    with pytest.raises(ValidationError):
+        AnalysisRunCreate(recording_id="r", pipeline_id="p", model_release_id=invalid)
+
+
+def test_api_rejects_empty_model_release_id_before_store_resolution(client):
+    _add_recording(client)
+    store = FakeModelReleaseStore(default_release_id="golden")
+    _configure_remote_app(client, store)
+
+    response = client.post(
+        "/api/analysis-runs",
+        json={
+            "recording_id": "rec_x",
+            "pipeline_id": "remote_test",
+            "executor": "remote_gpu",
+            "parameters": {},
+            "model_release_id": "",
+        },
+    )
+    assert response.status_code == 422
+    assert store.resolve_calls == []
+
+
+def test_api_rejects_malformed_model_release_id_before_store_resolution(client):
+    _add_recording(client)
+    store = FakeModelReleaseStore(default_release_id="golden")
+    _configure_remote_app(client, store)
+
+    response = client.post(
+        "/api/analysis-runs",
+        json={
+            "recording_id": "rec_x",
+            "pipeline_id": "remote_test",
+            "executor": "remote_gpu",
+            "parameters": {},
+            "model_release_id": "@@malformed@@",
+        },
+    )
+    assert response.status_code == 422
+    assert store.resolve_calls == []

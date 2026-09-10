@@ -1,7 +1,12 @@
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# ModelRelease logical id contract (mirrors ModelReleaseStore record validation).
+# Explicit API-provided ids are validated here before service/store resolution;
+# ``None`` keeps the platform default.
+MODEL_RELEASE_ID_PATTERN = r"^[a-z0-9][a-z0-9_.-]{0,127}$"
 
 
 class RemoteExecutionMetadataRead(BaseModel):
@@ -29,7 +34,7 @@ class AnalysisRunCreate(BaseModel):
     pipeline_id: str
     executor: str = "local_cpu"
     parameters: dict[str, Any] = Field(default_factory=dict)
-    model_release_id: str | None = None
+    model_release_id: Annotated[str, Field(pattern=MODEL_RELEASE_ID_PATTERN)] | None = None
 
 
 class AnalysisRunRead(BaseModel):
