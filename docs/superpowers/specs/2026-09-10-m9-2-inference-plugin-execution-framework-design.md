@@ -210,6 +210,11 @@ reference)`, that a combination has passed an acceptance gate. Certificates are
 created and owned by the platform, never by a plugin declaration. A combination
 without a certificate is not offered as runnable.
 
+For a **release-less/code-only** plugin (`model_release_required=False`) the
+resolved `model_release_id` is `None` and the certificate binds
+`model_release_id=None`; certification is still mandatory. Plugins that require
+immutable external assets must use a real ModelRelease (never a fake manifest).
+
 ---
 
 ## 6. Architecture Overview

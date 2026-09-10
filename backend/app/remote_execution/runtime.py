@@ -16,10 +16,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.errors import PlatformError
-from app.pipelines.base import ExecutionCapability
+from app.pipelines.base import ExecutionCapability, PipelineDefinition
 
 
 def _descriptor_invalid(message: str) -> PlatformError:
@@ -114,7 +115,7 @@ class RuntimeDescriptor:
 class ExecutionCertificate:
     plugin_id: str
     plugin_version: str
-    model_release_id: str
+    model_release_id: str | None  # None only for release-less/code-only certification
     executor: str
     device_type: str
     precision: str
@@ -149,7 +150,7 @@ class ExecutionCertificateStore:
         *,
         plugin_id: str,
         plugin_version: str,
-        model_release_id: str,
+        model_release_id: str | None,
         executor: str,
         device_type: str,
         precision: str,
@@ -171,7 +172,7 @@ class ExecutionCertificateStore:
         *,
         plugin_id: str,
         plugin_version: str,
-        model_release_id: str,
+        model_release_id: str | None,
         runtime_ref: str,
         technical: Iterable[ExecutionCapability],
     ) -> list[ExecutionCapability]:
@@ -188,6 +189,142 @@ class ExecutionCertificateStore:
                 runtime_ref=runtime_ref,
             )
         ]
+
+
+class ExecutorProvider(Protocol):
+    """A concrete execution environment for one executor name."""
+
+    name: str
+
+    @property
+    def runtime_ref(self) -> str: ...
+
+    def runtime_descriptor(self) -> RuntimeDescriptor: ...
+
+    def availability(
+        self, definition: PipelineDefinition, model_release: Any, recording: Any
+    ) -> ExecutorAvailabilityRead: ...
+
+    def launch(self, run_id: str, *, coordinator_token: str | None) -> int | None: ...
+
+
+class ExecutorRegistry:
+    """Capability-driven dispatch: provider lookup + certificate-gated certification."""
+
+    def __init__(
+        self,
+        providers: Mapping[str, ExecutorProvider],
+        certificates: ExecutionCertificateStore,
+    ) -> None:
+        self._providers = dict(providers)
+        self._certificates = certificates
+
+    def provider(self, executor: str) -> ExecutorProvider:
+        provider = self._providers.get(executor)
+        if provider is None:
+            raise PlatformError(
+                "EXECUTION_CAPABILITY_UNAVAILABLE",
+                f"No executor provider is registered for '{executor}'.",
+            )
+        return provider
+
+    def providers(self) -> Mapping[str, ExecutorProvider]:
+        return dict(self._providers)
+
+    def technical_capabilities(
+        self, definition: PipelineDefinition
+    ) -> list[ExecutionCapability]:
+        return list(definition.technical_execution_capabilities)
+
+    def certified_capabilities(
+        self,
+        definition: PipelineDefinition,
+        model_release_id: str | None,
+        runtime_ref: str,
+    ) -> list[ExecutionCapability]:
+        return self._certificates.certified_capabilities(
+            plugin_id=definition.plugin_id,
+            plugin_version=definition.plugin_version,
+            model_release_id=model_release_id,
+            runtime_ref=runtime_ref,
+            technical=definition.technical_execution_capabilities,
+        )
+
+    def certified_executors(
+        self, definition: PipelineDefinition, model_release_id: str | None
+    ) -> dict[str, list[ExecutionCapability]]:
+        certified: dict[str, list[ExecutionCapability]] = {}
+        for name, provider in self._providers.items():
+            capabilities = self.certified_capabilities(
+                definition, model_release_id, provider.runtime_ref
+            )
+            if capabilities:
+                certified[name] = capabilities
+        return certified
+
+    def availability(
+        self, definition: PipelineDefinition, model_release: Any, recording: Any
+    ) -> ExecutorAvailabilityRead:
+        model_release_id = model_release.release.model_release_id
+        certified = self.certified_executors(definition, model_release_id)
+        if not certified:
+            return ExecutorAvailabilityRead(
+                executor=definition.recommended_executor,
+                available=False,
+                reason_code="EXECUTION_NOT_CERTIFIED",
+                reason_message="No runtime has a platform certificate for this release.",
+                remote_profile=None,
+                recommended=False,
+            )
+        executor = (
+            definition.recommended_executor
+            if definition.recommended_executor in certified
+            else sorted(certified)[0]
+        )
+        return self._providers[executor].availability(definition, model_release, recording)
+
+
+class RemoteGpuExecutorProvider:
+    """Adapts the M9.1 SSH probe + coordinator launcher as an ExecutorProvider."""
+
+    name = "remote_gpu"
+
+    def __init__(self, *, profile: Any, probe: Any, launcher: Any, required_runtime_commit: str) -> None:
+        self._profile = profile
+        self._probe = probe
+        self._launcher = launcher
+        self._required_runtime_commit = required_runtime_commit
+
+    @property
+    def runtime_ref(self) -> str:
+        return f"remote:{self._profile.name}:{self._required_runtime_commit}"
+
+    def runtime_descriptor(self) -> RuntimeDescriptor:
+        return RuntimeDescriptor(
+            executor=self.name,
+            device_type="cuda",
+            device_index=0,
+            precision="float16",
+            environment_ref=self._profile.name,
+            environment_label=self._profile.name,
+        )
+
+    def availability(self, definition: PipelineDefinition, model_release: Any, recording: Any) -> ExecutorAvailabilityRead:
+        from app.pipelines.compatibility import is_input_compatible
+
+        if not is_input_compatible(definition, recording.label_space):
+            return ExecutorAvailabilityRead(
+                executor=self.name,
+                available=False,
+                reason_code="INPUT_INCOMPATIBLE",
+                reason_message="Pipeline cannot run for this recording label space.",
+                remote_profile=None,
+                recommended=False,
+            )
+        return self._probe.availability(recording, definition, recording.source_data_sha256)
+
+    def launch(self, run_id: str, *, coordinator_token: str | None) -> int | None:
+        return self._launcher.launch(run_id, coordinator_token)
 
 
 _CERTIFICATE_FIELDS = (
@@ -225,6 +362,14 @@ def load_execution_certificates(path: Path) -> list[ExecutionCertificate]:
             raise _not_certified(f"Certificate {index} is missing fields {missing!r}.")
         values = {field: item[field] for field in _CERTIFICATE_FIELDS}
         for field, value in values.items():
+            if field == "model_release_id":
+                # None = release-less/code-only certification; empty string is invalid.
+                if value is not None and (not isinstance(value, str) or not value):
+                    raise _not_certified(
+                        f"Certificate {index} field 'model_release_id' must be a "
+                        "non-empty string or null."
+                    )
+                continue
             if not isinstance(value, str) or not value:
                 raise _not_certified(
                     f"Certificate {index} field '{field}' must be a non-empty string."

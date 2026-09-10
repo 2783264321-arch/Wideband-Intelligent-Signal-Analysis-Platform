@@ -11,6 +11,14 @@ class Settings(BaseSettings):
     label_space_root: Path | None = None
     database_url: str | None = None
 
+    # Explicit local inference runtime config (D2). Plugin inference must run in a
+    # separate ML interpreter, never the control-plane interpreter.
+    local_cpu_python_path: Path | None = None  # WSP_LOCAL_CPU_PYTHON_PATH
+    local_gpu_python_path: Path | None = None  # WSP_LOCAL_GPU_PYTHON_PATH
+    local_cpu_runtime_ref: str | None = None  # WSP_LOCAL_CPU_RUNTIME_REF (immutable generation)
+    local_gpu_runtime_ref: str | None = None  # WSP_LOCAL_GPU_RUNTIME_REF
+    local_inference_work_root: Path | None = None  # WSP_LOCAL_INFERENCE_WORK_ROOT
+
     def model_post_init(self, __context) -> None:
         project_root = self.project_root.resolve()
         if self.data_root is None:

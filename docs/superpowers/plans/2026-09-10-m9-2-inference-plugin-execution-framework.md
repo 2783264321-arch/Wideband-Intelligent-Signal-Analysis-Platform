@@ -1043,7 +1043,28 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 ---
 
-## TASK D2 — `ExecutorRegistry` + capability-driven dispatch
+## TASK D2A — `ExecutorRegistry` + provider primitives (inert)
+
+**Sequencing (controller ruling): D2 is split D2A → D2B → D2B.5 → D2C.**
+- **D2A (this task):** add `ExecutorProvider`/`ExecutorRegistry`,
+  `RemoteGpuExecutorProvider`, `LocalInferenceWorkerProvider`, and the explicit
+  local inference config. No `AnalysisService` dispatch cutover and no read-model
+  projection change; accepted execution behavior is unchanged. No production local
+  certificate is seeded.
+- **D2B:** implement the plugin-native `app.analysis.local_inference_worker` and the
+  local resolution sequence (no SSH).
+- **D2B.5:** CPU acceptance gate and seed a real local CPU certificate for the
+  accepted local runtime generation.
+- **D2C:** cut `AnalysisService` + certified read-model projections over to registry
+  dispatch (only after local certification exists, so the Dummy/STFT baseline is
+  preserved).
+
+**Code-only contract:** if `model_release_required=False`, the resolved
+`model_release_id` is `None`. An `ExecutionCertificate` may bind
+`model_release_id=None` (release-less/code-only certification). Certification is
+**still mandatory** — a provider/runtime without an exact certificate is not
+runnable. Do not invent a fake ModelRelease/AssetManifest; plugins that require
+immutable external assets must use a real ModelRelease.
 
 **First: read before editing**
 - `backend/app/analysis/service.py:80-131,147-220`.
@@ -1111,8 +1132,8 @@ class LocalInferenceWorkerProvider:
 
 - If `local_cpu_python_path` or `local_cpu_runtime_ref` is unset, the provider is not registered and `local_cpu` remains unavailable.
 - Control-plane `.venv` stays torch-free; the configured interpreter is a separate ML runtime.
-- `AnalysisService` replaces `if executor == "remote_gpu"` with `provider = executor_registry.provider(executor)`; remote coord launcher comes from the provider.
-- `PipelineDefinition.executors_supported` / `recommended_executor` read-model projections are computed from certified capabilities for the provider's `runtime_ref`.
+- **(D2C cutover, not D2A)** `AnalysisService` replaces `if executor == "remote_gpu"` with `provider = executor_registry.provider(executor)`; remote coord launcher comes from the provider.
+- **(D2C cutover, not D2A)** `PipelineDefinition.executors_supported` / `recommended_executor` read-model projections are computed from certified capabilities for the provider's `runtime_ref`.
 
 **RED test (`backend/tests/test_executor_registry.py`, `test_local_worker_provider.py`):**
 

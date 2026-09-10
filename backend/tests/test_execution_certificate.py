@@ -245,3 +245,126 @@ def test_duplicate_certificate_rejected():
     with pytest.raises(PlatformError) as exc:
         ExecutionCertificateStore([_certificate(), _certificate()])
     assert exc.value.code == "EXECUTION_NOT_CERTIFIED"
+
+
+# ---------------------------------------------------------------------------
+# D2A — code-only (release-less) certification: model_release_id may be None.
+# Certification is still mandatory; a release-bound cert must not certify None.
+# ---------------------------------------------------------------------------
+
+
+def _code_only_certificate() -> ExecutionCertificate:
+    return ExecutionCertificate(
+        plugin_id="code_only_plugin",
+        plugin_version="1.0",
+        model_release_id=None,
+        executor="local_cpu",
+        device_type="cpu",
+        precision="float32",
+        runtime_ref="local:gen-1",
+        evidence_ref="cpu-gate",
+    )
+
+
+def test_code_only_certificate_allows_none_release(tmp_path):
+    payload = {
+        "certificates": [
+            {
+                "plugin_id": "code_only_plugin",
+                "plugin_version": "1.0",
+                "model_release_id": None,
+                "executor": "local_cpu",
+                "device_type": "cpu",
+                "precision": "float32",
+                "runtime_ref": "local:gen-1",
+                "evidence_ref": "cpu-gate",
+            }
+        ]
+    }
+    path = tmp_path / "certs.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    certificates = load_execution_certificates(path)
+    assert certificates[0].model_release_id is None
+
+    store = ExecutionCertificateStore(certificates)
+    assert store.is_certified(
+        plugin_id="code_only_plugin",
+        plugin_version="1.0",
+        model_release_id=None,
+        executor="local_cpu",
+        device_type="cpu",
+        precision="float32",
+        runtime_ref="local:gen-1",
+    )
+    # code-only certification is exact: it does not certify a concrete release
+    assert not store.is_certified(
+        plugin_id="code_only_plugin",
+        plugin_version="1.0",
+        model_release_id="golden",
+        executor="local_cpu",
+        device_type="cpu",
+        precision="float32",
+        runtime_ref="local:gen-1",
+    )
+
+
+def test_release_bound_certificate_does_not_certify_none_release():
+    store = _store()  # ZoomSpec golden remote cert
+    assert not store.is_certified(
+        plugin_id=PLUGIN_ID,
+        plugin_version=PLUGIN_VERSION,
+        model_release_id=None,
+        executor="remote_gpu",
+        device_type="cuda",
+        precision="float16",
+        runtime_ref=RUNTIME_REF_A,
+    )
+
+
+def test_empty_string_release_is_invalid(tmp_path):
+    payload = {
+        "certificates": [
+            {
+                "plugin_id": "code_only_plugin",
+                "plugin_version": "1.0",
+                "model_release_id": "",
+                "executor": "local_cpu",
+                "device_type": "cpu",
+                "precision": "float32",
+                "runtime_ref": "local:gen-1",
+                "evidence_ref": "cpu-gate",
+            }
+        ]
+    }
+    path = tmp_path / "certs.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(PlatformError) as exc:
+        load_execution_certificates(path)
+    assert exc.value.code == "EXECUTION_NOT_CERTIFIED"
+
+
+def test_registry_certifies_code_only_plugin_with_none_release():
+    from app.pipelines.base import ExecutionCapability, PipelineDefinition
+    from app.remote_execution.runtime import ExecutorRegistry
+
+    definition = PipelineDefinition(
+        id="code_only_plugin",
+        name="Code Only",
+        version="1.0",
+        label_space="signal_presence_v1",
+        recommended_device="CPU",
+        cpu_supported=True,
+        stages=(),
+        inspectable_stages=(),
+        task_capability="detection_localization",
+        executors_supported=("local_cpu",),
+        recommended_executor="local_cpu",
+        technical_execution_capabilities=(ExecutionCapability("local_cpu", "cpu", "float32"),),
+    )
+    registry = ExecutorRegistry({}, ExecutionCertificateStore([_code_only_certificate()]))
+    assert registry.certified_capabilities(definition, None, "local:gen-1") == [
+        ExecutionCapability("local_cpu", "cpu", "float32")
+    ]
+    assert registry.certified_capabilities(definition, "golden", "local:gen-1") == []
+    assert registry.certified_capabilities(definition, None, "local:other-gen") == []
