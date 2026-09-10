@@ -17,8 +17,12 @@ from app.remote_execution.schema import RemoteExecutionBatchV1
 
 
 def canonical_request_payload(batch: RemoteExecutionBatchV1) -> dict:
-    """Every semantic batch field except ``request_sha256``."""
-    return batch.model_dump(exclude={"request_sha256"})
+    """Every semantic batch field except ``request_sha256``.
+
+    ``exclude_none`` keeps a legacy request (no ``model_release_id``) byte-exact
+    with its pre-M9.2 canonical form.
+    """
+    return batch.model_dump(exclude={"request_sha256"}, exclude_none=True)
 
 
 def _encode(value: object) -> bytes:

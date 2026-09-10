@@ -27,6 +27,7 @@ class RemoteWireModel(BaseModel):
 class RemotePipelineRefV1(RemoteWireModel):
     id: WireIdentifier
     version: WireIdentifier
+    model_release_id: WireIdentifier | None = None
 
 
 class RemoteRecordingRefV1(RemoteWireModel):
@@ -125,6 +126,7 @@ class RemoteExecutionEnvelopeV1(RemoteWireModel):
     asset_manifest_sha256: Sha256Hex
     hardware: dict[str, Any]
     payload_sha256: Sha256Hex
+    model_release_id: WireIdentifier | None = None
     remote_started_at: datetime | None = None
     remote_finished_at: datetime | None = None
 

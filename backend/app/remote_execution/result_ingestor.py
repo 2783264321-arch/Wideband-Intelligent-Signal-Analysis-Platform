@@ -103,6 +103,12 @@ def _verify_envelope_identity(
     if missing:
         raise _remote_invalid("Local execution metadata is missing expected provenance.")
 
+    # Release identity is verified only for M9.2+ runs; legacy metadata has no
+    # model_release_id key and must remain recoverable.
+    local_release_id = metadata.get("model_release_id")
+    if local_release_id is not None and envelope.model_release_id != local_release_id:
+        raise _remote_invalid("envelope model release id does not match local provenance")
+
     checks = (
         (envelope.local_run_id == run.id, "envelope local_run_id does not match the AnalysisRun"),
         (envelope.request_id == metadata["request_id"], "envelope request_id does not match local provenance"),

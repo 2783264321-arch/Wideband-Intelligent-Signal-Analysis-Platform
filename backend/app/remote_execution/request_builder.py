@@ -37,6 +37,7 @@ FROZEN_REQUEST_KEYS = (
     "asset_manifest_sha256",
     "pipeline_id",
     "pipeline_version",
+    "model_release_id",
     "remote_profile",
     "recording_fingerprint",
     "source_data_sha256",
@@ -75,6 +76,7 @@ def _build_batch_content(metadata: dict, request_sha256: str) -> RemoteExecution
         pipeline=RemotePipelineRefV1(
             id=metadata["pipeline_id"],
             version=metadata["pipeline_version"],
+            model_release_id=metadata.get("model_release_id"),
         ),
         asset_manifest_sha256=metadata["asset_manifest_sha256"],
         items=[item],
@@ -111,6 +113,7 @@ def freeze_request_provenance(
     orchestrator_commit,
     asset_manifest_sha256,
     remote_profile,
+    model_release_id=None,
     id_factory=None,
 ) -> dict:
     """Pure provenance construction. Returns the FROZEN REQUEST METADATA dict.
@@ -130,6 +133,7 @@ def freeze_request_provenance(
         "asset_manifest_sha256": asset_manifest_sha256,
         "pipeline_id": pipeline_id,
         "pipeline_version": pipeline_version,
+        "model_release_id": model_release_id,
         "remote_profile": remote_profile,
         "recording_fingerprint": recording_fingerprint,
         "source_data_sha256": source_data_sha256,
