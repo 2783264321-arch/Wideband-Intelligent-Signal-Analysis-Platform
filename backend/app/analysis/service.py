@@ -10,6 +10,7 @@ from app.analysis.job_manager import LocalJobManager
 from app.analysis.model import AnalysisRunModel
 from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.errors import PlatformError
+from app.pipelines.compatibility import is_input_compatible
 from app.pipelines.plugin import validate_plugin_parameters
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
@@ -86,11 +87,11 @@ class AnalysisService:
                 recommended=False,
             )
 
-        if recording.label_space != definition.label_space and definition.task_capability != "detection_localization":
+        if not is_input_compatible(definition, recording.label_space):
             return ExecutorAvailabilityRead(
                 executor="remote_gpu",
                 available=False,
-                reason_code="PIPELINE_INCOMPATIBLE",
+                reason_code="INPUT_INCOMPATIBLE",
                 reason_message="Pipeline cannot run for this recording label space.",
                 remote_profile=None,
                 recommended=False,
@@ -155,8 +156,8 @@ class AnalysisService:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Only the local_cpu executor is available in the core slice.")
         if not definition.cpu_supported:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Selected pipeline does not support local CPU execution.")
-        if recording.label_space != definition.label_space and definition.task_capability != "detection_localization":
-            raise PlatformError("PIPELINE_INCOMPATIBLE", "Selected pipeline cannot run for this recording label space.")
+        if not is_input_compatible(definition, recording.label_space):
+            raise PlatformError("INPUT_INCOMPATIBLE", "Selected pipeline cannot run for this recording label space.")
 
         run = AnalysisRunModel(
             id=f"run_{uuid4().hex}",
@@ -193,8 +194,8 @@ class AnalysisService:
 
         if "remote_gpu" not in definition.executors_supported:
             raise PlatformError("EXECUTOR_UNAVAILABLE", "Selected pipeline does not support remote GPU execution.")
-        if recording.label_space != definition.label_space:
-            raise PlatformError("PIPELINE_INCOMPATIBLE", "Selected pipeline cannot run for this recording label space.")
+        if not is_input_compatible(definition, recording.label_space):
+            raise PlatformError("INPUT_INCOMPATIBLE", "Selected pipeline cannot run for this recording label space.")
 
         # Consult the availability/probe service BEFORE creating/dispatching.
         availability = self.executor_availability(recording.id, definition.id)

@@ -155,7 +155,7 @@ def test_label_space_mismatch_never_invokes_probe(client):
     _add_sn_recording(client, recording_id="rec_mismatch", label_space="signal_presence_v1")
     availability = _availability(client, "rec_mismatch", "remote_test", probe=probe)
     assert availability.available is False
-    assert availability.reason_code == "PIPELINE_INCOMPATIBLE"
+    assert availability.reason_code == "INPUT_INCOMPATIBLE"
     assert availability.recommended is False
     assert probe.calls == []
 

@@ -160,7 +160,7 @@ def test_remote_create_run_validates_label_space(client):
                        pipeline_cls=RemoteCapablePipeline)
     with pytest.raises(PlatformError) as exc:
         service.create_run(recording_id="rec_x", pipeline_id="remote_test", executor="remote_gpu", parameters={})
-    assert exc.value.code == "PIPELINE_INCOMPATIBLE"
+    assert exc.value.code == "INPUT_INCOMPATIBLE"
 
 
 def test_remote_create_run_does_not_reject_cpu_supported_true(client):

@@ -63,7 +63,7 @@ class AnalysisResultWriter:
             )
             validate_label(
                 self.label_service,
-                label_space_id=self.pipeline_definition.label_space,
+                label_space_id=self.pipeline_definition.resolved_output_label_space,
                 class_id=item.class_id,
                 class_name=item.class_name,
                 error_code="INVALID_DETECTION",
