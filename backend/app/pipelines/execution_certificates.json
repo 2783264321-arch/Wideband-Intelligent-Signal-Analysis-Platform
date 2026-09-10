@@ -1,0 +1,14 @@
+{
+  "certificates": [
+    {
+      "plugin_id": "zoomspec_yolo26n_aug_combined_frn_v3",
+      "plugin_version": "1.0.0",
+      "model_release_id": "golden",
+      "executor": "remote_gpu",
+      "device_type": "cuda",
+      "precision": "float16",
+      "runtime_ref": "remote:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
+      "evidence_ref": "m9.1-live-gate"
+    }
+  ]
+}
