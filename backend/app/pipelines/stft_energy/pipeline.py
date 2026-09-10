@@ -1,7 +1,14 @@
 from pathlib import Path
 from typing import Any
 
-from app.pipelines.base import DetectionPayload, Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
+from app.pipelines.base import (
+    DetectionPayload,
+    ExecutionCapability,
+    Pipeline,
+    PipelineDefinition,
+    PipelineOutput,
+    RecordingInput,
+)
 from app.pipelines.plugin import PipelineRuntimeAdapter, PluginDeclaration
 from app.pipelines.stft_energy.detector import detect_stft_energy
 from app.recordings.reader import read_segment_from_path
@@ -18,6 +25,7 @@ def _definition() -> PipelineDefinition:
         stages=("stft", "noise_floor", "threshold", "morphology", "connected_components", "confidence"),
         inspectable_stages=(),
         task_capability="detection_localization",
+        technical_execution_capabilities=(ExecutionCapability("local_cpu", "cpu", "float32"),),
         parameter_schema={
             "type": "object",
             "additionalProperties": False,

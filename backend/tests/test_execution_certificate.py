@@ -172,9 +172,9 @@ def test_certified_capabilities_empty_for_wrong_runtime_ref():
 
 def test_loading_seed_certificates():
     certificates = load_execution_certificates(_CERT_PATH)
-    assert len(certificates) == 1
-    cert = certificates[0]
-    assert cert.plugin_id == PLUGIN_ID
+    zoom_certificates = [cert for cert in certificates if cert.plugin_id == PLUGIN_ID]
+    assert len(zoom_certificates) == 1
+    cert = zoom_certificates[0]
     assert cert.plugin_version == PLUGIN_VERSION
     assert cert.model_release_id == "golden"
     assert cert.executor == "remote_gpu"

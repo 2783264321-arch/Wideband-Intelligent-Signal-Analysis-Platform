@@ -9,6 +9,26 @@
       "precision": "float16",
       "runtime_ref": "remote:autodl_primary:5bb5be4b04d04a071bc9d8f4f61172595ecee037",
       "evidence_ref": "m9.1-live-gate"
+    },
+    {
+      "plugin_id": "dummy",
+      "plugin_version": "1.0",
+      "model_release_id": null,
+      "executor": "local_cpu",
+      "device_type": "cpu",
+      "precision": "float32",
+      "runtime_ref": "local:autodl_primary:cpu:a1237f8faae7",
+      "evidence_ref": "m9_2_local_cpu_acceptance"
+    },
+    {
+      "plugin_id": "stft_energy_detector",
+      "plugin_version": "1.0",
+      "model_release_id": null,
+      "executor": "local_cpu",
+      "device_type": "cpu",
+      "precision": "float32",
+      "runtime_ref": "local:autodl_primary:cpu:a1237f8faae7",
+      "evidence_ref": "m9_2_local_cpu_acceptance"
     }
   ]
 }

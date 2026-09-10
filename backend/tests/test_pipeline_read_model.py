@@ -64,12 +64,17 @@ def test_list_pipelines_includes_plugin_fields(client):
     assert stft["output_label_space"] == "signal_presence_v1"
     assert stft["label_space"] == "signal_presence_v1"
     assert stft["input_compatibility"] == []
-    assert stft["technical_execution_capabilities"] == []
+    assert stft["technical_execution_capabilities"] == [
+        {"executor": "local_cpu", "device_type": "cpu", "precision": "float32"}
+    ]
     assert stft["recommended_execution"] is None
 
     dummy = items["dummy"]
     assert dummy["output_label_space"] == "spacenet_14"
     assert dummy["label_space"] == "spacenet_14"
+    assert dummy["technical_execution_capabilities"] == [
+        {"executor": "local_cpu", "device_type": "cpu", "precision": "float32"}
+    ]
 
 
 def test_existing_pipeline_fields_still_present(client):

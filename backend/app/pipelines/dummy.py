@@ -1,7 +1,14 @@
 from pathlib import Path
 from typing import Any
 
-from app.pipelines.base import DetectionPayload, Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
+from app.pipelines.base import (
+    DetectionPayload,
+    ExecutionCapability,
+    Pipeline,
+    PipelineDefinition,
+    PipelineOutput,
+    RecordingInput,
+)
 from app.pipelines.plugin import PipelineRuntimeAdapter, PluginDeclaration
 
 
@@ -15,6 +22,7 @@ def _definition() -> PipelineDefinition:
         cpu_supported=True,
         stages=("input", "deterministic_detection"),
         inspectable_stages=(),
+        technical_execution_capabilities=(ExecutionCapability("local_cpu", "cpu", "float32"),),
     )
 
 
