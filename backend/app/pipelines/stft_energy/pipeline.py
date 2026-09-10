@@ -18,6 +18,21 @@ def _definition() -> PipelineDefinition:
         stages=("stft", "noise_floor", "threshold", "morphology", "connected_components", "confidence"),
         inspectable_stages=(),
         task_capability="detection_localization",
+        parameter_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "nperseg": {"type": "integer", "default": 512},
+                "noverlap": {"type": "integer", "default": 256},
+                "nfft": {"type": "integer", "default": 512},
+                "noise_floor_percentile": {"type": "number", "default": 50.0},
+                "threshold_margin_db": {"type": "number", "default": 12.0},
+                "closing_size": {"type": "integer", "default": 5},
+                "min_area": {"type": "integer", "default": 100},
+                "min_duration_s": {"type": "number", "default": 0.0},
+                "min_bandwidth_hz": {"type": "number", "default": 0.0},
+            },
+        },
     )
 
 

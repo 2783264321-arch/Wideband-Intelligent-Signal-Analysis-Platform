@@ -8,7 +8,7 @@ import pytest
 
 from app.core.errors import PlatformError
 from app.pipelines.base import ExecutionCapability, PipelineDefinition, PipelineOutput, RecordingInput
-from app.pipelines.plugin import PipelineRuntimeAdapter
+from app.pipelines.plugin import PipelineRuntimeAdapter, validate_plugin_parameters
 from app.pipelines.plugin_registry import (
     PluginHandle,
     PluginRegistry,
@@ -147,3 +147,37 @@ def test_plugin_registry_accepts_explicit_declarations():
     registry = PluginRegistry([declaration])
     assert registry.get("dummy", "1.0").definition.id == "dummy"
     assert registry.list() == [declaration.definition]
+
+
+_STFT_SUPPORTED_PARAMETERS = {
+    "nperseg": 256,
+    "noverlap": 128,
+    "nfft": 256,
+    "noise_floor_percentile": 40.0,
+    "threshold_margin_db": 10.0,
+    "closing_size": 3,
+    "min_area": 50,
+    "min_duration_s": 0.01,
+    "min_bandwidth_hz": 1000.0,
+}
+
+
+def test_stft_parameter_schema_accepts_supported_and_rejects_unknown():
+    definition = load_declaration("app.pipelines.stft_energy.pipeline").definition
+    schema = definition.parameter_schema
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert "required" not in schema
+    assert set(schema["properties"]) == set(_STFT_SUPPORTED_PARAMETERS)
+    assert schema["properties"]["nperseg"] == {"type": "integer", "default": 512}
+    assert schema["properties"]["threshold_margin_db"] == {"type": "number", "default": 12.0}
+
+    validate_plugin_parameters(definition, {})
+    validate_plugin_parameters(definition, dict(_STFT_SUPPORTED_PARAMETERS))
+
+    with pytest.raises(PlatformError) as excinfo:
+        validate_plugin_parameters(
+            definition,
+            {**_STFT_SUPPORTED_PARAMETERS, "unknown_parameter": 1},
+        )
+    assert excinfo.value.code == "PLUGIN_PARAMETERS_INVALID"
