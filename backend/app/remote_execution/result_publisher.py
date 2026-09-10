@@ -94,6 +94,7 @@ def publish_result(
         asset_manifest_sha256=asset_manifest_sha256,
         hardware=dict(hardware),
         payload_sha256=payload_sha256,
+        model_release_id=batch.pipeline.model_release_id,
         remote_started_at=remote_started_at,
         remote_finished_at=remote_finished_at,
     )

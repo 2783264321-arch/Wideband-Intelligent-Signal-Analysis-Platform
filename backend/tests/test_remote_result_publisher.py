@@ -32,12 +32,15 @@ STARTED_AT = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
 
 
-def _make_batch(batch_id="batch_x", item_key="000000"):
+def _make_batch(batch_id="batch_x", item_key="000000", model_release_id=None):
+    pipeline = {"id": "pipeline_x", "version": "1.0"}
+    if model_release_id is not None:
+        pipeline["model_release_id"] = model_release_id
     batch = RemoteExecutionBatchV1(
         schema_version=1,
         batch_id=batch_id,
         required_remote_runtime_commit=RUNTIME_COMMIT,
-        pipeline={"id": "pipeline_x", "version": "1.0"},
+        pipeline=pipeline,
         asset_manifest_sha256="c" * 64,
         items=[RemoteExecutionItemV1(
             item_key=item_key,
@@ -116,6 +119,24 @@ def test_publish_envelope_identity_matches_frozen_batch(tmp_path):
     assert envelope.orchestrator_commit == item.orchestrator_commit
     assert envelope.remote_runtime_commit == batch.required_remote_runtime_commit
     assert envelope.asset_manifest_sha256 == batch.asset_manifest_sha256
+
+
+def test_publish_echoes_model_release_id(tmp_path):
+    batch, job_root, _ = _publish(tmp_path, batch=_make_batch(model_release_id="golden"))
+    envelope = parse_remote_execution_envelope_json(
+        (job_root / "results" / "000000" / "envelope.json").read_bytes()
+    )
+    assert batch.pipeline.model_release_id == "golden"
+    assert envelope.model_release_id == "golden"
+
+
+def test_publish_legacy_batch_echoes_none_release(tmp_path):
+    batch, job_root, _ = _publish(tmp_path)
+    envelope = parse_remote_execution_envelope_json(
+        (job_root / "results" / "000000" / "envelope.json").read_bytes()
+    )
+    assert batch.pipeline.model_release_id is None
+    assert envelope.model_release_id is None
 
 
 def test_publish_payload_sha256_is_exact_zip_hash(tmp_path):
