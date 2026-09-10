@@ -153,3 +153,70 @@ def test_remote_provider_runtime_ref_includes_profile_and_commit():
         "device": "cuda:0",
         "environment": "autodl_primary",
     }
+
+
+# ---------------------------------------------------------------------------
+# D2A FIX ROUND 1 — release-less/code-only availability (model_release is None)
+# ---------------------------------------------------------------------------
+
+CODE_ONLY_RUNTIME_REF = "local:gen-1"
+
+
+def _code_only_definition() -> PipelineDefinition:
+    return PipelineDefinition(
+        id="code_only_plugin",
+        name="Code Only",
+        version="1.0",
+        label_space="signal_presence_v1",
+        recommended_device="CPU",
+        cpu_supported=True,
+        stages=(),
+        inspectable_stages=(),
+        task_capability="detection_localization",
+        executors_supported=("local_cpu",),
+        recommended_executor="local_cpu",
+        technical_execution_capabilities=(ExecutionCapability("local_cpu", "cpu", "float32"),),
+    )
+
+
+def _code_only_certificate() -> ExecutionCertificate:
+    return ExecutionCertificate(
+        plugin_id="code_only_plugin",
+        plugin_version="1.0",
+        model_release_id=None,
+        executor="local_cpu",
+        device_type="cpu",
+        precision="float32",
+        runtime_ref=CODE_ONLY_RUNTIME_REF,
+        evidence_ref="cpu-gate",
+    )
+
+
+def test_availability_for_release_less_plugin_with_none_model_release():
+    provider = FakeProvider("local_cpu", CODE_ONLY_RUNTIME_REF)
+    registry = ExecutorRegistry(
+        {"local_cpu": provider},
+        ExecutionCertificateStore([_code_only_certificate()]),
+    )
+    availability = registry.availability(
+        _code_only_definition(),
+        None,  # release-less: no ModelRelease is created
+        SimpleNamespace(label_space="spacenet_14"),
+    )
+    assert availability.available is True
+    assert availability.executor == "local_cpu"
+
+
+def test_release_bound_certificate_does_not_certify_none_release_availability():
+    # Only the ZoomSpec golden (release-bound) cert exists; a code-only plugin
+    # calling availability with model_release=None must be uncertified.
+    store = ExecutionCertificateStore([_certificate()])
+    provider = FakeProvider("remote_gpu", RUNTIME_REF)
+    registry = ExecutorRegistry({"remote_gpu": provider}, store)
+    availability = registry.availability(
+        _code_only_definition(),
+        None,
+        SimpleNamespace(label_space="spacenet_14"),
+    )
+    assert availability.available is False
+    assert availability.reason_code == "EXECUTION_NOT_CERTIFIED"

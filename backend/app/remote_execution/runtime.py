@@ -265,7 +265,11 @@ class ExecutorRegistry:
     def availability(
         self, definition: PipelineDefinition, model_release: Any, recording: Any
     ) -> ExecutorAvailabilityRead:
-        model_release_id = model_release.release.model_release_id
+        # Release-less/code-only plugins resolve to model_release_id=None and do not
+        # create a fake ModelRelease; certification still uses None exactly.
+        model_release_id = (
+            None if model_release is None else model_release.release.model_release_id
+        )
         certified = self.certified_executors(definition, model_release_id)
         if not certified:
             return ExecutorAvailabilityRead(
