@@ -7,7 +7,9 @@ from app.core.config import Settings
 from app.remote_execution.profile import RemoteProfile
 
 MANIFEST_SHA = "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08"
-RUNTIME_COMMIT = "c" * 40
+# Accepted M9.1 remote runtime commit (bound by the golden ExecutionCertificate);
+# remote availability is now certificate-gated.
+RUNTIME_COMMIT = "5bb5be4b04d04a071bc9d8f4f61172595ecee037"
 
 
 def _set_valid_remote_env(tmp_path, monkeypatch):
@@ -176,6 +178,8 @@ def test_production_availability_route_available_with_fake_probe(monkeypatch, tm
             app.state.pipeline_registry,
             app.state.job_manager,
             app.state.remote_executor_probe,
+            executor_registry=app.state.executor_registry,
+            model_release_store=app.state.model_release_store,
         )
         availability = service.executor_availability("rec", "zoomspec_yolo26n_aug_combined_frn_v3")
     assert availability.available is True
@@ -372,7 +376,7 @@ def test_case_b_availability_unavailable_and_create_run_rejected(tmp_path, monke
         "parameters": {},
     })
     assert created.status_code == 400
-    assert created.json()["error"]["code"] == "EXECUTOR_UNAVAILABLE"
+    assert created.json()["error"]["code"] == "REMOTE_TRANSPORT_UNAVAILABLE"
     with app.state.database.session_factory() as session:
         from app.analysis.model import AnalysisRunModel
         assert session.query(AnalysisRunModel).filter(

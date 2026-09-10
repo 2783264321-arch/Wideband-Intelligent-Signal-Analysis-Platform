@@ -9,6 +9,7 @@ from app.analysis.schema import (
     PipelineDefinitionRead,
 )
 from app.analysis.service import AnalysisService
+from app.core.errors import PlatformError
 from app.pipelines.base import PipelineDefinition
 
 router = APIRouter(tags=["analysis"])
@@ -28,15 +29,35 @@ def _service(request: Request, session) -> AnalysisService:
         project_root=getattr(state, "project_root", None),
         data_root=getattr(state, "data_root", None),
         model_release_store=getattr(state, "model_release_store", None),
+        executor_registry=getattr(state, "executor_registry", None),
     )
+
+
+def _default_release_id(definition: PipelineDefinition, model_release_store) -> str | None:
+    if not definition.model_release_required or model_release_store is None:
+        return None
+    try:
+        return model_release_store.resolve(
+            definition.plugin_id, definition.plugin_version, None
+        ).release.model_release_id
+    except PlatformError:
+        return None
 
 
 @router.get("/api/pipelines", response_model=list[PipelineDefinitionRead])
 def list_pipelines(request: Request):
-    return [_pipeline_read_model(definition) for definition in request.app.state.pipeline_registry.list()]
+    state = request.app.state
+    registry = getattr(state, "executor_registry", None)
+    model_release_store = getattr(state, "model_release_store", None)
+    return [
+        _pipeline_read_model(definition, registry, model_release_store)
+        for definition in state.pipeline_registry.list()
+    ]
 
 
-def _pipeline_read_model(definition: PipelineDefinition) -> PipelineDefinitionRead:
+def _pipeline_read_model(
+    definition: PipelineDefinition, executor_registry, model_release_store
+) -> PipelineDefinitionRead:
     payload = asdict(definition)
     resolved_label_space = definition.resolved_output_label_space
     payload["label_space"] = resolved_label_space
@@ -46,6 +67,18 @@ def _pipeline_read_model(definition: PipelineDefinition) -> PipelineDefinitionRe
     payload["technical_execution_capabilities"] = [
         asdict(capability) for capability in definition.technical_execution_capabilities
     ]
+    # Deployment-qualified executor projection: declared technical capability ∩
+    # registered provider ∩ exact certificate for the default resolved release.
+    # Configuration/certification only; never a live probe.
+    if executor_registry is not None:
+        release_id = _default_release_id(definition, model_release_store)
+        supported, recommended = executor_registry.deployment_qualified_executors(
+            definition, release_id
+        )
+    else:
+        supported, recommended = [], None
+    payload["executors_supported"] = supported
+    payload["recommended_executor"] = recommended
     return PipelineDefinitionRead(**payload)
 
 
@@ -82,6 +115,9 @@ def executor_availability(
     request: Request,
     recording_id: str = Query(...),
     pipeline_id: str = Query(...),
+    executor: str = Query("remote_gpu"),
 ):
     with request.app.state.database.session_factory() as session:
-        return _service(request, session).executor_availability(recording_id, pipeline_id)
+        return _service(request, session).executor_availability(
+            recording_id, pipeline_id, executor
+        )

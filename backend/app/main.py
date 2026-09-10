@@ -26,6 +26,26 @@ from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
 from app.remote_execution.model_release import ModelReleaseStore, load_model_release_defaults
+from app.analysis.local_executor import build_local_providers
+from app.remote_execution.runtime import (
+    ExecutionCertificateStore,
+    ExecutorRegistry,
+    RemoteGpuExecutorProvider,
+    load_execution_certificates,
+)
+
+
+def _build_certificate_store() -> ExecutionCertificateStore:
+    path = Path(__file__).resolve().parent / "pipelines" / "execution_certificates.json"
+    return ExecutionCertificateStore(load_execution_certificates(path))
+
+
+def _build_executor_registry(app, settings) -> ExecutorRegistry:
+    providers = dict(build_local_providers(settings))
+    remote = getattr(app.state, "remote_executor_provider", None)
+    if remote is not None:
+        providers[remote.name] = remote
+    return ExecutorRegistry(providers, _build_certificate_store())
 
 
 def _plugins_root() -> Path:
@@ -86,6 +106,7 @@ def _wire_remote_lifecycle(app, settings) -> None:
         app.state.remote_config_available = False
         app.state.remote_executor_probe = None
         app.state.remote_coordinator_launcher = None
+        app.state.remote_executor_provider = None
         app.state.identity_resolver = None
         app.state.orchestrator_commit_resolver = None
         app.state.runtime_commit_config = None
@@ -101,6 +122,7 @@ def _wire_remote_lifecycle(app, settings) -> None:
         app.state.remote_config_available = False
         app.state.remote_executor_probe = None
         app.state.remote_coordinator_launcher = None
+        app.state.remote_executor_provider = None
         app.state.identity_resolver = None
         app.state.orchestrator_commit_resolver = None
         app.state.runtime_commit_config = None
@@ -118,6 +140,12 @@ def _wire_remote_lifecycle(app, settings) -> None:
     app.state.remote_config_available = True
     app.state.remote_executor_probe = probe
     app.state.remote_coordinator_launcher = CoordinatorJobManager(settings)
+    app.state.remote_executor_provider = RemoteGpuExecutorProvider(
+        profile=profile,
+        probe=probe,
+        launcher=app.state.remote_coordinator_launcher,
+        required_runtime_commit=profile.required_remote_runtime_commit,
+    )
     app.state.identity_resolver = resolve_remote_recording_identity
     app.state.orchestrator_commit_resolver = resolve_local_orchestrator_commit
     app.state.runtime_commit_config = profile.required_remote_runtime_commit
@@ -139,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Base.metadata.create_all(app.state.database.engine)
     run_additive_migrations(app.state.database.engine)
     _wire_remote_lifecycle(app, settings)
+    app.state.executor_registry = _build_executor_registry(app, settings)
     with app.state.database.session_factory() as recovery_session:
         from app.remote_execution.recovery import (
             coordinate_orphaned_remote_runs,

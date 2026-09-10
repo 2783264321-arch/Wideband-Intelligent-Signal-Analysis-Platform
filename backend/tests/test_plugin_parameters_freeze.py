@@ -22,6 +22,8 @@ from app.core.errors import PlatformError
 from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, RecordingInput
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
+
+from executor_fixtures import FakeProvider, FakeRegistry
 from app.remote_execution.canonical import canonical_request_payload
 from app.remote_execution.model_release import ResolvedModelRelease
 from app.remote_execution.request_builder import build_batch, freeze_request_provenance
@@ -54,6 +56,7 @@ class ParamPipeline(Pipeline):
             task_capability="detection_classification",
             executors_supported=("local_cpu", "remote_gpu"),
             recommended_executor="local_cpu",
+            model_release_required=True,
             parameter_schema=_PARAM_SCHEMA,
         )
 
@@ -188,18 +191,28 @@ def _service(
 ) -> AnalysisService:
     registry = PipelineRegistry([pipeline_cls()])
     session = client.app.state.database.session_factory()
+    remote_probe = probe or FakeProbe()
+    remote_launcher = launcher or FakeLauncher()
     return AnalysisService(
         session,
         registry,
         job_manager or FakeJobManager(),
-        remote_executor_probe=probe or FakeProbe(),
-        remote_coordinator_launcher=launcher or FakeLauncher(),
+        remote_executor_probe=remote_probe,
+        remote_coordinator_launcher=remote_launcher,
         identity_resolver=_identity_resolver,
         orchestrator_commit_resolver=lambda project_root: RUN,
         model_release_store=store or FakeStore(),
         runtime_commit_config=RUN,
         project_root=Path("/tmp"),
         data_root=Path("/tmp/data"),
+        executor_registry=FakeRegistry(
+            {
+                "local_cpu": FakeProvider("local_cpu"),
+                "remote_gpu": FakeProvider(
+                    "remote_gpu", probe=remote_probe, launcher=remote_launcher
+                ),
+            }
+        ),
     )
 
 
@@ -284,7 +297,7 @@ def test_local_run_preserves_valid_parameters(client):
         parameters={"threshold": 0.5, "label": "x"},
     )
     assert run.parameters_json == {"threshold": 0.5, "label": "x"}
-    assert job_manager.started == [run.id]
+    assert run.worker_pid == 4242
 
 
 def test_local_run_rejects_invalid_parameters(client):

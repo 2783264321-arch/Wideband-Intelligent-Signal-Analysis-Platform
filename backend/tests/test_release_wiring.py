@@ -24,6 +24,8 @@ from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, Rec
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
 
+from executor_fixtures import FakeProvider, FakeRegistry
+
 RUN = "a" * 40
 MANIFEST = "b" * 64
 
@@ -151,19 +153,24 @@ def _add_recording(client, recording_id="rec_x", label_space="spacenet_14"):
 
 def _service(client, *, store):
     registry = PipelineRegistry([RemoteCapablePipeline()])
+    probe = FakeProbe()
+    launcher = FakeLauncher()
     with client.app.state.database.session_factory() as session:
         return AnalysisService(
             session,
             registry,
             client.app.state.job_manager,
-            remote_executor_probe=FakeProbe(),
-            remote_coordinator_launcher=FakeLauncher(),
+            remote_executor_probe=probe,
+            remote_coordinator_launcher=launcher,
             identity_resolver=_identity_resolver,
             orchestrator_commit_resolver=_orch_commit_resolver,
             runtime_commit_config=RUN,
             project_root=Path("/tmp"),
             data_root=Path("/tmp/data"),
             model_release_store=store,
+            executor_registry=FakeRegistry(
+                {"remote_gpu": FakeProvider("remote_gpu", probe=probe, launcher=launcher)}
+            ),
         )
 
 
@@ -240,6 +247,15 @@ def test_api_explicit_release_threads_router_to_service(client):
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
+    client.app.state.executor_registry = FakeRegistry(
+        {
+            "remote_gpu": FakeProvider(
+                "remote_gpu",
+                probe=client.app.state.remote_executor_probe,
+                launcher=client.app.state.remote_coordinator_launcher,
+            )
+        }
+    )
 
     response = client.post(
         "/api/analysis-runs",
@@ -275,6 +291,15 @@ def test_api_default_release_when_model_release_id_omitted(client):
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
+    client.app.state.executor_registry = FakeRegistry(
+        {
+            "remote_gpu": FakeProvider(
+                "remote_gpu",
+                probe=client.app.state.remote_executor_probe,
+                launcher=client.app.state.remote_coordinator_launcher,
+            )
+        }
+    )
 
     response = client.post(
         "/api/analysis-runs",
@@ -301,6 +326,15 @@ def test_api_read_does_not_expose_release_internals(client):
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
+    client.app.state.executor_registry = FakeRegistry(
+        {
+            "remote_gpu": FakeProvider(
+                "remote_gpu",
+                probe=client.app.state.remote_executor_probe,
+                launcher=client.app.state.remote_coordinator_launcher,
+            )
+        }
+    )
 
     run_id = client.post(
         "/api/analysis-runs",
@@ -336,6 +370,15 @@ def _configure_remote_app(client, store):
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
+    client.app.state.executor_registry = FakeRegistry(
+        {
+            "remote_gpu": FakeProvider(
+                "remote_gpu",
+                probe=client.app.state.remote_executor_probe,
+                launcher=client.app.state.remote_coordinator_launcher,
+            )
+        }
+    )
 
 
 def test_analysis_run_create_allows_none_and_valid_release_ids():

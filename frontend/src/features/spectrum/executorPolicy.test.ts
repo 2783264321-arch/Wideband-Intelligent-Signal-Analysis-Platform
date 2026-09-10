@@ -6,16 +6,16 @@ import {
 } from "./executorPolicy";
 
 type Pipeline = {
-  cpuSupported: boolean;
   executorsSupported: string[];
-  recommendedExecutor: string;
+  recommendedExecutor: string | null;
 };
 
-const remoteOnly: Pipeline = { cpuSupported: false, executorsSupported: ["remote_gpu"], recommendedExecutor: "remote_gpu" };
-const localOnly: Pipeline = { cpuSupported: true, executorsSupported: ["local_cpu"], recommendedExecutor: "local_cpu" };
-const dualRemote: Pipeline = { cpuSupported: true, executorsSupported: ["local_cpu", "remote_gpu"], recommendedExecutor: "remote_gpu" };
-const dualLocal: Pipeline = { cpuSupported: true, executorsSupported: ["local_cpu", "remote_gpu"], recommendedExecutor: "local_cpu" };
-const neither: Pipeline = { cpuSupported: false, executorsSupported: ["some_other"], recommendedExecutor: "some_other" };
+const remoteOnly: Pipeline = { executorsSupported: ["remote_gpu"], recommendedExecutor: "remote_gpu" };
+const localOnly: Pipeline = { executorsSupported: ["local_cpu"], recommendedExecutor: "local_cpu" };
+const dualRemote: Pipeline = { executorsSupported: ["local_cpu", "remote_gpu"], recommendedExecutor: "remote_gpu" };
+const dualLocal: Pipeline = { executorsSupported: ["local_cpu", "remote_gpu"], recommendedExecutor: "local_cpu" };
+const neither: Pipeline = { executorsSupported: ["some_other"], recommendedExecutor: null };
+const noProvider: Pipeline = { executorsSupported: [], recommendedExecutor: null };
 
 function expectResolution(actual: ExecutorResolution, executor: "remote_gpu" | "local_cpu" | null, reason: string | null) {
   expect(actual.executor).toBe(executor);
@@ -73,5 +73,24 @@ describe("resolveExecutorForPipeline — dual recommended-local", () => {
 describe("resolveExecutorForPipeline — neither usable", () => {
   it("DISABLED", () => {
     expectResolution(resolveExecutorForPipeline(neither, { state: "available" }), null, "No executor");
+  });
+});
+
+describe("resolveExecutorForPipeline — deployment-qualified only", () => {
+  it("empty executorsSupported -> DISABLED (legacy cpuSupported must not create local_cpu)", () => {
+    expectResolution(resolveExecutorForPipeline(noProvider, { state: "available" }), null, "No executor");
+    expectResolution(
+      resolveExecutorForPipeline(noProvider, { state: "unavailable", reason: "no provider" }),
+      null,
+      "No executor",
+    );
+  });
+  it("local_cpu absent from executorsSupported -> never offered locally", () => {
+    const remoteOnlyPipeline: Pipeline = { executorsSupported: ["remote_gpu"], recommendedExecutor: "remote_gpu" };
+    expectResolution(resolveExecutorForPipeline(remoteOnlyPipeline, { state: "unavailable" }), null, "unavailable");
+  });
+  it("dual with null recommendation -> local_cpu fallback", () => {
+    const dualNoRec: Pipeline = { executorsSupported: ["local_cpu", "remote_gpu"], recommendedExecutor: null };
+    expectResolution(resolveExecutorForPipeline(dualNoRec, { state: "available" }), "local_cpu", null);
   });
 });

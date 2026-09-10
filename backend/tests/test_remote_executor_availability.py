@@ -14,6 +14,8 @@ from app.pipelines.registry import PipelineRegistry
 from app.pipelines.stft_energy.pipeline import STFTEnergyDetectorPipeline
 from app.recordings.model import RecordingModel
 
+from executor_fixtures import FakeProvider, FakeRegistry
+
 
 class RemoteCapableTestPipeline(Pipeline):
     @property
@@ -70,8 +72,15 @@ def _add_sn_recording(client, *, recording_id, label_space="spacenet_14"):
 
 def _availability(client, recording_id, pipeline_id, probe=None, registry=TEST_REGISTRY):
     with client.app.state.database.session_factory() as session:
-        service = AnalysisService(session, registry, client.app.state.job_manager,
-                                  remote_executor_probe=probe)
+        service = AnalysisService(
+            session,
+            registry,
+            client.app.state.job_manager,
+            remote_executor_probe=probe,
+            executor_registry=FakeRegistry(
+                {"remote_gpu": FakeProvider("remote_gpu", probe=probe)}
+            ),
+        )
         return service.executor_availability(recording_id, pipeline_id)
 
 
@@ -84,14 +93,15 @@ def test_pipeline_definition_executor_defaults():
     assert stft.recommended_executor == "local_cpu"
 
 
-def test_pipelines_endpoint_exposes_static_executor_capability(client):
+def test_pipelines_endpoint_exposes_deployment_qualified_projection(client):
+    # Default app composition has no configured providers/certificates, so the
+    # deployment-qualified projection is empty and no executor is recommended.
     response = client.get("/api/pipelines")
     assert response.status_code == 200
     by_id = {item["id"]: item for item in response.json()}
-    assert by_id["dummy"]["executors_supported"] == ["local_cpu"]
-    assert by_id["dummy"]["recommended_executor"] == "local_cpu"
-    assert by_id["stft_energy_detector"]["executors_supported"] == ["local_cpu"]
-    assert by_id["stft_energy_detector"]["recommended_executor"] == "local_cpu"
+    for pipeline_id in ("dummy", "stft_energy_detector", "zoomspec_yolo26n_aug_combined_frn_v3"):
+        assert by_id[pipeline_id]["executors_supported"] == []
+        assert by_id[pipeline_id]["recommended_executor"] is None
 
 
 def test_remote_gpu_unavailable_for_non_remote_pipeline(client):
@@ -100,7 +110,7 @@ def test_remote_gpu_unavailable_for_non_remote_pipeline(client):
     availability = _availability(client, "rec_local", "stft_energy_detector", probe=probe)
     assert availability.executor == "remote_gpu"
     assert availability.available is False
-    assert availability.reason_code == "PIPELINE_NOT_REMOTE_CAPABLE"
+    assert availability.reason_code == "EXECUTION_NOT_CERTIFIED"
     assert availability.recommended is False
     assert probe.calls == []
 
@@ -179,4 +189,4 @@ def test_create_run_remote_gpu_not_yet_dispatched(client):
                 recording_id="rec_local", pipeline_id="dummy",
                 executor="remote_gpu", parameters={},
             )
-    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+    assert exc.value.code == "EXECUTION_CAPABILITY_UNAVAILABLE"

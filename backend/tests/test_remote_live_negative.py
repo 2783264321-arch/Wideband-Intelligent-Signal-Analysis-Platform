@@ -27,6 +27,8 @@ from app.remote_execution.profile import RemoteProfile
 from app.remote_execution.schema import RemoteBatchStatusV1, RemoteItemStatusV1
 from app.remote_execution.transport import SshRunner
 
+from executor_fixtures import FakeProvider, FakeRegistry
+
 RUN = "a" * 40
 MANIFEST = "b" * 64
 PIPELINE_ID = ZOOMSPEC_FROZEN_DEFINITION.id
@@ -60,7 +62,11 @@ def _add_sn_recording(client, recording_id="rec_sn", name="0"):
 
 
 def _probe_unavailable(client):
-    client.app.state.remote_executor_probe = FakeProbe(available=False)
+    probe = FakeProbe(available=False)
+    client.app.state.remote_executor_probe = probe
+    client.app.state.executor_registry = FakeRegistry(
+        {"remote_gpu": FakeProvider("remote_gpu", probe=probe)}
+    )
 
 
 def _run_row_count(client, recording_id="rec_sn"):
@@ -89,7 +95,7 @@ def test_probe_unavailable_create_run_rejected_without_run(client):
     _probe_unavailable(client)
     response = _create_remote(client)
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "EXECUTOR_UNAVAILABLE"
+    assert response.json()["error"]["code"] == "REMOTE_EXECUTOR_UNAVAILABLE"
     assert _run_row_count(client) == 0
 
 
@@ -123,6 +129,9 @@ def test_missing_mapping_returns_transport_unavailable(client, tmp_path):
         expected_runtime_commit=RUN,
         expected_manifest_sha256=MANIFEST,
     )
+    client.app.state.executor_registry = FakeRegistry(
+        {"remote_gpu": FakeProvider("remote_gpu", probe=client.app.state.remote_executor_probe)}
+    )
 
     response = client.get("/api/executor-availability",
                           params={"recording_id": "rec_sn", "pipeline_id": PIPELINE_ID})
@@ -134,7 +143,7 @@ def test_missing_mapping_returns_transport_unavailable(client, tmp_path):
 
     rejected = _create_remote(client)
     assert rejected.status_code == 400
-    assert rejected.json()["error"]["code"] == "EXECUTOR_UNAVAILABLE"
+    assert rejected.json()["error"]["code"] == "REMOTE_TRANSPORT_UNAVAILABLE"
     assert _run_row_count(client) == 0
 
 
@@ -294,7 +303,7 @@ def test_negative_deployment_does_not_corrupt_existing_completed_run(client):
 
     rejected = _create_remote(client)
     assert rejected.status_code == 400
-    assert rejected.json()["error"]["code"] == "EXECUTOR_UNAVAILABLE"
+    assert rejected.json()["error"]["code"] == "REMOTE_EXECUTOR_UNAVAILABLE"
     assert _run_row_count(client) == 1  # only the pre-existing run remains
 
     with client.app.state.database.session_factory() as session:

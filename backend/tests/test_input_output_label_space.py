@@ -32,6 +32,8 @@ from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
 from app.remote_execution.validation import AnalysisResultWriter
 
+from executor_fixtures import FakeProvider, FakeRegistry
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LABEL_ROOT = REPO_ROOT / "label_spaces"
 
@@ -142,6 +144,12 @@ def _service(client, pipeline: Pipeline, *, probe=None, job_manager=None) -> Ana
         PipelineRegistry([pipeline]),
         job_manager or FakeJobManager(),
         remote_executor_probe=probe,
+        executor_registry=FakeRegistry(
+            {
+                "local_cpu": FakeProvider("local_cpu"),
+                "remote_gpu": FakeProvider("remote_gpu", probe=probe),
+            }
+        ),
     )
 
 
@@ -164,7 +172,7 @@ def test_input_compatible_output_distinct_allows_run(client):
         recording_id="rec_sn", pipeline_id="cpn_only", executor="local_cpu", parameters={}
     )
     assert run.pipeline_id == "cpn_only"
-    assert job_manager.started == [run.id]
+    assert run.worker_pid == 4242
 
 
 def test_recordings_with_wrong_dataset_label_space_rejected(client):

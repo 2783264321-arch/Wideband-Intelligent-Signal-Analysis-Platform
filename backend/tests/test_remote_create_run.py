@@ -10,6 +10,8 @@ from app.pipelines.base import Pipeline, PipelineDefinition, PipelineOutput, Rec
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
 
+from executor_fixtures import FakeProvider, FakeRegistry
+
 RUN = "a" * 40
 MANIFEST = "b" * 64
 
@@ -32,6 +34,7 @@ class RemoteCapablePipeline(Pipeline):
             task_capability="detection_classification",
             executors_supported=("remote_gpu",),
             recommended_executor="remote_gpu",
+            model_release_required=True,
         )
 
     def run(self, recording: RecordingInput, parameters: dict, workspace: Path) -> PipelineOutput:
@@ -127,6 +130,9 @@ def _service(client, *, probe, launcher, pipeline_cls, registry_pipeline=None):
             runtime_commit_config=RUN,
             project_root=Path("/tmp"),
             data_root=Path("/tmp/data"),
+            executor_registry=FakeRegistry(
+                {"remote_gpu": FakeProvider("remote_gpu", probe=probe, launcher=launcher)}
+            ),
         )
 
 
@@ -149,7 +155,7 @@ def test_remote_create_run_requires_remote_gpu_capability(client):
     service = _service(client, probe=probe, launcher=launcher, pipeline_cls=LocalCapable)
     with pytest.raises(PlatformError) as exc:
         service.create_run(recording_id="rec_x", pipeline_id="local_test", executor="remote_gpu", parameters={})
-    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+    assert exc.value.code == "EXECUTION_NOT_CERTIFIED"
     assert probe.calls == []
     assert launcher.launches == []
 
@@ -191,7 +197,7 @@ def test_remote_create_run_consults_probe_before_dispatch(client):
                        launcher=launcher, pipeline_cls=RemoteCapablePipeline)
     with pytest.raises(PlatformError) as exc:
         service.create_run(recording_id="rec_x", pipeline_id="remote_test", executor="remote_gpu", parameters={})
-    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
     assert launcher.launches == []
 
 
@@ -247,7 +253,12 @@ def test_local_cpu_path_unchanged(client):
 
     _add_recording(client)
     with client.app.state.database.session_factory() as session:
-        service = AnalysisService(session, PipelineRegistry([DummyPipeline()]), client.app.state.job_manager)
+        service = AnalysisService(
+            session,
+            PipelineRegistry([DummyPipeline()]),
+            client.app.state.job_manager,
+            executor_registry=FakeRegistry({"local_cpu": FakeProvider("local_cpu")}),
+        )
         run = service.create_run(recording_id="rec_x", pipeline_id="dummy", executor="local_cpu", parameters={})
         assert run.executor == "local_cpu"
 
@@ -262,6 +273,10 @@ def test_executor_availability_route_success(client):
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
+    client.app.state.model_release_store = FakeModelReleaseStore()
+    client.app.state.executor_registry = FakeRegistry(
+        {"remote_gpu": FakeProvider("remote_gpu", probe=client.app.state.remote_executor_probe)}
+    )
     response = client.get("/api/executor-availability", params={"recording_id": "rec_x", "pipeline_id": "remote_test"})
     assert response.status_code == 200
     assert response.json()["available"] is True
@@ -277,6 +292,10 @@ def test_executor_availability_route_unavailable(client):
     client.app.state.runtime_commit_config = RUN
     client.app.state.project_root = Path("/tmp")
     client.app.state.data_root = Path("/tmp/data")
+    client.app.state.model_release_store = FakeModelReleaseStore()
+    client.app.state.executor_registry = FakeRegistry(
+        {"remote_gpu": FakeProvider("remote_gpu", probe=client.app.state.remote_executor_probe)}
+    )
     response = client.get("/api/executor-availability", params={"recording_id": "rec_x", "pipeline_id": "remote_test"})
     assert response.status_code == 200
     assert response.json()["available"] is False

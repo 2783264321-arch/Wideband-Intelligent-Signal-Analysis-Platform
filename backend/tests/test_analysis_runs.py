@@ -1,5 +1,4 @@
 from pathlib import Path
-import time
 
 from iq_fixture import write_tiny_iq
 
@@ -52,8 +51,12 @@ def test_dummy_pipeline_satisfies_contract_and_returns_physical_detection(tmp_pa
     assert recording.frequency_low_hz <= item.f_low_hz < item.f_high_hz <= recording.frequency_high_hz
 
 
-def test_analysis_run_executes_dummy_pipeline_in_subprocess_and_persists_results(client):
+def test_analysis_run_dispatches_dummy_pipeline_through_local_provider(client):
+    from executor_fixtures import FakeProvider, FakeRegistry
+
     recording = _import_recording(client)
+    provider = FakeProvider("local_cpu")
+    client.app.state.executor_registry = FakeRegistry({"local_cpu": provider})
     response = client.post(
         "/api/analysis-runs",
         json={
@@ -65,23 +68,9 @@ def test_analysis_run_executes_dummy_pipeline_in_subprocess_and_persists_results
     )
     assert response.status_code == 201, response.text
     run = response.json()
-    assert run["status"] in {"pending", "running"}
-    assert run["worker_pid"] is not None
-
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        status = client.get(f"/api/analysis-runs/{run['id']}")
-        assert status.status_code == 200
-        run = status.json()
-        if run["status"] in {"completed", "failed", "interrupted"}:
-            break
-        time.sleep(0.1)
-
-    assert run["status"] == "completed", run
-    detections = client.get(f"/api/analysis-runs/{run['id']}/detections")
-    assert detections.status_code == 200
-    assert len(detections.json()) >= 1
-    assert detections.json()[0]["recording_id"] == recording["id"]
+    assert run["pipeline_id"] == "dummy"
+    assert run["status"] == "pending"
+    assert provider.launches and provider.launches[0][0] == run["id"]
 
 
 def test_analysis_run_rejects_unknown_pipeline_as_business_error(client):

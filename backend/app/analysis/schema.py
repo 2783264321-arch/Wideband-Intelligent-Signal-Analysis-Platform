@@ -68,7 +68,7 @@ class PipelineDefinitionRead(BaseModel):
     inspectable_stages: list[str]
     task_capability: str
     executors_supported: list[str]
-    recommended_executor: str
+    recommended_executor: str | None
     plugin_api_version: int = 1
     output_label_space: str
     input_compatibility: list[str] = []

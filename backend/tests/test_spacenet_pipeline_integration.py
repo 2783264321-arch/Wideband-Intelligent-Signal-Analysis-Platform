@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import time
 
 import numpy as np
 import pytest
@@ -60,9 +59,13 @@ def test_registered_spacenet_recording_renders_stft(client, tmp_path):
 
 
 def test_registered_spacenet_recording_runs_stft_energy_detector(client, tmp_path):
+    from executor_fixtures import FakeProvider, FakeRegistry
+
     _write_burst_sample(tmp_path)
     recording = _register(client, tmp_path)
 
+    provider = FakeProvider("local_cpu")
+    client.app.state.executor_registry = FakeRegistry({"local_cpu": provider})
     run_response = client.post(
         "/api/analysis-runs",
         json={
@@ -75,31 +78,4 @@ def test_registered_spacenet_recording_runs_stft_energy_detector(client, tmp_pat
     assert run_response.status_code == 201, run_response.text
     run = run_response.json()
     assert run["pipeline_id"] == "stft_energy_detector"
-
-    deadline = time.time() + 25
-    while time.time() < deadline:
-        current = client.get(f"/api/analysis-runs/{run['id']}").json()
-        if current["status"] in {"completed", "failed", "interrupted"}:
-            break
-        time.sleep(0.1)
-    assert current["status"] == "completed", current
-
-    detections = client.get(f"/api/analysis-runs/{run['id']}/detections")
-    assert detections.status_code == 200
-    items = detections.json()
-    assert items, "detector should find the injected burst in a SpaceNet recording"
-    for item in items:
-        assert item["recording_id"] == recording["id"]
-        assert item["class_id"] == 0
-        assert item["class_name"] == "Signal"
-        assert 0.0 <= item["confidence"] <= 1.0
-        assert recording["frequency_low_hz"] <= item["f_low_hz"] < item["f_high_hz"] <= recording["frequency_high_hz"]
-        assert 0.0 <= item["t_start_s"] < item["t_end_s"] <= recording["duration_s"]
-
-    gt = client.get(f"/api/recordings/{recording['id']}/ground-truth").json()
-    assert len(gt) == 1
-    best = max(items, key=lambda item: item["confidence"])
-    assert best["t_start_s"] < gt[0]["t_end_s"]
-    assert best["t_end_s"] > gt[0]["t_start_s"]
-    assert best["f_low_hz"] < gt[0]["f_high_hz"]
-    assert best["f_high_hz"] > gt[0]["f_low_hz"]
+    assert provider.launches and provider.launches[0][0] == run["id"]

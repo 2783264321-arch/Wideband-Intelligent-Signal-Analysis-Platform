@@ -262,6 +262,79 @@ class ExecutorRegistry:
                 certified[name] = capabilities
         return certified
 
+    def certified_capability(
+        self, definition: PipelineDefinition, model_release_id: str | None, executor: str
+    ) -> ExecutionCapability | None:
+        """The exact certified capability for ``executor`` (or None). No substitution."""
+        provider = self._providers.get(executor)
+        if provider is None:
+            return None
+        technical = [
+            capability
+            for capability in definition.technical_execution_capabilities
+            if capability.executor == executor
+        ]
+        if not technical:
+            return None
+        certified = self._certificates.certified_capabilities(
+            plugin_id=definition.plugin_id,
+            plugin_version=definition.plugin_version,
+            model_release_id=model_release_id,
+            runtime_ref=provider.runtime_ref,
+            technical=technical,
+        )
+        return certified[0] if certified else None
+
+    def deployment_qualified_executors(
+        self, definition: PipelineDefinition, model_release_id: str | None
+    ) -> tuple[list[str], str | None]:
+        """Deployment-qualified projection: technical ∩ registered provider ∩ exact cert.
+
+        Configuration/certification only; never performs SSH/probe I/O.
+        """
+        supported = sorted(
+            name
+            for name in self._providers
+            if self.certified_capability(definition, model_release_id, name) is not None
+        )
+        recommended = definition.recommended_execution
+        return supported, (recommended if recommended in supported else None)
+
+    def availability_for(
+        self,
+        definition: PipelineDefinition,
+        model_release: Any,
+        recording: Any,
+        executor: str,
+    ) -> ExecutorAvailabilityRead:
+        """Exact requested-executor availability; never auto-substitutes another executor."""
+        provider = self._providers.get(executor)
+        if provider is None:
+            return ExecutorAvailabilityRead(
+                executor=executor,
+                available=False,
+                reason_code="EXECUTION_CAPABILITY_UNAVAILABLE",
+                reason_message=f"No executor provider is registered for '{executor}'.",
+                remote_profile=None,
+                recommended=False,
+            )
+        model_release_id = (
+            None if model_release is None else model_release.release.model_release_id
+        )
+        if self.certified_capability(definition, model_release_id, executor) is None:
+            return ExecutorAvailabilityRead(
+                executor=executor,
+                available=False,
+                reason_code="EXECUTION_NOT_CERTIFIED",
+                reason_message=(
+                    "The requested executor has no exact platform certificate for this "
+                    "release and runtime."
+                ),
+                remote_profile=None,
+                recommended=False,
+            )
+        return provider.availability(definition, model_release, recording)
+
     def availability(
         self, definition: PipelineDefinition, model_release: Any, recording: Any
     ) -> ExecutorAvailabilityRead:

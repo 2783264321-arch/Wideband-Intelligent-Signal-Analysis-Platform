@@ -255,7 +255,7 @@ interface PipelineDefinitionWire {
   recommended_device: string;
   cpu_supported: boolean;
   executors_supported: string[];
-  recommended_executor: string;
+  recommended_executor: string | null;
   stages: string[];
   inspectable_stages: string[];
   task_capability: string;

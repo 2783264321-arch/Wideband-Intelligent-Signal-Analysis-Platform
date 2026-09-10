@@ -72,7 +72,7 @@ export interface PipelineDefinition {
   recommendedDevice: string;
   cpuSupported: boolean;
   executorsSupported: string[];
-  recommendedExecutor: string;
+  recommendedExecutor: string | null;
   stages: string[];
   inspectableStages: string[];
   taskCapability: string;

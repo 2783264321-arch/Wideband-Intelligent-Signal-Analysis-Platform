@@ -1,18 +1,18 @@
 /**
- * Deterministic executor resolution for the Spectrum run button (Task 12F-C
- * Task 4). Pure and unit-testable.
+ * Deterministic executor resolution for the Spectrum run button.
  *
- * Classification:
- *   remoteOnly = supports remote_gpu AND NOT cpuSupported
- *   localOnly  = cpuSupported AND does NOT support remote_gpu
- *   dual       = cpuSupported AND supports remote_gpu
+ * Runnable choices are derived ONLY from the deployment-qualified
+ * `executorsSupported` projection (never from legacy `cpuSupported`):
+ *   remoteOnly = supports remote_gpu AND NOT local_cpu
+ *   localOnly  = supports local_cpu AND NOT remote_gpu
+ *   dual       = supports local_cpu AND remote_gpu
  *
  * remoteOnly: available -> remote_gpu; loading/idle/error/unavailable -> DISABLED.
  * localOnly:  -> local_cpu.
  * dual (recommended remote): loading/idle -> DISABLED; available -> remote_gpu;
  *   unavailable/error -> fall back to local_cpu.
- * dual (recommended local): -> local_cpu.
- * neither usable -> DISABLED.
+ * dual (recommended local/null): -> local_cpu.
+ * neither usable ([] or unknown) -> DISABLED.
  */
 export type AvailabilityState =
   | { state: "idle" }
@@ -27,9 +27,8 @@ export interface ExecutorResolution {
 }
 
 export interface ExecutorPolicyPipeline {
-  cpuSupported: boolean;
   executorsSupported: string[];
-  recommendedExecutor: string;
+  recommendedExecutor: string | null;
 }
 
 export function resolveExecutorForPipeline(
@@ -37,9 +36,10 @@ export function resolveExecutorForPipeline(
   availability: AvailabilityState,
 ): ExecutorResolution {
   const supportsRemote = pipeline.executorsSupported.includes("remote_gpu");
-  const remoteOnly = supportsRemote && !pipeline.cpuSupported;
-  const localOnly = pipeline.cpuSupported && !supportsRemote;
-  const dual = pipeline.cpuSupported && supportsRemote;
+  const supportsLocal = pipeline.executorsSupported.includes("local_cpu");
+  const remoteOnly = supportsRemote && !supportsLocal;
+  const localOnly = supportsLocal && !supportsRemote;
+  const dual = supportsLocal && supportsRemote;
 
   if (remoteOnly) {
     if (availability.state === "available") {

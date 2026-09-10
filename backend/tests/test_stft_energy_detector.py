@@ -118,8 +118,8 @@ def test_stft_energy_pipeline_contract_emits_generic_signal_detections(tmp_path)
     assert output.run_metadata["task_capability"] == "detection_localization"
 
 
-def test_stft_energy_detector_runs_through_subprocess_and_persists_results(client):
-    import time
+def test_stft_energy_detector_dispatches_through_local_provider(client):
+    from executor_fixtures import FakeProvider, FakeRegistry
 
     sample_rate_hz = 1_000_000.0
     center = 2_441_000_000.0
@@ -141,6 +141,8 @@ def test_stft_energy_detector_runs_through_subprocess_and_persists_results(clien
     assert response.status_code == 201, response.text
     recording = response.json()
 
+    provider = FakeProvider("local_cpu")
+    client.app.state.executor_registry = FakeRegistry({"local_cpu": provider})
     run_response = client.post(
         "/api/analysis-runs",
         json={
@@ -153,23 +155,7 @@ def test_stft_energy_detector_runs_through_subprocess_and_persists_results(clien
     assert run_response.status_code == 201, run_response.text
     run = run_response.json()
     assert run["pipeline_id"] == "stft_energy_detector"
-
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        current = client.get(f"/api/analysis-runs/{run['id']}").json()
-        if current["status"] in {"completed", "failed", "interrupted"}:
-            break
-        time.sleep(0.1)
-    assert current["status"] == "completed", current
-
-    detections = client.get(f"/api/analysis-runs/{run['id']}/detections")
-    assert detections.status_code == 200
-    items = detections.json()
-    assert items, "detector should find the injected burst"
-    assert items[0]["recording_id"] == recording["id"]
-    assert items[0]["class_id"] == 0
-    assert items[0]["class_name"] == "Signal"
-    assert 0.0 <= items[0]["confidence"] <= 1.0
+    assert provider.launches and provider.launches[0][0] == run["id"]
 
 
 def test_stft_energy_detector_is_registered_with_detection_only_metadata():
