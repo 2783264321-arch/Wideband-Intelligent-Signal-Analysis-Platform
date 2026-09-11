@@ -8,7 +8,7 @@ import pytest
 from app.analysis.router import _pipeline_read_model
 from app.analysis.service import AnalysisService
 from app.core.errors import PlatformError
-from app.pipelines.base import ExecutionCapability
+from app.pipelines.base import ExecutionCapability, PipelineDefinition
 from app.pipelines.dummy import DummyPipeline
 from app.pipelines.stft_energy.pipeline import STFTEnergyDetectorPipeline
 from app.remote_execution.model_release import ModelReleaseStore, load_model_release_defaults
@@ -155,8 +155,89 @@ def test_release_bound_plugin_requires_a_model_release():
 
 
 # ---------------------------------------------------------------------------
-# runtime_descriptor is OUTSIDE the canonical request payload
+# D2C FIX ROUND 1 — descriptor-bound certification + fail-closed default release
 # ---------------------------------------------------------------------------
+
+
+def _definition_with(capability: ExecutionCapability, *, plugin_id: str = "p", model_release_required: bool = False) -> PipelineDefinition:
+    return PipelineDefinition(
+        id=plugin_id,
+        name="P",
+        version="1.0",
+        label_space="spacenet_14",
+        recommended_device="GPU",
+        cpu_supported=True,
+        stages=(),
+        inspectable_stages=(),
+        task_capability="detection_classification",
+        executors_supported=(capability.executor,),
+        recommended_executor=capability.executor,
+        model_release_required=model_release_required,
+        technical_execution_capabilities=(capability,),
+    )
+
+
+def test_certificate_must_match_provider_actual_descriptor():
+    from app.remote_execution.runtime import ExecutionCertificate, ExecutionCertificateStore
+
+    definition = _definition_with(ExecutionCapability("local_cpu", "cuda", "float16"))
+    certificate = ExecutionCertificate(
+        plugin_id="p", plugin_version="1.0", model_release_id=None,
+        executor="local_cpu", device_type="cuda", precision="float16",
+        runtime_ref="fake:local_cpu", evidence_ref="x",
+    )
+    provider = FakeProvider("local_cpu", runtime_ref="fake:local_cpu")  # actual descriptor = cpu/float32
+    assert provider.runtime_descriptor().device_type == "cpu"
+    registry = ExecutorRegistry({"local_cpu": provider}, ExecutionCertificateStore([certificate]))
+
+    assert registry.certified_capability(definition, None, "local_cpu") is None
+    result = registry.availability_for(
+        definition, None, SimpleNamespace(label_space="spacenet_14"), "local_cpu"
+    )
+    assert result.available is False
+    assert result.reason_code == "EXECUTION_NOT_CERTIFIED"
+
+
+def test_matching_descriptor_and_certificate_remains_certified():
+    from app.remote_execution.runtime import ExecutionCertificate, ExecutionCertificateStore
+
+    definition = _definition_with(ExecutionCapability("local_cpu", "cpu", "float32"))
+    certificate = ExecutionCertificate(
+        plugin_id="p", plugin_version="1.0", model_release_id=None,
+        executor="local_cpu", device_type="cpu", precision="float32",
+        runtime_ref="fake:local_cpu", evidence_ref="x",
+    )
+    provider = FakeProvider("local_cpu", runtime_ref="fake:local_cpu")
+    registry = ExecutorRegistry({"local_cpu": provider}, ExecutionCertificateStore([certificate]))
+
+    assert registry.certified_capability(definition, None, "local_cpu") is not None
+    result = registry.availability_for(
+        definition, None, SimpleNamespace(label_space="spacenet_14"), "local_cpu"
+    )
+    assert result.available is True
+
+
+def test_unresolvable_default_release_fails_closed_even_with_none_certificate():
+    from app.remote_execution.runtime import ExecutionCertificate, ExecutionCertificateStore
+
+    definition = _definition_with(
+        ExecutionCapability("local_cpu", "cpu", "float32"),
+        plugin_id="required_plugin",
+        model_release_required=True,
+    )
+    certificate = ExecutionCertificate(
+        plugin_id="required_plugin", plugin_version="1.0", model_release_id=None,
+        executor="local_cpu", device_type="cpu", precision="float32",
+        runtime_ref="fake:local_cpu", evidence_ref="x",
+    )
+    registry = ExecutorRegistry(
+        {"local_cpu": FakeProvider("local_cpu", runtime_ref="fake:local_cpu")},
+        ExecutionCertificateStore([certificate]),
+    )
+    # The real store cannot resolve a default for the unregistered plugin.
+    model = _pipeline_read_model(definition, registry, _store())
+    assert model.executors_supported == []
+    assert model.recommended_executor is None
 
 
 def test_runtime_descriptor_does_not_change_legacy_request_hash():

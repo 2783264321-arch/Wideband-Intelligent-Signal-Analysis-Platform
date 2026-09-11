@@ -71,10 +71,20 @@ def _pipeline_read_model(
     # registered provider ∩ exact certificate for the default resolved release.
     # Configuration/certification only; never a live probe.
     if executor_registry is not None:
-        release_id = _default_release_id(definition, model_release_store)
-        supported, recommended = executor_registry.deployment_qualified_executors(
-            definition, release_id
-        )
+        if definition.model_release_required:
+            release_id = _default_release_id(definition, model_release_store)
+            if release_id is None:
+                # Release-required but the default release could not be resolved:
+                # never conflate with a release-less None certificate; fail closed.
+                supported, recommended = [], None
+            else:
+                supported, recommended = executor_registry.deployment_qualified_executors(
+                    definition, release_id
+                )
+        else:
+            supported, recommended = executor_registry.deployment_qualified_executors(
+                definition, None
+            )
     else:
         supported, recommended = [], None
     payload["executors_supported"] = supported

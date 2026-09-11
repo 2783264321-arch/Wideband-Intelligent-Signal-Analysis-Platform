@@ -265,14 +265,26 @@ class ExecutorRegistry:
     def certified_capability(
         self, definition: PipelineDefinition, model_release_id: str | None, executor: str
     ) -> ExecutionCapability | None:
-        """The exact certified capability for ``executor`` (or None). No substitution."""
+        """The exact certified capability for ``executor`` (or None). No substitution.
+
+        Binds to the provider's ACTUAL ``runtime_descriptor()``
+        (executor/device_type/precision), not merely the plugin's declaration: the
+        plugin must declare a technical capability matching the actual descriptor,
+        and an exact certificate must exist for that same tuple + runtime_ref +
+        plugin/version/release.
+        """
         provider = self._providers.get(executor)
         if provider is None:
+            return None
+        descriptor = provider.runtime_descriptor()
+        if descriptor is None or descriptor.executor != executor:
             return None
         technical = [
             capability
             for capability in definition.technical_execution_capabilities
-            if capability.executor == executor
+            if capability.executor == descriptor.executor
+            and capability.device_type == descriptor.device_type
+            and capability.precision == descriptor.precision
         ]
         if not technical:
             return None
