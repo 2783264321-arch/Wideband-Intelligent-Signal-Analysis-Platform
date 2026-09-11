@@ -706,38 +706,27 @@ credentials are never exposed.
 
 ### 11.4 Remote asset + runtime context and trusted path mapping
 
-`RemoteWorkerContext` is generalized **additively** by D4; the production
-`runner._cli_work` cutover is D3B, so the legacy path must remain intact during the
-transition:
+`RemoteWorkerContext` is the generic remote worker deployment context. The remote
+asset deployment contract is frozen:
 
-- it gains `repo_root`, `job_root`, `required_runtime_commit`, a `manifest_root`,
-  and an **asset path configuration** validated as absolute safe POSIX paths,
-  namespaced by `(plugin_id, plugin_version, asset_manifest_sha256)`;
-- generic plugin-declared logical asset names are resolved through that namespaced
-  configuration. Generic resolution MUST NOT read the legacy ZoomSpec-specific
-  fields (`detector_checkpoint`, `frn_checkpoint`, `frozen_config`,
-  `ls_stft_normalization`) as plugin knowledge;
-- the **legacy ZoomSpec scalar env vars/fields are preserved during the D4
-  transition**, so a legacy-only worker configuration that still drives the
-  current `ZoomSpecRemoteItemExecutor` (`runner._cli_work`) keeps constructing and
-  executing until D3B. A single deployment config object MAY carry **both** the
-  legacy flat subset (`logical -> "/abs"`) and the generic namespaced subset
-  (`"<plugin_id>/<plugin_version>/<sha256>" -> {logical: "/abs"}`); D4 partitions
-  them deterministically and rejects malformed/ambiguous entries. `SshRunner`
-  derives the legacy scalar envs from the flat subset and sends only the generic
-  namespaced subset as `WSP_REMOTE_ASSET_PATHS_JSON` (compact, shell-quoted so it
-  survives the remote login shell). Legacy fields are retired only by the D3B
-  cutover / an explicit post-D3B cleanup — generic-only operation is **not**
-  required before D3B;
-- generic trusted-asset/runtime APIs MUST fail closed (`REMOTE_WORKER_CONTEXT_INVALID`)
-  when their own generic configuration is absent or invalid; they MUST NOT
-  silently fall back to legacy ZoomSpec fields;
-- D4 MUST NOT modify `runner._cli_work` or switch production dispatch (D3B owns
-  that); separate generic readiness/config-completeness helpers may be added
-  without changing the legacy required-env semantics prematurely;
-- it still carries **no** SSH/credential reference and no request-controlled
-  path;
-- parsing still fails closed on any missing/unsafe field.
+- `WSP_REMOTE_ASSET_PATHS_JSON` is the **generic namespaced-only** asset
+  deployment language:
+  `{"<plugin_id>/<plugin_version>/<asset_manifest_sha256>": {"<logical>": "/abs/path"}}`.
+  Flat top-level asset entries (`logical -> "/abs"`) are **invalid and fail
+  closed**; the legacy ZoomSpec scalar asset envs/fields were retired (E2B/E2A) and
+  no longer exist. Historical D4 transition prose is superseded and retained only
+  in the implementation plan.
+- logical asset names use one shared deployment rule
+  (`is_safe_remote_asset_name`): start alphanumeric, then `[A-Za-z0-9_.-]`, total
+  length 1..128 — identical at the control plane and the remote worker so the two
+  boundaries cannot drift.
+- it carries `repo_root`, `job_root`, `required_runtime_commit`, a `manifest_root`,
+  and the namespaced asset mapping (validated absolute safe POSIX paths). Generic
+  resolution MUST NOT read plugin-specific legacy fields as plugin knowledge and
+  MUST NOT fall back to any flat/legacy mapping; it fails closed
+  (`REMOTE_WORKER_CONTEXT_INVALID`) when its own configuration is absent/invalid.
+- it still carries **no** SSH/credential reference and no request-controlled path;
+  parsing still fails closed on any missing/unsafe field.
 
 **Trusted path mapping (release/manifest-namespaced).** There is no global
 logical-name -> path map. Deployment configuration provides a namespaced mapping
@@ -771,15 +760,15 @@ environment identity.
 
 ### 11.5 ItemExecutor / Plugin registry seam
 
-`backend/app/remote_execution/runner.py` `_cli_work` currently hardcodes
-`ZoomSpecRemoteItemExecutor`. M9.2 replaces remote item dispatch with a generic
-`PluginItemExecutor`. The cutover is split so the M9.1 ZoomSpec remote production
-path stays intact until the generic asset/runtime/package seams exist.
+`backend/app/remote_execution/runner.py` `_cli_work` dispatches remote items
+through the generic `PluginItemExecutor` (implemented D3A/D4/D5, cut over in D3B);
+the legacy `ZoomSpecRemoteItemExecutor` was retired in E2A and is no longer
+production dispatch. The sequencing notes below are retained as historical record.
 
-**Sequencing (approved ruling): D3A → D4 → D5 → D3B.** The original single D3 was
-BLOCKED with no code change: the generic executor's trusted-assets and package
-seams depend on D4/D5, and cutting `runner._cli_work` before D4 would require
-ZoomSpec hardcoding. Until D3B, the ZoomSpec remote path remains the active path.
+**Sequencing (approved ruling; historical): D3A → D4 → D5 → D3B.** The original
+single D3 was BLOCKED with no code change: the generic executor's trusted-assets
+and package seams depend on D4/D5, and cutting `runner._cli_work` before D4 would
+require ZoomSpec hardcoding.
 
 **D3A — generic executor core (no runner change).** A generic
 `PluginItemExecutor` (`backend/app/remote_execution/plugin_executor.py`) owns

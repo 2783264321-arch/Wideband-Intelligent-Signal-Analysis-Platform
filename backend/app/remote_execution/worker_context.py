@@ -6,12 +6,12 @@ filesystem/network I/O) and fail-closes
 (``PlatformError("REMOTE_WORKER_CONTEXT_INVALID")``) on any missing or unsafe
 field.
 
-Optional generic configuration (``WSP_REMOTE_MANIFEST_ROOT`` + a namespaced
-``WSP_REMOTE_ASSET_PATHS_JSON``) is parsed for the generic runner path. The legacy
-ZoomSpec scalar asset fields are retained as optional post-cutover cleanup debt
-(E2B owns their retirement) and are not part of the generic readiness contract.
-Generic resolution never reads the legacy ZoomSpec fields and fails closed when
-its own configuration is absent/invalid.
+``WSP_REMOTE_MANIFEST_ROOT`` + a namespaced ``WSP_REMOTE_ASSET_PATHS_JSON`` is the
+only remote asset deployment language. The legacy flat ZoomSpec scalar asset envs
+and fields were retired (E2B): flat top-level entries are rejected, and logical
+asset names use the shared deployment contract
+(``is_safe_remote_asset_name``). Generic resolution never reads legacy fields and
+fails closed when its own configuration is absent/invalid.
 """
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ import re
 from typing import Mapping
 
 from app.core.errors import PlatformError
-from app.remote_execution.profile import is_safe_remote_posix_path_text
+from app.remote_execution.profile import (
+    is_safe_remote_asset_name,
+    is_safe_remote_posix_path_text,
+)
 
 ENV_REPO_ROOT = "WSP_REMOTE_REPO_ROOT"
 ENV_JOB_ROOT = "WSP_REMOTE_JOB_ROOT"
@@ -42,7 +45,6 @@ ENV_ENVIRONMENT_LABEL = "WSP_REMOTE_ENVIRONMENT_LABEL"
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _PRECISION_RE = re.compile(r"^(float32|float16)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_LOGICAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,254}$")
 
 
@@ -78,7 +80,7 @@ def _parse_namespaced_assets(raw: str | None) -> dict[str, dict[str, Path]]:
             raise _invalid(f"{ENV_ASSET_PATHS_JSON}[{namespace}] must be a non-empty object.")
         logical: dict[str, Path] = {}
         for name, path_text in mapping.items():
-            if not isinstance(name, str) or _LOGICAL_NAME_RE.fullmatch(name) is None:
+            if not is_safe_remote_asset_name(name):
                 raise _invalid(f"{ENV_ASSET_PATHS_JSON}[{namespace}] has an invalid logical name.")
             if not isinstance(path_text, str) or not is_safe_remote_posix_path_text(path_text):
                 raise _invalid(

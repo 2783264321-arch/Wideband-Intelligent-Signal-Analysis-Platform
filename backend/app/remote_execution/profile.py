@@ -15,6 +15,9 @@ from app.core.config import Settings
 from app.core.errors import PlatformError
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+# Deployment logical-asset-name contract, shared by the control-plane profile
+# parser and the remote worker parser so the two boundaries cannot drift.
+_REMOTE_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9._:\-]+$")
 _USER_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _REMOTE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -53,6 +56,17 @@ def is_safe_remote_posix_path_text(value: str) -> bool:
 
 def _unavailable(message: str) -> PlatformError:
     return PlatformError("REMOTE_EXECUTOR_UNAVAILABLE", message)
+
+
+def is_safe_remote_asset_name(value: str) -> bool:
+    """Shared deployment logical-asset-name rule (control plane + remote worker).
+
+    A safe logical asset name starts with an alphanumeric and contains only
+    ``[A-Za-z0-9_.-]``, with total length 1..128. This is the single authority
+    used by both ``RemoteProfile`` generic asset parsing and
+    ``RemoteWorkerContext`` namespaced asset parsing.
+    """
+    return isinstance(value, str) and _REMOTE_ASSET_NAME_RE.fullmatch(value) is not None
 
 
 def _safe_identifier(value: str, name: str) -> str:
@@ -147,7 +161,7 @@ def _parse_generic_asset_paths(raw: str | None) -> dict[str, dict[str, PurePosix
             raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] must be a non-empty object.")
         logical: dict[str, PurePosixPath] = {}
         for logical_name, path_text in value.items():
-            if not isinstance(logical_name, str) or _IDENTIFIER_RE.fullmatch(logical_name) is None:
+            if not is_safe_remote_asset_name(logical_name):
                 raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] has an invalid logical name.")
             if not isinstance(path_text, str):
                 raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}] must be a string.")

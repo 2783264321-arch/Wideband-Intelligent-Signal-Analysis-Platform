@@ -244,3 +244,21 @@ def test_worker_descriptor_carries_environment_identity(monkeypatch):
     assert (descriptor.device_type, descriptor.device_index) == ("cuda", 0)
     assert descriptor.environment_ref == "remote:autodl_primary:abc"
     assert descriptor.environment_label == "autodl_primary"
+
+
+# --- PRE-F2: deployment logical-asset-name contract (shared with the profile) --
+
+
+@pytest.mark.parametrize("length,accepted", [(128, True), (129, False)])
+def test_worker_deployment_logical_asset_name_length(monkeypatch, length, accepted):
+    env = _core_env()
+    name = "a" * length
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({_GENERIC_NAMESPACE: {name: "/root/assets/x.pt"}})
+    _apply(monkeypatch, env)
+    if accepted:
+        context = RemoteWorkerContext.from_env()
+        assert name in context.asset_paths[_GENERIC_NAMESPACE]
+    else:
+        with pytest.raises(PlatformError) as exc:
+            RemoteWorkerContext.from_env()
+        assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"

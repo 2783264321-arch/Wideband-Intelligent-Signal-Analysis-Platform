@@ -1344,3 +1344,32 @@ def test_remote_profile_descriptor_cuda_only_and_index_required(tmp_path):
     with pytest.raises(PlatformError):
         dataclasses.replace(base, device_index=None).runtime_descriptor()
     assert dataclasses.replace(base, device_index=2).runtime_descriptor().device_index == 2
+
+
+# --- PRE-F2: deployment logical-asset-name contract (shared with the worker) --
+
+
+@pytest.mark.parametrize("name,accepted", [("a" * 128, True), ("a" * 129, False)])
+def test_profile_deployment_logical_asset_name_length(tmp_path, monkeypatch, settings, name, accepted):
+    namespace = "p/1.0/" + "b" * 64
+    asset_json = json.dumps({namespace: {name: "/root/assets/x.pt"}})
+    if accepted:
+        profile = _load_profile(
+            tmp_path, monkeypatch, settings, WSP_REMOTE_ASSET_PATHS_JSON=asset_json
+        )
+        assert profile.generic_asset_paths[namespace][name] == PurePosixPath("/root/assets/x.pt")
+    else:
+        with pytest.raises(PlatformError) as exc:
+            _load_profile(
+                tmp_path, monkeypatch, settings, WSP_REMOTE_ASSET_PATHS_JSON=asset_json
+            )
+        assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("bad_name", ["a/b", "a b", "a;b", "_lead", "", "a\tb"])
+def test_profile_rejects_invalid_logical_asset_names(tmp_path, monkeypatch, settings, bad_name):
+    namespace = "p/1.0/" + "b" * 64
+    asset_json = json.dumps({namespace: {bad_name: "/root/assets/x.pt"}})
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_ASSET_PATHS_JSON=asset_json)
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"

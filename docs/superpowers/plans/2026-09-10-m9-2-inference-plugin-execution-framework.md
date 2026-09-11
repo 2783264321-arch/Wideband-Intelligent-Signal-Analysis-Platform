@@ -1220,9 +1220,10 @@ def execute_local_run(run_id: str, settings: Settings | None = None) -> None:
     # 2 metadata = run.execution_metadata_json
     # 3 descriptor = RuntimeDescriptor.from_metadata(metadata["runtime_descriptor"])
     # 4 handle = create_plugin_registry().get(run.pipeline_id, run.pipeline_version)
-    # 5 resolved = model_release_store.resolve_by_manifest_sha(
-    #        run.pipeline_id, run.pipeline_version, metadata["asset_manifest_sha256"])
-    #    verify resolved.model_release_id == metadata["model_release_id"]
+    # 5 resolved = model_release_store.resolve(
+    #        run.pipeline_id, run.pipeline_version, metadata["model_release_id"])
+    #    require resolved.release.model_release_id == metadata["model_release_id"]
+    #    require resolved.manifest.asset_manifest_sha256 == metadata["asset_manifest_sha256"]
     # 6 assets = resolve_local_assets(settings.local_asset_paths, ...)
     # 7 label_space = LabelSpaceService(settings.label_space_root).get(
     #        handle.definition.resolved_output_label_space)   # executor owns resolution
@@ -1371,7 +1372,10 @@ entries fail closed with `REMOTE_WORKER_CONTEXT_INVALID`.
   `ls_stft_normalization`, `asset_manifest_path`) and the existing
   `required_worker_env_vars` semantics until D3B or an explicit post-cutover
   cleanup. A legacy-only worker configuration that still drives the current
-  `ZoomSpecRemoteItemExecutor` MUST still construct and execute.
+  `ZoomSpecRemoteItemExecutor` MUST still construct and execute. *(Historical D4
+  transition only: these legacy scalar envs/fields were retired in E2B; the
+  current frozen contract is `WSP_REMOTE_ASSET_PATHS_JSON` generic
+  namespaced-only.)*
 - Generic asset resolution MUST NOT read the legacy ZoomSpec fields as plugin
   knowledge and MUST NOT fall back to them when generic configuration is
   absent/invalid — it fails closed instead. Add a separate generic
@@ -1598,8 +1602,10 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 
 **Interfaces:**
 - `PluginItemExecutor` resolves the ZoomSpec runtime via
-  `PluginHandle.load_runtime()` (never `PluginRegistry.load_runtime`) +
-  `ModelReleaseStore.resolve_by_manifest_sha`.
+  `PluginHandle.load_runtime()` (never `PluginRegistry.load_runtime`) and resolves
+  the exact frozen `model_release_id` through `ModelReleaseStore.resolve(...)`,
+  requiring the resolved manifest SHA to equal the frozen request SHA.
+  (`resolve_by_manifest_sha` is an index-only helper and is **not** execution authority.)
 - `build_analysis_package_zip(output, recording_name, dataset_name, runtime_descriptor, pipeline_definition, label_space)`.
 - Delete `zoomspec_executor.py`; update imports in `runner.py` (already D3) and all tests.
 
@@ -1926,7 +1932,11 @@ Rules:
   `LabelSpace` first.
 - `RuntimeDescriptor` (D1) exposes private `environment_ref` + public `environment_label`; `public_projection()` returns only `environment_label`. Consumed by D4 (probe), D5 (publisher/ingestor), D2 (providers), D2B (local worker), D3 (remote executor).
 - `ExecutionCertificate.runtime_ref` is part of `key()`; `is_certified` and `certified_capabilities` require an exact `runtime_ref`. Remote refs bind `required_remote_runtime_commit`; local refs are operator-owned generation labels.
-- `ModelReleaseStore.resolve_by_manifest_sha` (B1) is consumed by D2B/D3/E2, while new runs also carry the exact `model_release_id` on the wire (B3).
+- `ModelReleaseStore.resolve(exact model_release_id)` is the remote execution
+  release authority (D2B/D3/D4): the resolved manifest SHA must equal the frozen
+  request SHA. `resolve_by_manifest_sha` remains an index-only helper and MUST NOT
+  be used as execution authority. New runs also carry the exact `model_release_id`
+  on the wire (B3).
 - `ResolvedRecordingInput` (C1) is consumed by D3 and re-exported via resolver (C2).
 - `LocalInferenceWorkerProvider` (D2) takes the configured interpreter
   (`Settings.local_cpu_python_path` / `local_gpu_python_path`) and immutable

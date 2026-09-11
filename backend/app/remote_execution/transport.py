@@ -194,10 +194,11 @@ class SshRunner:
         full worker env; status receives minimal env only.
 
         Each ``NAME=value`` assignment is shell-quoted (``shlex.quote``) so the
-        deployed legacy scalar envs and the generic namespaced JSON survive
-        OpenSSH remote-shell parsing exactly. Descriptor metadata (device + the
-        deployment environment identity) is forwarded independently of generic
-        asset presence so the worker reconstructs the control-plane descriptor.
+        deployment env values (including the generic namespaced asset JSON)
+        survive OpenSSH remote-shell parsing exactly. Descriptor metadata (device
+        + the deployment environment identity) is forwarded independently of
+        generic asset presence so the worker reconstructs the control-plane
+        descriptor.
         """
         prefix = [
             _shell_assignment("PYTHONPATH", module_root.as_posix()),
