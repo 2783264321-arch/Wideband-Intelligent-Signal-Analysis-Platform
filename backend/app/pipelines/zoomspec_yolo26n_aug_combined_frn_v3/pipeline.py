@@ -67,6 +67,19 @@ class _CompositionResult:
     post_nms_count: int
 
 
+def _ls_stft_device(device: int | str) -> str:
+    """LS-STFT preprocessing device string for the frozen pipeline.
+
+    Device plumbing only (no scientific behavior change): index 0 keeps the
+    accepted M9.1 generic ``"cuda"`` string; a positive integer index is made
+    explicit as ``"cuda:N"`` so a nonzero descriptor index targets the exact CUDA
+    device. String devices are preserved unchanged.
+    """
+    if isinstance(device, int):
+        return "cuda" if device == 0 else f"cuda:{device}"
+    return str(device)
+
+
 class ZoomSpecFrozenPipeline(Pipeline):
     def __init__(
         self,
@@ -110,7 +123,7 @@ class ZoomSpecFrozenPipeline(Pipeline):
             frequency_low_hz=recording.frequency_low_hz,
             frequency_high_hz=recording.frequency_high_hz,
             normalization=self._normalization,
-            device=str(self._device) if not isinstance(self._device, int) else "cuda",
+            device=_ls_stft_device(self._device),
         )
         proposals = self._detector.detect_batch([spectrogram], batch_size=1)[0]
         comp = self._compose_from_proposals(iq, recording, proposals)
