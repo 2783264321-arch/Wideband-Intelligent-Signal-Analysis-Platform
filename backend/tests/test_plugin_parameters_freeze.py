@@ -93,7 +93,7 @@ class FakeProbe:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def availability(self, recording, pipeline, source_data_sha256):
+    def availability(self, recording, pipeline, source_data_sha256, model_release=None):
         self.calls.append((recording.id, pipeline.id))
         return ExecutorAvailabilityRead(
             executor="remote_gpu",

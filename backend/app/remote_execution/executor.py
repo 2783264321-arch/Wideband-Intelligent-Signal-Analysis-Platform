@@ -27,6 +27,7 @@ class RemoteExecutorProbe(Protocol):
         recording: RecordingModel,
         pipeline: PipelineDefinition,
         source_data_sha256: str | None,
+        model_release: object | None = None,
     ) -> ExecutorAvailabilityRead:
         ...
 
@@ -44,9 +45,8 @@ class SshRemoteExecutorProbe(RemoteExecutorProbe):
     """Local adapter that runs the remote runner ``probe`` over SSH and maps a
     deterministic transport response into an ``ExecutorAvailabilityRead``.
 
-    Expected runtime/manifest identities are injected through the constructor so
-    this adapter is independently testable with a fake transport and does not
-    depend on the remote probe body (12F-B).
+    The probe identity is per-call: the already-resolved ModelRelease supplies the
+    exact plugin/version/release/manifest tokens. There is no global manifest.
     """
 
     def __init__(
@@ -55,70 +55,71 @@ class SshRemoteExecutorProbe(RemoteExecutorProbe):
         transport,
         *,
         expected_runtime_commit: str,
-        expected_manifest_sha256: str,
     ) -> None:
         self._profile = profile
         self._transport = transport
         self._expected_runtime_commit = expected_runtime_commit
-        self._expected_manifest_sha256 = expected_manifest_sha256
+
+    def _unavailable(self, code: str, message: str) -> ExecutorAvailabilityRead:
+        return ExecutorAvailabilityRead(
+            executor="remote_gpu",
+            available=False,
+            reason_code=code,
+            reason_message=message,
+            remote_profile=self._profile.name,
+            recommended=False,
+        )
 
     def availability(
         self,
         recording: RecordingModel,
         pipeline: PipelineDefinition,
         source_data_sha256: str | None,
+        model_release: object | None = None,
     ) -> ExecutorAvailabilityRead:
-        del source_data_sha256  # probe identity is runtime/manifest-scoped; not per-recording
+        del source_data_sha256  # probe identity is plugin/release/manifest-scoped
+        if model_release is None:
+            return self._unavailable(
+                "MODEL_RELEASE_MISMATCH",
+                "Remote execution requires a resolved model release.",
+            )
+        plugin_id = pipeline.plugin_id
+        plugin_version = pipeline.plugin_version
+        model_release_id = model_release.release.model_release_id
+        asset_manifest_sha256 = model_release.manifest.asset_manifest_sha256
+        args = (
+            "--plugin-id", plugin_id,
+            "--plugin-version", plugin_version,
+            "--model-release-id", model_release_id,
+            "--asset-manifest-sha256", asset_manifest_sha256,
+        )
         try:
-            result = self._transport.run_runner("probe", ())
+            result = self._transport.run_runner("probe", args)
         except RemoteRunnerExit as exc:
-            return ExecutorAvailabilityRead(
-                executor="remote_gpu",
-                available=False,
-                reason_code=exc.code or "REMOTE_EXECUTOR_UNAVAILABLE",
-                reason_message=exc.message,
-                remote_profile=self._profile.name,
-                recommended=False,
+            return self._unavailable(
+                exc.code or "REMOTE_EXECUTOR_UNAVAILABLE", exc.message
             )
         except RemoteTransportError:
-            return ExecutorAvailabilityRead(
-                executor="remote_gpu",
-                available=False,
-                reason_code="REMOTE_TRANSPORT_UNAVAILABLE",
-                reason_message="Remote transport is unreachable.",
-                remote_profile=self._profile.name,
-                recommended=False,
+            return self._unavailable(
+                "REMOTE_TRANSPORT_UNAVAILABLE", "Remote transport is unreachable."
             )
 
         try:
             response = _parse_probe_response(result.stdout)
         except Exception:
-            return ExecutorAvailabilityRead(
-                executor="remote_gpu",
-                available=False,
-                reason_code="REMOTE_PROBE_UNAVAILABLE",
-                reason_message="Remote probe returned an invalid response.",
-                remote_profile=self._profile.name,
-                recommended=False,
+            return self._unavailable(
+                "REMOTE_PROBE_UNAVAILABLE", "Remote probe returned an invalid response."
             )
 
         if response.remote_runtime_commit != self._expected_runtime_commit:
-            return ExecutorAvailabilityRead(
-                executor="remote_gpu",
-                available=False,
-                reason_code="REMOTE_IMPLEMENTATION_MISMATCH",
-                reason_message="Remote runtime commit does not match the required remote runtime.",
-                remote_profile=self._profile.name,
-                recommended=False,
+            return self._unavailable(
+                "REMOTE_IMPLEMENTATION_MISMATCH",
+                "Remote runtime commit does not match the required remote runtime.",
             )
-        if response.asset_manifest_sha256 != self._expected_manifest_sha256:
-            return ExecutorAvailabilityRead(
-                executor="remote_gpu",
-                available=False,
-                reason_code="PIPELINE_ASSET_MISMATCH",
-                reason_message="Remote asset manifest hash does not match the local manifest.",
-                remote_profile=self._profile.name,
-                recommended=False,
+        if response.asset_manifest_sha256 != asset_manifest_sha256:
+            return self._unavailable(
+                "PIPELINE_ASSET_MISMATCH",
+                "Remote asset manifest hash does not match the requested release manifest.",
             )
         return ExecutorAvailabilityRead(
             executor="remote_gpu",

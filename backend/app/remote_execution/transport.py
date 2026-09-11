@@ -36,11 +36,11 @@ from app.remote_execution.worker_context import (
 _RUNNER_COMMANDS = ("probe", "submit", "status", "work")
 _FULL_WORKER_ENV_SUBCOMMANDS = ("probe", "submit", "work")
 _REQUIRED_DATASET_LOGICAL_KEYS = ("SpaceNet",)
-_REQUIRED_ASSET_LOGICAL_KEYS = (
-    "detector_checkpoint",
-    "frn_checkpoint",
-    "frozen_config",
-    "ls_stft_normalization",
+_LEGACY_ASSET_ENV_NAMES = (
+    ("detector_checkpoint", ENV_DETECTOR_CHECKPOINT),
+    ("frn_checkpoint", ENV_FRN_CHECKPOINT),
+    ("frozen_config", ENV_FROZEN_CONFIG),
+    ("ls_stft_normalization", ENV_LS_STFT_NORMALIZATION),
 )
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _FLAG_RE = re.compile(r"^--[A-Za-z0-9_-]+$")
@@ -165,9 +165,10 @@ class SshRunner:
         """Zero subprocess/network-I/O preflight that this subcommand's required
         runner env is satisfiable from the ``RemoteProfile``.
 
-        probe/submit/work require the full worker env mappings (SpaceNet root +
-        all four required asset scalars). status requires only the repo/job
-        fields needed for the minimal status env.
+        probe/submit/work require the repo/job fields + the SpaceNet dataset root
+        mapping. The four legacy ZoomSpec flat asset scalars are optional: generic
+        deployments supply namespaced assets via ``WSP_REMOTE_ASSET_PATHS_JSON``
+        instead. status requires only the repo/job fields.
 
         Raises ``RemoteTransportError`` (never raw ``PlatformError`` / never
         ``RemoteRunnerExit``) on missing/invalid worker mappings so existing
@@ -192,12 +193,6 @@ class SshRunner:
             raise RemoteTransportError(
                 "Remote worker deployment is missing the SpaceNet dataset root mapping."
             )
-        for logical_name in _REQUIRED_ASSET_LOGICAL_KEYS:
-            path = self.profile.asset_paths.get(logical_name)
-            if path is None or not is_safe_remote_posix_path_text(path.as_posix()):
-                raise RemoteTransportError(
-                    f"Remote worker deployment is missing required asset mapping '{logical_name}'."
-                )
 
     def _runner_env_prefix(
         self,
@@ -226,10 +221,6 @@ class SshRunner:
                 _shell_assignment(ENV_REPO_ROOT, repo_root.as_posix()),
                 _shell_assignment(ENV_REQUIRED_RUNTIME_COMMIT, self.profile.required_remote_runtime_commit),
                 _shell_assignment(ENV_SPACENET_ROOT, self.profile.dataset_roots[_REQUIRED_DATASET_LOGICAL_KEYS[0]].as_posix()),
-                _shell_assignment(ENV_DETECTOR_CHECKPOINT, self.profile.asset_paths['detector_checkpoint'].as_posix()),
-                _shell_assignment(ENV_FRN_CHECKPOINT, self.profile.asset_paths['frn_checkpoint'].as_posix()),
-                _shell_assignment(ENV_FROZEN_CONFIG, self.profile.asset_paths['frozen_config'].as_posix()),
-                _shell_assignment(ENV_LS_STFT_NORMALIZATION, self.profile.asset_paths['ls_stft_normalization'].as_posix()),
                 _shell_assignment(ENV_DEVICE_TYPE, self.profile.device_type),
                 _shell_assignment(ENV_DEVICE_INDEX, str(self.profile.device_index)),
                 _shell_assignment(ENV_PRECISION, self.profile.precision),
@@ -237,6 +228,12 @@ class SshRunner:
                 _shell_assignment(ENV_ENVIRONMENT_LABEL, self.profile.name),
             ]
         )
+        # Legacy ZoomSpec flat assets are optional; generic deployments carry only
+        # the namespaced subset below. Forward them only when configured.
+        for logical_name, env_name in _LEGACY_ASSET_ENV_NAMES:
+            legacy_path = self.profile.asset_paths.get(logical_name)
+            if legacy_path is not None:
+                prefix.append(_shell_assignment(env_name, legacy_path.as_posix()))
         # D4 (additive): forward optional generic namespaced assets as compact,
         # shell-quoted JSON. Legacy scalar envs above are unchanged.
         if self.profile.generic_asset_paths:

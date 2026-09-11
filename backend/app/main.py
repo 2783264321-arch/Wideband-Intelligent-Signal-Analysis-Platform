@@ -60,37 +60,13 @@ def _build_model_release_store() -> ModelReleaseStore:
     )
 
 
-def _resolve_remote_expected_manifest_sha256(store: ModelReleaseStore, registry) -> str:
-    """Resolve the single platform-default remote manifest identity for the probe.
-
-    The M9.1 readiness probe is plugin-agnostic and validates one manifest hash.
-    It is wired only while exactly one release-required plugin default exists;
-    per-plugin/per-release probes arrive with the descriptor-driven executor work.
-    """
-    from app.remote_execution.identity import resolve_asset_manifest_sha256
-
-    manifests = set()
-    for definition in registry.list():
-        if not definition.model_release_required:
-            continue
-        manifests.add(
-            resolve_asset_manifest_sha256(
-                store, definition.plugin_id, definition.plugin_version, None
-            )
-        )
-    if len(manifests) != 1:
-        raise PlatformError(
-            "MODEL_RELEASE_MISMATCH",
-            "Expected exactly one release-required default model release for the remote readiness probe.",
-        )
-    return next(iter(manifests))
-
-
 def _wire_remote_lifecycle(app, settings) -> None:
     """Wire the local control-plane remote lifecycle when a valid RemoteProfile exists.
 
     Missing or invalid remote config keeps the app healthy: no coordinator recovery
     launch, remote availability=false, and existing remote runs are preserved.
+    Per-plugin/per-release manifest identity is resolved at availability time, so
+    any number of release-required plugins may coexist.
     """
     from app.remote_execution.executor import SshRemoteExecutorProbe
     from app.remote_execution.identity import (
@@ -114,28 +90,11 @@ def _wire_remote_lifecycle(app, settings) -> None:
         app.state.data_root = settings.data_root
         return
 
-    try:
-        asset_manifest_sha256 = _resolve_remote_expected_manifest_sha256(
-            app.state.model_release_store, app.state.pipeline_registry
-        )
-    except Exception:
-        app.state.remote_config_available = False
-        app.state.remote_executor_probe = None
-        app.state.remote_coordinator_launcher = None
-        app.state.remote_executor_provider = None
-        app.state.identity_resolver = None
-        app.state.orchestrator_commit_resolver = None
-        app.state.runtime_commit_config = None
-        app.state.project_root = settings.project_root
-        app.state.data_root = settings.data_root
-        return
-
     transport = SshRunner(profile)
     probe = SshRemoteExecutorProbe(
         profile,
         transport,
         expected_runtime_commit=profile.required_remote_runtime_commit,
-        expected_manifest_sha256=asset_manifest_sha256,
     )
     app.state.remote_config_available = True
     app.state.remote_executor_probe = probe

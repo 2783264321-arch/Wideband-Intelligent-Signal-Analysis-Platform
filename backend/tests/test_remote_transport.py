@@ -864,15 +864,15 @@ def test_probe_submit_work_argv_contain_full_scalar_worker_env(tmp_path, subcomm
         "WSP_REMOTE_REPO_ROOT=/root/repo",
         f"WSP_REMOTE_REQUIRED_RUNTIME_COMMIT={'a' * 40}",
         "WSP_REMOTE_SPACENET_ROOT=/root/autodl-tmp/SpaceNet_Dataset",
-        "WSP_REMOTE_DETECTOR_CHECKPOINT=/root/models/best.pt",
-        "WSP_REMOTE_FRN_CHECKPOINT=/root/models/frn.pt",
-        "WSP_REMOTE_FROZEN_CONFIG=/root/models/frozen_config.json",
-        "WSP_REMOTE_LS_STFT_NORMALIZATION=/root/models/ls_stft_normalization.json",
         "WSP_REMOTE_DEVICE_TYPE=cuda",
         "WSP_REMOTE_DEVICE_INDEX=0",
         "WSP_REMOTE_PRECISION=float16",
         "WSP_REMOTE_ENVIRONMENT_REF=autodl_primary",
         "WSP_REMOTE_ENVIRONMENT_LABEL=autodl_primary",
+        "WSP_REMOTE_DETECTOR_CHECKPOINT=/root/models/best.pt",
+        "WSP_REMOTE_FRN_CHECKPOINT=/root/models/frn.pt",
+        "WSP_REMOTE_FROZEN_CONFIG=/root/models/frozen_config.json",
+        "WSP_REMOTE_LS_STFT_NORMALIZATION=/root/models/ls_stft_normalization.json",
     ]
     assert env_tokens == expected
 
@@ -963,10 +963,12 @@ def test_validate_runner_environment_minimal_for_status(tmp_path):
     runner.validate_runner_environment("status")  # must not raise
 
 
-@pytest.mark.parametrize("subcommand", ["probe", "submit"])
-def test_validate_runner_environment_missing_mapping_raises_transport_error(tmp_path, subcommand):
+@pytest.mark.parametrize("subcommand", ["probe", "submit", "work"])
+def test_validate_runner_environment_without_legacy_assets_ok(tmp_path, subcommand):
+    """D3B: the four legacy flat assets are no longer required for the generic
+    production path; only the SpaceNet dataset root mapping is."""
     profile = _profile(tmp_path)
-    missing_assets = RemoteProfile(
+    generic_only = RemoteProfile(
         name=profile.name, host=profile.host, port=profile.port, user=profile.user,
         ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
@@ -974,27 +976,57 @@ def test_validate_runner_environment_missing_mapping_raises_transport_error(tmp_
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
         asset_paths={},
+        generic_asset_paths={
+            "zoomspec_yolo26n_aug_combined_frn_v3/1.0.0/" + "b" * 64: {
+                "detector_checkpoint": PurePosixPath("/root/assets/det.pt")
+            }
+        },
     )
     recorder = ProcessRecorder()
-    runner = SshRunner(missing_assets, run_process=recorder)
-    with pytest.raises(RemoteTransportError):
-        runner.validate_runner_environment(subcommand)
+    runner = SshRunner(generic_only, run_process=recorder)
+    runner.validate_runner_environment(subcommand)  # must not raise
     assert recorder.calls == []
+
+
+def test_generic_only_runner_env_prefix_omits_legacy_and_carries_generic(tmp_path):
+    profile = _profile(tmp_path)
+    generic_only = RemoteProfile(
+        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
+        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
+        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
+        remote_python_path=profile.remote_python_path,
+        required_remote_runtime_commit=profile.required_remote_runtime_commit,
+        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        asset_paths={},
+        generic_asset_paths={
+            "zoomspec_yolo26n_aug_combined_frn_v3/1.0.0/" + "b" * 64: {
+                "detector_checkpoint": PurePosixPath("/root/assets/det.pt")
+            }
+        },
+    )
+    prefix = SshRunner(generic_only)._runner_env_prefix(
+        "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
+    )
+    assert not any(p.startswith("WSP_REMOTE_DETECTOR_CHECKPOINT=") for p in prefix)
+    assert not any(p.startswith("WSP_REMOTE_FRN_CHECKPOINT=") for p in prefix)
+    assert any(p.startswith("WSP_REMOTE_ASSET_PATHS_JSON=") for p in prefix)
 
 
 def test_run_runner_internally_validates_before_ssh(tmp_path):
     profile = _profile(tmp_path)
-    missing_assets = RemoteProfile(
+    # Missing the required SpaceNet dataset root -> internal preflight fails
+    # BEFORE any SSH invocation.
+    missing_dataset = RemoteProfile(
         name=profile.name, host=profile.host, port=profile.port, user=profile.user,
         ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
+        dataset_roots={},
         asset_paths={},
     )
     recorder = ProcessRecorder()
-    runner = SshRunner(missing_assets, run_process=recorder)
+    runner = SshRunner(missing_dataset, run_process=recorder)
     with pytest.raises(RemoteTransportError):
         runner.run_runner("submit", ("--request-path", "/root/jobs/incoming/batch_x.request.json"))
     assert recorder.calls == []
@@ -1039,7 +1071,9 @@ def test_missing_spacenet_mapping_fails_before_ssh(tmp_path, subcommand):
 
 @pytest.mark.parametrize("missing", ["detector_checkpoint", "frn_checkpoint",
                                      "frozen_config", "ls_stft_normalization"])
-def test_missing_asset_logical_mapping_fails_before_ssh(tmp_path, missing):
+def test_missing_legacy_asset_mapping_is_optional_and_not_forwarded(tmp_path, missing):
+    """D3B: a missing legacy flat asset is no longer a preflight failure and is
+    silently omitted from the legacy env bridge (generic assets are separate)."""
     profile = _profile(tmp_path)
     assets = dict(_FULL_ASSETS)
     assets.pop(missing)
@@ -1054,9 +1088,17 @@ def test_missing_asset_logical_mapping_fails_before_ssh(tmp_path, missing):
     )
     recorder = ProcessRecorder()
     runner = SshRunner(partial, run_process=recorder)
-    with pytest.raises(RemoteTransportError):
-        runner.run_runner("probe")
-    assert recorder.calls == []
+    runner.run_runner("probe")
+    assert len(recorder.calls) == 1
+    argv, _ = recorder.calls[0]
+    env_tokens = _full_env_tokens(argv)
+    env_name = {
+        "detector_checkpoint": "WSP_REMOTE_DETECTOR_CHECKPOINT",
+        "frn_checkpoint": "WSP_REMOTE_FRN_CHECKPOINT",
+        "frozen_config": "WSP_REMOTE_FROZEN_CONFIG",
+        "ls_stft_normalization": "WSP_REMOTE_LS_STFT_NORMALIZATION",
+    }[missing]
+    assert not any(t.startswith(env_name + "=") for t in env_tokens)
 
 
 def test_no_config_details_leak_in_transport_errors(tmp_path):

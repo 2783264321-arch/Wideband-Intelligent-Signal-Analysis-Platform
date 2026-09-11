@@ -114,13 +114,49 @@ def test_context_missing_spacenet_root_fails_closed(monkeypatch):
     ENV_FROZEN_CONFIG,
     ENV_LS_STFT_NORMALIZATION,
 ])
-def test_context_missing_asset_scalar_fails_closed(monkeypatch, name):
+def test_context_missing_legacy_asset_scalar_is_optional(monkeypatch, name):
+    """D3B: the four legacy ZoomSpec asset scalars are no longer required for
+    generic worker construction; they resolve to ``None`` when absent."""
     env = _full_env()
     env.pop(name)
+    _apply(monkeypatch, env)
+    context = RemoteWorkerContext.from_env()
+    field = {
+        ENV_DETECTOR_CHECKPOINT: "detector_checkpoint",
+        ENV_FRN_CHECKPOINT: "frn_checkpoint",
+        ENV_FROZEN_CONFIG: "frozen_config_path",
+        ENV_LS_STFT_NORMALIZATION: "ls_stft_normalization_path",
+    }[name]
+    assert getattr(context, field) is None
+
+
+def test_context_unsafe_legacy_asset_scalar_still_rejected(monkeypatch):
+    env = _full_env()
+    env[ENV_DETECTOR_CHECKPOINT] = "/root/../escape"
     _apply(monkeypatch, env)
     with pytest.raises(PlatformError) as exc:
         RemoteWorkerContext.from_env()
     assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_generic_only_context_constructs(monkeypatch):
+    """No legacy asset scalars, only namespaced generic config -> constructs."""
+    env = _full_env()
+    for name in (ENV_DETECTOR_CHECKPOINT, ENV_FRN_CHECKPOINT,
+                 ENV_FROZEN_CONFIG, ENV_LS_STFT_NORMALIZATION):
+        env.pop(name)
+    namespace = f"{_PLUGIN_ID}/{_PLUGIN_VERSION}/{_GENERIC_SHA}"
+    env[ENV_MANIFEST_ROOT] = "/root/manifests"
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({namespace: {"w": "/root/assets/w.pt"}})
+    _apply(monkeypatch, env)
+    context = RemoteWorkerContext.from_env()
+    assert context.detector_checkpoint is None
+    assert context.asset_paths[namespace] == {"w": Path("/root/assets/w.pt")}
+    resolved = context.resolve_assets(
+        plugin_id=_PLUGIN_ID, plugin_version=_PLUGIN_VERSION,
+        asset_manifest_sha256=_GENERIC_SHA, manifest=SimpleNamespace(assets={"w": "x"}),
+    )
+    assert resolved == {"w": Path("/root/assets/w.pt")}
 
 
 @pytest.mark.parametrize("bad", [

@@ -137,18 +137,25 @@ class _AdapterRegistry:
         return self.adapter
 
 
-def _apply_worker_env(monkeypatch, namespaced_json):
+def _apply_worker_env(monkeypatch, namespaced_json, *, include_legacy=True):
     env = {
         "WSP_REMOTE_REPO_ROOT": str(REPO_ROOT),
         "WSP_REMOTE_JOB_ROOT": "/root/jobs",
         "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT": RUNTIME_COMMIT,
         "WSP_REMOTE_SPACENET_ROOT": "/root/autodl-tmp/SpaceNet_Dataset",
-        "WSP_REMOTE_DETECTOR_CHECKPOINT": "/root/models/det.pt",
-        "WSP_REMOTE_FRN_CHECKPOINT": "/root/models/frn.pt",
-        "WSP_REMOTE_FROZEN_CONFIG": "/root/models/frozen.json",
-        "WSP_REMOTE_LS_STFT_NORMALIZATION": "/root/models/norm.json",
         "WSP_REMOTE_ASSET_PATHS_JSON": namespaced_json,
     }
+    if include_legacy:
+        env.update({
+            "WSP_REMOTE_DETECTOR_CHECKPOINT": "/root/models/det.pt",
+            "WSP_REMOTE_FRN_CHECKPOINT": "/root/models/frn.pt",
+            "WSP_REMOTE_FROZEN_CONFIG": "/root/models/frozen.json",
+            "WSP_REMOTE_LS_STFT_NORMALIZATION": "/root/models/norm.json",
+        })
+    else:
+        for name in ("WSP_REMOTE_DETECTOR_CHECKPOINT", "WSP_REMOTE_FRN_CHECKPOINT",
+                     "WSP_REMOTE_FROZEN_CONFIG", "WSP_REMOTE_LS_STFT_NORMALIZATION"):
+            monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
 
@@ -326,30 +333,49 @@ def test_executor_rejects_unknown_item_key(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_generic_only_remote_preflight_is_blocked_by_legacy_assets(tmp_path):
-    """Documents D3B_BLOCKED_BY_LEGACY_TRANSPORT_PREFLIGHT: a generic-only profile
-    (no flat legacy asset subset) cannot pass SshRunner preflight."""
-    import dataclasses
-
-    from app.remote_execution.profile import RemoteProfile
-    from app.remote_execution.transport import RemoteTransportError, SshRunner
-
-    key = tmp_path / "k"
-    key.write_bytes(b"k")
-    hosts = tmp_path / "h"
-    hosts.write_bytes(b"h")
-    namespace = "%s/1.0.0/%s" % (ZOOMSPEC_FROZEN_DEFINITION.id, "b" * 64)
-    generic_only = RemoteProfile(
-        name="autodl_primary", host="h", port=22, user="root",
-        ssh_key_path=key, known_hosts_path=hosts,
-        remote_repo_root=__import__("pathlib").PurePosixPath("/root/repo"),
-        remote_job_root=__import__("pathlib").PurePosixPath("/root/jobs"),
-        remote_python_path=__import__("pathlib").PurePosixPath("/opt/w/bin/python"),
-        required_remote_runtime_commit=RUNTIME_COMMIT,
-        dataset_roots={"SpaceNet": __import__("pathlib").PurePosixPath("/root/spacenet")},
-        asset_paths={},
-        manifest_root=__import__("pathlib").PurePosixPath("/root/manifests"),
-        generic_asset_paths={namespace: {"w": __import__("pathlib").PurePosixPath("/root/a/w.pt")}},
+def test_generic_only_cli_work_resolves_namespaced_assets(tmp_path, monkeypatch):
+    """No legacy asset env at all: the runner builds the generic executor and
+    resolves assets solely through the D4 namespaced mapping."""
+    manifest, asset = _manifest(tmp_path, content=b"generic-weights")
+    batch = _batch_for(manifest, ZOOMSPEC_FROZEN_DEFINITION)
+    handle = _FakeHandle(ZOOMSPEC_FROZEN_DEFINITION)
+    handle.runtime = _FakeRuntime(PipelineOutput(detections=[
+        DetectionPayload(0.01, 0.02, 2440600000.0, 2440700000.0, 9, "LoRa 250kHz", 0.9, None),
+    ]))
+    _apply_worker_env(
+        monkeypatch,
+        '{"%s/1.0.0/%s": {"w": "%s"}}'
+        % (ZOOMSPEC_FROZEN_DEFINITION.id, manifest.asset_manifest_sha256, asset),
+        include_legacy=False,
     )
-    with pytest.raises(RemoteTransportError):
-        SshRunner(generic_only).validate_runner_environment("work")
+    _patch_dependencies(
+        monkeypatch, _MultiRegistry([handle]),
+        _Store({(ZOOMSPEC_FROZEN_DEFINITION.id, ZOOMSPEC_FROZEN_DEFINITION.version): _resolved(manifest)}),
+        _AdapterRegistry(_Adapter()),
+    )
+    terminal = _assert_plugin_executed(
+        tmp_path, batch, handle, ZOOMSPEC_FROZEN_DEFINITION, 9, "LoRa 250kHz"
+    )
+    assert (terminal / "analysis_result.zip").is_file()
+
+
+def test_flat_legacy_assets_do_not_fall_back_for_generic_executor(tmp_path, monkeypatch):
+    """With only flat legacy assets and no namespaced config, the generic executor
+    fails closed (never falls back to the legacy scalar assets)."""
+    manifest, asset = _manifest(tmp_path, content=b"x")
+    batch = _batch_for(manifest, ZOOMSPEC_FROZEN_DEFINITION)
+    handle = _FakeHandle(ZOOMSPEC_FROZEN_DEFINITION)
+    _apply_worker_env(monkeypatch, "{}", include_legacy=True)
+    _patch_dependencies(
+        monkeypatch, _MultiRegistry([handle]),
+        _Store({(ZOOMSPEC_FROZEN_DEFINITION.id, ZOOMSPEC_FROZEN_DEFINITION.version): _resolved(manifest)}),
+        _AdapterRegistry(_Adapter()),
+    )
+    from app.remote_execution.worker_context import RemoteWorkerContext
+
+    worker = RemoteWorkerContext.from_env()
+    executor = runner_module._build_work_executor(batch, worker)
+    with pytest.raises(PlatformError) as exc:
+        executor.execute(batch.items[0], tmp_path / "job")
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+    assert handle.load_runtime_calls == []

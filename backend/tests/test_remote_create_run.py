@@ -47,7 +47,7 @@ class FakeProbe:
         self.reason_code = reason_code
         self.calls = []
 
-    def availability(self, recording, pipeline, source_data_sha256):
+    def availability(self, recording, pipeline, source_data_sha256, model_release=None):
         self.calls.append((recording.id, pipeline.id))
         if self.available:
             return ExecutorAvailabilityRead(executor="remote_gpu", available=True,

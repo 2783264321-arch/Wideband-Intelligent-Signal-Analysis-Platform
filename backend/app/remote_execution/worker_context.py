@@ -129,12 +129,16 @@ class RemoteWorkerContext:
     job_root: Path
     required_runtime_commit: str
     dataset_root_space_net: Path
-    detector_checkpoint: Path
-    frn_checkpoint: Path
-    frozen_config_path: Path
-    ls_stft_normalization_path: Path
     label_space_root: Path
-    asset_manifest_path: Path
+
+    # Legacy ZoomSpec scalar assets. Retained optionally for the non-dispatched
+    # legacy executor (E2 owns deletion); NOT part of the generic readiness
+    # contract. ``None`` means the deployment is generic-only.
+    detector_checkpoint: Path | None = None
+    frn_checkpoint: Path | None = None
+    frozen_config_path: Path | None = None
+    ls_stft_normalization_path: Path | None = None
+    asset_manifest_path: Path | None = None
 
     # D4 generic (additive, optional).
     manifest_root: Path | None = None
@@ -159,6 +163,14 @@ class RemoteWorkerContext:
             if not is_safe_remote_posix_path_text(value):
                 raise _invalid(f"{name} is not a safe absolute POSIX path.")
             return value
+
+        def _optional_posix(name: str) -> Path | None:
+            value = env.get(name, "")
+            if not value:
+                return None
+            if not is_safe_remote_posix_path_text(value):
+                raise _invalid(f"{name} is not a safe absolute POSIX path.")
+            return Path(value)
 
         repo_root_text = _require_posix(ENV_REPO_ROOT)
         job_root_text = _require_posix(ENV_JOB_ROOT)
@@ -205,11 +217,11 @@ class RemoteWorkerContext:
             job_root=Path(job_root_text),
             required_runtime_commit=commit,
             dataset_root_space_net=Path(_require_posix(ENV_SPACENET_ROOT)),
-            detector_checkpoint=Path(_require_posix(ENV_DETECTOR_CHECKPOINT)),
-            frn_checkpoint=Path(_require_posix(ENV_FRN_CHECKPOINT)),
-            frozen_config_path=Path(_require_posix(ENV_FROZEN_CONFIG)),
-            ls_stft_normalization_path=Path(_require_posix(ENV_LS_STFT_NORMALIZATION)),
             label_space_root=repo_root / "label_spaces",
+            detector_checkpoint=_optional_posix(ENV_DETECTOR_CHECKPOINT),
+            frn_checkpoint=_optional_posix(ENV_FRN_CHECKPOINT),
+            frozen_config_path=_optional_posix(ENV_FROZEN_CONFIG),
+            ls_stft_normalization_path=_optional_posix(ENV_LS_STFT_NORMALIZATION),
             asset_manifest_path=(
                 repo_root / "backend" / "app" / "pipelines"
                 / "zoomspec_yolo26n_aug_combined_frn_v3" / "asset_manifest.json"

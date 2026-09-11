@@ -816,7 +816,7 @@ PluginItemExecutor (generic; injected seams; no ZoomSpec constants)
 - D3A and D4/D5 MUST NOT pre-implement each other; D3A and D4/D5 MUST NOT switch
   the runner (only D3B does).
 
-**D3B cutover facts (implemented).** The production runner now constructs the
+**D3B cutover facts (implemented).** The production runner constructs the
 deployment-owned generic dependencies (`PluginRegistry`, `ModelReleaseStore`,
 `DatasetAdapterRegistry`, `ExecutionCertificateStore`) plus
 `worker.resolve_assets`, `worker.runtime_descriptor()` and the D5 package
@@ -824,14 +824,25 @@ publisher, and dispatches every free item through `PluginItemExecutor`; no
 plugin-id/ZoomSpec constants remain in `runner.py`. `ZoomSpecRemoteItemExecutor`
 is retained but is **legacy / no longer on the production dispatch path** (its
 plugin runtime factory is supplied by E1). `PluginItemExecutor` enforces an
-item-must-belong-to-the-frozen-batch binding at the generic boundary. The legacy
-worker-context scalar env fields (`required_worker_env_vars` + the four ZoomSpec
-asset scalars) are retained as **post-cutover cleanup debt** and are not read by
-generic execution. Generic-only remote **production deployment remains blocked**
-by the legacy transport preflight (`SshRunner.validate_runner_environment`
-still requires the four flat assets): `D3B_BLOCKED_BY_LEGACY_TRANSPORT_PREFLIGHT`;
-generic-only operation awaits the post-D3B legacy retirement. Release-less remote
-execution stays fail-closed (unchanged).
+item-must-belong-to-the-frozen-batch binding at the generic boundary.
+
+**Post-cutover generic bootstrap (implemented).** The legacy bootstrap blocker is
+retired: `RemoteWorkerContext.from_env` no longer requires the four ZoomSpec
+asset scalar env vars, and `SshRunner.validate_runner_environment` /
+`_runner_env_prefix` no longer require or unconditionally index the legacy flat
+assets. A generic-only deployment (namespaced `WSP_REMOTE_ASSET_PATHS_JSON` only)
+runs probe/submit/work and resolves assets through `worker.resolve_assets`; there
+is no fallback from generic namespaced assets to legacy flat assets. The legacy
+scalars remain optional for the non-dispatched legacy executor (E2 deletion
+debt). Remote readiness is now **per PluginVersion + ModelRelease/manifest**: the
+control-plane probe receives the already-resolved ModelRelease and sends its
+exact plugin/version/release/manifest tokens; the remote probe resolves the exact
+`PluginHandle` + `ModelRelease`, verifies the manifest identity, resolves and
+byte-verifies assets, and checks dataset/label-space/descriptor readiness without
+loading the plugin runtime. The global single-manifest startup assumption
+(`_resolve_remote_expected_manifest_sha256`) is removed, so any number of
+release-required plugins coexist. Release-less remote execution stays
+fail-closed (unchanged).
 
 The generic executor owns verification/orchestration; the plugin owns science.
 ZoomSpec becomes one registered plugin, not a special case. GroundTruth never

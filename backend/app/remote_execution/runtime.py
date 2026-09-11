@@ -405,7 +405,9 @@ class RemoteGpuExecutorProvider:
                 remote_profile=None,
                 recommended=False,
             )
-        return self._probe.availability(recording, definition, recording.source_data_sha256)
+        return self._probe.availability(
+            recording, definition, recording.source_data_sha256, model_release
+        )
 
     def launch(self, run_id: str, *, coordinator_token: str | None) -> int | None:
         return self._launcher.launch(run_id, coordinator_token)

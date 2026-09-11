@@ -48,7 +48,7 @@ class FakeRemoteExecutorProbe:
         self.remote_profile = remote_profile
         self.calls = []
 
-    def availability(self, recording, pipeline, source_data_sha256):
+    def availability(self, recording, pipeline, source_data_sha256, model_release=None):
         self.calls.append((recording.id, pipeline.id, source_data_sha256))
         if self.available_value:
             return ExecutorAvailabilityRead(

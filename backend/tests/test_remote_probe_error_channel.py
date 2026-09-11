@@ -12,9 +12,10 @@ from app.remote_execution.transport import RemoteRunnerExit, RemoteTransportErro
 
 RUNTIME_COMMIT = "a" * 40
 MANIFEST_SHA = "b" * 64
+RELEASE_ID = "golden"
 
 PIPELINE = PipelineDefinition(
-    id="zoomspec_yolo26n_aug_combined_frn_v3",
+    id="generic_remote_plugin",
     name="z",
     version="1.0.0",
     label_space="spacenet_14",
@@ -30,6 +31,13 @@ PIPELINE = PipelineDefinition(
 
 def _recording():
     return SimpleNamespace(id="rec", label_space="spacenet_14", source_data_sha256="c" * 64)
+
+
+def _release(manifest_sha: str = MANIFEST_SHA, release_id: str = RELEASE_ID):
+    return SimpleNamespace(
+        release=SimpleNamespace(model_release_id=release_id),
+        manifest=SimpleNamespace(asset_manifest_sha256=manifest_sha),
+    )
 
 
 def _profile() -> RemoteProfile:
@@ -54,21 +62,21 @@ def _profile() -> RemoteProfile:
     )
 
 
-def _probe_json() -> bytes:
+def _probe_json(manifest_sha: str = MANIFEST_SHA, runtime_commit: str = RUNTIME_COMMIT) -> bytes:
     return json.dumps({
         "schema_version": 1,
         "status": "available",
-        "remote_runtime_commit": RUNTIME_COMMIT,
-        "asset_manifest_sha256": MANIFEST_SHA,
+        "remote_runtime_commit": runtime_commit,
+        "asset_manifest_sha256": manifest_sha,
         "device": 0,
     }).encode("utf-8")
 
 
 def _make_probe(run_process):
     transport = SshRunner(_profile(), run_process=run_process)
-    return SshRemoteExecutorProbe(_profile(), transport,
-                                  expected_runtime_commit=RUNTIME_COMMIT,
-                                  expected_manifest_sha256=MANIFEST_SHA)
+    return SshRemoteExecutorProbe(
+        _profile(), transport, expected_runtime_commit=RUNTIME_COMMIT
+    )
 
 
 def _result(returncode, stdout=b"", stderr=b""):
@@ -77,7 +85,7 @@ def _result(returncode, stdout=b"", stderr=b""):
 
 def test_probe_success_maps_available_true():
     probe = _make_probe(lambda *a, **k: _result(0, stdout=_probe_json()))
-    availability = probe.availability(_recording(), PIPELINE, "c" * 64)
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
     assert isinstance(availability, ExecutorAvailabilityRead)
     assert availability.executor == "remote_gpu"
     assert availability.available is True
@@ -85,29 +93,49 @@ def test_probe_success_maps_available_true():
     assert availability.reason_message is None
 
 
+def test_probe_requests_exact_plugin_release_manifest_tokens():
+    captured = {}
+
+    def run_process(argv, **kwargs):
+        captured["argv"] = list(argv)
+        return _result(0, stdout=_probe_json())
+
+    probe = _make_probe(run_process)
+    probe.availability(_recording(), PIPELINE, "c" * 64, _release())
+    argv = captured["argv"]
+    joined = " ".join(argv)
+    assert "--plugin-id generic_remote_plugin" in joined
+    assert "--plugin-version 1.0.0" in joined
+    assert f"--model-release-id {RELEASE_ID}" in joined
+    assert f"--asset-manifest-sha256 {MANIFEST_SHA}" in joined
+
+
+def test_probe_release_less_remote_is_unavailable():
+    probe = _make_probe(lambda *a, **k: _result(0, stdout=_probe_json()))
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, None)
+    assert availability.available is False
+    assert availability.reason_code == "MODEL_RELEASE_MISMATCH"
+
+
 def test_probe_runtime_commit_mismatch_is_unavailable():
-    wrong = json.dumps({"schema_version": 1, "status": "available",
-                        "remote_runtime_commit": "d" * 40,
-                        "asset_manifest_sha256": MANIFEST_SHA, "device": 0}).encode()
+    wrong = _probe_json(runtime_commit="d" * 40)
     probe = _make_probe(lambda *a, **k: _result(0, stdout=wrong))
-    availability = probe.availability(_recording(), PIPELINE, "c" * 64)
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
     assert availability.available is False
     assert availability.reason_code == "REMOTE_IMPLEMENTATION_MISMATCH"
 
 
 def test_probe_manifest_mismatch_is_unavailable():
-    wrong = json.dumps({"schema_version": 1, "status": "available",
-                        "remote_runtime_commit": RUNTIME_COMMIT,
-                        "asset_manifest_sha256": "e" * 64, "device": 0}).encode()
+    wrong = _probe_json(manifest_sha="e" * 64)
     probe = _make_probe(lambda *a, **k: _result(0, stdout=wrong))
-    availability = probe.availability(_recording(), PIPELINE, "c" * 64)
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
     assert availability.available is False
     assert availability.reason_code == "PIPELINE_ASSET_MISMATCH"
 
 
 def test_probe_structured_runner_failure_maps_explicit_unavailable():
     probe = _make_probe(lambda *a, **k: _result(1, stdout=b"", stderr=b"REMOTE_IMPLEMENTATION_MISMATCH: runtime mismatch\n"))
-    availability = probe.availability(_recording(), PIPELINE, "c" * 64)
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
     assert availability.available is False
     assert availability.reason_code == "REMOTE_IMPLEMENTATION_MISMATCH"
 
@@ -136,7 +164,7 @@ def test_generic_ssh_failure_stays_remote_transport_error():
 
 def test_probe_does_not_leak_stderr_traceback():
     probe = _make_probe(lambda *a, **k: _result(1, stdout=b"", stderr=b"Traceback (most recent call last):\n  File \"/x.py\", line 1\n"))
-    availability = probe.availability(_recording(), PIPELINE, "c" * 64)
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
     assert availability.available is False
     assert "Traceback" not in (availability.reason_message or "")
     assert ".py" not in (availability.reason_message or "")
@@ -144,7 +172,7 @@ def test_probe_does_not_leak_stderr_traceback():
 
 def test_probe_malformed_stdout_maps_unavailable():
     probe = _make_probe(lambda *a, **k: _result(0, stdout=b"not json\n"))
-    availability = probe.availability(_recording(), PIPELINE, "c" * 64)
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
     assert availability.available is False
     assert availability.reason_code == "REMOTE_PROBE_UNAVAILABLE"
 

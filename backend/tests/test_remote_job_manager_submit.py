@@ -139,14 +139,12 @@ def test_submit_missing_spacenet_mapping_zero_io(tmp_path):
     assert recorder.calls == []
 
 
-@pytest.mark.parametrize("missing", sorted(_FULL_ASSETS))
-def test_submit_missing_each_asset_mapping_zero_io(tmp_path, missing):
-    assets = dict(_FULL_ASSETS)
-    assets.pop(missing)
+def test_submit_missing_spacenet_root_zero_io(tmp_path):
+    """D3B: the four legacy flat assets are optional; the SpaceNet dataset root
+    mapping is the remaining full-worker preflight requirement."""
     recorder = ProcessRecorder()
-    manager = RemoteGpuJobManager(
-        _profile(tmp_path, asset_paths=assets), SshRunner(_profile(tmp_path, asset_paths=assets), run_process=recorder)
-    )
+    profile = _profile(tmp_path, dataset_roots={}, asset_paths=dict(_FULL_ASSETS))
+    manager = RemoteGpuJobManager(profile, SshRunner(profile, run_process=recorder))
     batch = _batch()
     with pytest.raises(PlatformError) as exc:
         manager.submit(batch, _request_file(tmp_path, batch))
@@ -157,7 +155,7 @@ def test_submit_missing_each_asset_mapping_zero_io(tmp_path, missing):
 def test_submit_preflight_transport_error_maps_to_platform_error(tmp_path):
     """Preflight raising RemoteTransportError must be mapped to a PlatformError
     inside submit so the Coordinator never receives a raw RemoteTransportError."""
-    profile = _profile(tmp_path, asset_paths={})
+    profile = _profile(tmp_path, dataset_roots={}, asset_paths={})
     transport = SshRunner(profile, run_process=ProcessRecorder())
     manager = RemoteGpuJobManager(profile, transport)
     batch = _batch()
@@ -232,7 +230,6 @@ def test_probe_missing_mapping_returns_transport_unavailable(tmp_path):
     probe = SshRemoteExecutorProbe(
         profile, transport,
         expected_runtime_commit=RUNTIME_COMMIT,
-        expected_manifest_sha256="c" * 64,
     )
     pipeline = PipelineDefinition(
         id="zoomspec_yolo26n_aug_combined_frn_v3",
@@ -243,7 +240,11 @@ def test_probe_missing_mapping_returns_transport_unavailable(tmp_path):
         executors_supported=("remote_gpu",), recommended_executor="remote_gpu",
     )
     recording = SimpleNamespace(id="rec", label_space="spacenet_14", source_data_sha256="d" * 64)
-    availability = probe.availability(recording, pipeline, "d" * 64)
+    release = SimpleNamespace(
+        release=SimpleNamespace(model_release_id="golden"),
+        manifest=SimpleNamespace(asset_manifest_sha256="c" * 64),
+    )
+    availability = probe.availability(recording, pipeline, "d" * 64, release)
     assert isinstance(availability, ExecutorAvailabilityRead)
     assert availability.available is False
     assert availability.reason_code == "REMOTE_TRANSPORT_UNAVAILABLE"

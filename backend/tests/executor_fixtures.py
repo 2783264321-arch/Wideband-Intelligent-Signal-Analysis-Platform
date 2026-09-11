@@ -65,7 +65,9 @@ class FakeProvider:
                 recommended=False,
             )
         if self._probe is not None:
-            return self._probe.availability(recording, definition, recording.source_data_sha256)
+            return self._probe.availability(
+                recording, definition, recording.source_data_sha256, model_release
+            )
         remote_profile = self.name if self.name == "remote_gpu" else None
         if self.name == "remote_gpu" and self._launcher is None:
             return ExecutorAvailabilityRead(

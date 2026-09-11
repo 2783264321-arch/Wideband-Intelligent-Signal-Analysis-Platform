@@ -40,6 +40,7 @@ from app.remote_execution.schema import (
 )
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _ENVELOPE_FILENAME = "envelope.json"
 _PAYLOAD_FILENAME = "analysis_result.zip"
@@ -586,13 +587,72 @@ def _default_spawn_worker(job_root: Path) -> Callable[[str], None]:
     return _spawn
 
 
+def _resolve_probe_bundle(
+    worker,
+    *,
+    plugin_id: str,
+    plugin_version: str,
+    model_release_id: str | None,
+    asset_manifest_sha256: str,
+):
+    """Resolve the exact plugin/release/manifest identity for a readiness probe.
+
+    The remote probe resolves the SAME authoritative ModelRelease used by the
+    generic executor; it never loads the plugin runtime.
+    """
+    from app.pipelines.plugin_registry import create_plugin_registry
+
+    handle = create_plugin_registry().get(plugin_id, plugin_version)
+    definition = handle.definition
+    if not definition.model_release_required:
+        raise PlatformError(
+            "MODEL_RELEASE_MISMATCH", "Remote release-less execution is not supported."
+        )
+    resolved = _build_model_release_store().resolve(plugin_id, plugin_version, model_release_id)
+    if (
+        resolved.release.model_release_id != model_release_id
+        or resolved.manifest.asset_manifest_sha256 != asset_manifest_sha256
+    ):
+        raise PlatformError(
+            "MODEL_RELEASE_MISMATCH", "Remote probe release/manifest identity mismatch."
+        )
+    assets = worker.resolve_assets(
+        plugin_id=plugin_id,
+        plugin_version=plugin_version,
+        asset_manifest_sha256=asset_manifest_sha256,
+        manifest=resolved.manifest,
+    )
+    return definition, resolved.manifest, assets
+
+
 def _cli_probe(args: argparse.Namespace) -> int:
     # Lazy imports stay INSIDE this handler so importing runner.py remains
     # GPU-library-free. run_probe verifies readiness without loading models.
     from app.remote_execution.probe import run_probe
     from app.remote_execution.worker_context import RemoteWorkerContext
+
+    _require_identifier(args.plugin_id, "plugin id", "REMOTE_EXECUTOR_UNAVAILABLE")
+    _require_identifier(args.plugin_version, "plugin version", "REMOTE_EXECUTOR_UNAVAILABLE")
+    if _SHA256_RE.fullmatch(args.asset_manifest_sha256) is None:
+        raise PlatformError("REMOTE_EXECUTOR_UNAVAILABLE", "asset manifest hash must be a 64-hex sha256.")
+    if args.model_release_id is not None:
+        _require_identifier(args.model_release_id, "model release id", "REMOTE_EXECUTOR_UNAVAILABLE")
+
     worker = RemoteWorkerContext.from_env()
-    response = run_probe(worker, descriptor=worker.runtime_descriptor())
+    definition, manifest, assets = _resolve_probe_bundle(
+        worker,
+        plugin_id=args.plugin_id,
+        plugin_version=args.plugin_version,
+        model_release_id=args.model_release_id,
+        asset_manifest_sha256=args.asset_manifest_sha256,
+    )
+    response = run_probe(
+        worker,
+        descriptor=worker.runtime_descriptor(),
+        plugin_definition=definition,
+        manifest=manifest,
+        assets=assets,
+    )
     print(response.model_dump_json())
     return 0
 
@@ -710,6 +770,10 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     probe = subparsers.add_parser("probe", help="fail-closed runtime/assets probe (Task 10 owns it)")
+    probe.add_argument("--plugin-id", required=True)
+    probe.add_argument("--plugin-version", required=True)
+    probe.add_argument("--model-release-id", default=None)
+    probe.add_argument("--asset-manifest-sha256", required=True)
     probe.set_defaults(handler=_cli_probe)
 
     submit = subparsers.add_parser("submit", help="submit a frozen request to the server inbox")

@@ -40,7 +40,7 @@ class FakeProbe:
         self.reason_code = reason_code
         self.calls = []
 
-    def availability(self, recording, pipeline, source_data_sha256):
+    def availability(self, recording, pipeline, source_data_sha256, model_release=None):
         self.calls.append((recording.id, pipeline.id))
         return ExecutorAvailabilityRead(
             executor="remote_gpu",
@@ -127,7 +127,6 @@ def test_missing_mapping_returns_transport_unavailable(client, tmp_path):
     client.app.state.remote_executor_probe = SshRemoteExecutorProbe(
         profile, transport,
         expected_runtime_commit=RUN,
-        expected_manifest_sha256=MANIFEST,
     )
     client.app.state.executor_registry = FakeRegistry(
         {"remote_gpu": FakeProvider("remote_gpu", probe=client.app.state.remote_executor_probe)}

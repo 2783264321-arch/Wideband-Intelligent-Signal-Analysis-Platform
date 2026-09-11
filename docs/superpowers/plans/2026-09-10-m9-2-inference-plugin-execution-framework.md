@@ -1471,18 +1471,28 @@ remote production path remains the active path.
   path; the ZoomSpec remote run now flows through the generic executor unchanged
   scientifically.
 
-**D3B cutover facts (implemented):** `runner._cli_work` now builds
+**D3B cutover facts (implemented):** `runner._cli_work` builds
 `PluginItemExecutor` from `create_plugin_registry()` / `ModelReleaseStore` /
 `DatasetAdapterRegistry` / `ExecutionCertificateStore` + `worker.resolve_assets`,
 `worker.runtime_descriptor()` and `publish_package`; `runner.py` has zero
 ZoomSpec/spacenet_14/legacy-asset/cuda:0 literals. `ZoomSpecRemoteItemExecutor`
 is retained but **legacy / non-dispatched** (E1 supplies its runtime factory).
 `PluginItemExecutor` closes the deferred D3A Minor with an item-in-frozen-batch
-binding. Legacy worker-context scalar env fields remain **post-cutover cleanup
-debt** (not read by generic execution). Generic-only remote production is
-**BLOCKED** by the legacy transport preflight (four flat assets still required):
-`D3B_BLOCKED_BY_LEGACY_TRANSPORT_PREFLIGHT`. Release-less remote stays
-fail-closed.
+binding.
+
+**Post-cutover generic bootstrap (implemented):** the four ZoomSpec worker-context
+asset scalars are now **optional**; transport preflight/env-prefix no longer
+require or index them, so a **generic-only** deployment (namespaced
+`WSP_REMOTE_ASSET_PATHS_JSON` only) runs probe/submit/work. No generic->legacy
+fallback. Remote readiness is **per PluginVersion + ModelRelease/manifest**: the
+probe receives the resolved ModelRelease, sends fixed validated identity tokens
+(`--plugin-id/--plugin-version/--model-release-id/--asset-manifest-sha256`), and
+the remote `_cli_probe` resolves the exact handle + release, verifies the manifest
+identity, resolves/byte-verifies assets, and checks dataset/label-space/descriptor
+readiness **without loading the runtime**. `RemoteProbeResponseV1` is unchanged.
+The global single-manifest startup resolution
+(`main._resolve_remote_expected_manifest_sha256`) is removed. Release-less remote
+stays fail-closed. Legacy scalar fields remain E2 cleanup debt.
 
 **Post-cutover cleanup boundary:** D3B is the cutover point. Retiring the legacy
 ZoomSpec worker-context scalar env vars/fields (`required_worker_env_vars`
