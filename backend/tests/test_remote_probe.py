@@ -114,10 +114,6 @@ def _worker(tmp_path: Path) -> RemoteWorkerContext:
         required_runtime_commit=COMMIT_40,
         dataset_root_space_net=tmp_path / "spacenet",
         label_space_root=repo_root / "label_spaces",
-        detector_checkpoint=tmp_path / "det.pt",
-        frn_checkpoint=tmp_path / "frn.pt",
-        frozen_config_path=tmp_path / "frozen.json",
-        ls_stft_normalization_path=tmp_path / "norm.json",
     )
 
 

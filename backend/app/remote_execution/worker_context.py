@@ -29,12 +29,8 @@ ENV_REPO_ROOT = "WSP_REMOTE_REPO_ROOT"
 ENV_JOB_ROOT = "WSP_REMOTE_JOB_ROOT"
 ENV_REQUIRED_RUNTIME_COMMIT = "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT"
 ENV_SPACENET_ROOT = "WSP_REMOTE_SPACENET_ROOT"
-ENV_DETECTOR_CHECKPOINT = "WSP_REMOTE_DETECTOR_CHECKPOINT"
-ENV_FRN_CHECKPOINT = "WSP_REMOTE_FRN_CHECKPOINT"
-ENV_FROZEN_CONFIG = "WSP_REMOTE_FROZEN_CONFIG"
-ENV_LS_STFT_NORMALIZATION = "WSP_REMOTE_LS_STFT_NORMALIZATION"
 
-# Generic (D4) configuration — additive; never replaces the legacy fields.
+# Generic deployment configuration.
 ENV_MANIFEST_ROOT = "WSP_REMOTE_MANIFEST_ROOT"
 ENV_ASSET_PATHS_JSON = "WSP_REMOTE_ASSET_PATHS_JSON"
 ENV_DEVICE_TYPE = "WSP_REMOTE_DEVICE_TYPE"
@@ -44,11 +40,9 @@ ENV_ENVIRONMENT_REF = "WSP_REMOTE_ENVIRONMENT_REF"
 ENV_ENVIRONMENT_LABEL = "WSP_REMOTE_ENVIRONMENT_LABEL"
 
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-_DEVICE_TYPE_RE = re.compile(r"^(cpu|cuda)$")
 _PRECISION_RE = re.compile(r"^(float32|float16)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _LOGICAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_LEGACY_ASSET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,254}$")
 
 
@@ -56,33 +50,12 @@ def _invalid(message: str) -> PlatformError:
     return PlatformError("REMOTE_WORKER_CONTEXT_INVALID", message)
 
 
-def required_worker_env_vars() -> tuple[str, ...]:
-    """Exact fixed scalar environment variable names of the legacy worker contract."""
-    return (
-        ENV_REPO_ROOT,
-        ENV_JOB_ROOT,
-        ENV_REQUIRED_RUNTIME_COMMIT,
-        ENV_SPACENET_ROOT,
-        ENV_DETECTOR_CHECKPOINT,
-        ENV_FRN_CHECKPOINT,
-        ENV_FROZEN_CONFIG,
-        ENV_LS_STFT_NORMALIZATION,
-    )
-
-
-def is_complete_worker_env(env) -> bool:
-    """True iff every required legacy worker scalar env name is present/non-empty."""
-    for name in required_worker_env_vars():
-        if not env.get(name):
-            return False
-    return True
-
-
 def _parse_namespaced_assets(raw: str | None) -> dict[str, dict[str, Path]]:
-    """Parse the optional generic namespaced asset mapping.
+    """Parse the generic namespaced asset mapping.
 
     Shape: ``{"<plugin_id>/<plugin_version>/<asset_manifest_sha256>": {"<logical>": "/abs/path"}}``.
-    Absent/empty => {} (generic seam unavailable). Invalid => fail closed.
+    Absent/empty => {} (generic seam unavailable). The retired legacy flat shape
+    (top-level string entries) is rejected; malformed config fails closed.
     """
     if raw is None or raw == "":
         return {}
@@ -96,13 +69,6 @@ def _parse_namespaced_assets(raw: str | None) -> dict[str, dict[str, Path]]:
     for namespace, mapping in parsed.items():
         if not isinstance(namespace, str):
             raise _invalid(f"{ENV_ASSET_PATHS_JSON} keys must be strings.")
-        if isinstance(mapping, str):
-            # Legacy flat subset (``logical -> "/abs"``): delivered to this process
-            # via the fixed scalar envs, so it is ignored here. A string value under
-            # a non-logical key is ambiguous and fails closed.
-            if _LEGACY_ASSET_NAME_RE.fullmatch(namespace) is None:
-                raise _invalid(f"{ENV_ASSET_PATHS_JSON} has an ambiguous flat entry '{namespace}'.")
-            continue
         parts = namespace.split("/")
         if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
             raise _invalid(
@@ -131,16 +97,7 @@ class RemoteWorkerContext:
     dataset_root_space_net: Path
     label_space_root: Path
 
-    # Legacy ZoomSpec scalar assets. Retained optionally for the non-dispatched
-    # legacy executor (E2 owns deletion); NOT part of the generic readiness
-    # contract. ``None`` means the deployment is generic-only.
-    detector_checkpoint: Path | None = None
-    frn_checkpoint: Path | None = None
-    frozen_config_path: Path | None = None
-    ls_stft_normalization_path: Path | None = None
-    asset_manifest_path: Path | None = None
-
-    # D4 generic (additive, optional).
+    # Generic deployment configuration.
     manifest_root: Path | None = None
     asset_paths: Mapping[str, Mapping[str, Path]] = field(default_factory=dict)
     device_type: str = "cuda"
@@ -163,14 +120,6 @@ class RemoteWorkerContext:
             if not is_safe_remote_posix_path_text(value):
                 raise _invalid(f"{name} is not a safe absolute POSIX path.")
             return value
-
-        def _optional_posix(name: str) -> Path | None:
-            value = env.get(name, "")
-            if not value:
-                return None
-            if not is_safe_remote_posix_path_text(value):
-                raise _invalid(f"{name} is not a safe absolute POSIX path.")
-            return Path(value)
 
         repo_root_text = _require_posix(ENV_REPO_ROOT)
         job_root_text = _require_posix(ENV_JOB_ROOT)
@@ -218,14 +167,6 @@ class RemoteWorkerContext:
             required_runtime_commit=commit,
             dataset_root_space_net=Path(_require_posix(ENV_SPACENET_ROOT)),
             label_space_root=repo_root / "label_spaces",
-            detector_checkpoint=_optional_posix(ENV_DETECTOR_CHECKPOINT),
-            frn_checkpoint=_optional_posix(ENV_FRN_CHECKPOINT),
-            frozen_config_path=_optional_posix(ENV_FROZEN_CONFIG),
-            ls_stft_normalization_path=_optional_posix(ENV_LS_STFT_NORMALIZATION),
-            asset_manifest_path=(
-                repo_root / "backend" / "app" / "pipelines"
-                / "zoomspec_yolo26n_aug_combined_frn_v3" / "asset_manifest.json"
-            ),
             manifest_root=manifest_root,
             asset_paths=_parse_namespaced_assets(env.get(ENV_ASSET_PATHS_JSON)),
             device_type=device_type,

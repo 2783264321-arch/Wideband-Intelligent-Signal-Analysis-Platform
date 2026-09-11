@@ -53,12 +53,6 @@ def _profile(device_index: int = 0) -> RemoteProfile:
         remote_python_path=Path("/py"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": Path("/sn")},
-        asset_paths={
-            "detector_checkpoint": Path("/m/det.pt"),
-            "frn_checkpoint": Path("/m/frn.pt"),
-            "frozen_config": Path("/m/frozen_config.json"),
-            "ls_stft_normalization": Path("/m/norm.json"),
-        },
         device_index=device_index,
     )
 

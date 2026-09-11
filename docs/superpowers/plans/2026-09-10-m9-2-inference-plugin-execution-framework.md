@@ -1494,10 +1494,22 @@ The global single-manifest startup resolution
 (`main._resolve_remote_expected_manifest_sha256`) is removed. Release-less remote
 stays fail-closed. Legacy scalar fields remain E2 cleanup debt.
 
-**Post-cutover cleanup boundary:** D3B is the cutover point. Retiring the legacy
-ZoomSpec worker-context scalar env vars/fields (`required_worker_env_vars`
-semantics) is a **post-D3B cleanup/migration only**; D4/D5 must preserve them so
-the legacy `ZoomSpecRemoteItemExecutor` path keeps working until D3B lands.
+**E2A/E2B legacy retirement (implemented):** `ZoomSpecRemoteItemExecutor` +
+`zoomspec_executor.py` and its test were deleted (E2A); the generic
+`PluginItemExecutor` -> E1 `build_runtime` -> `_ZoomSpecRuntime` ->
+`publish_package` path replaces them. E2B then removed the legacy scalar remote
+asset deployment contract: `WSP_REMOTE_ASSET_PATHS_JSON` is
+generic-namespaced-only (flat ZoomSpec shape rejected fail-closed), the four
+`WSP_REMOTE_*` scalar asset env vars, `required_worker_env_vars` /
+`is_complete_worker_env`, `RemoteWorkerContext` legacy asset fields, and
+`RemoteProfile.asset_paths` are gone. Plugin logical asset names remain valid
+inside an AssetManifest namespace. Persisted M9.1 result compatibility and
+release-less fail-closed behavior are unchanged.
+
+**Post-cutover cleanup boundary (completed by E2B):** the legacy ZoomSpec
+worker-context scalar env vars/fields and `required_worker_env_vars` semantics
+were preserved through D4/D5/D3B and then retired by E2B (this file's E2B task),
+leaving one generic namespaced asset deployment language.
 
 **RED test (update `backend/tests/test_remote_runner_work_wiring.py`; add to `backend/tests/test_plugin_executor.py`):**
 

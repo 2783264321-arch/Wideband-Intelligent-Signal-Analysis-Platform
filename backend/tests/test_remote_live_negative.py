@@ -120,7 +120,6 @@ def test_missing_mapping_returns_transport_unavailable(client, tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit=RUN,
         dataset_roots={},
-        asset_paths={},
     )
     recorder = ProcessRecorder()
     transport = SshRunner(profile, run_process=recorder)

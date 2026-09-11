@@ -844,6 +844,19 @@ loading the plugin runtime. The global single-manifest startup assumption
 release-required plugins coexist. Release-less remote execution stays
 fail-closed (unchanged).
 
+**E2A/E2B legacy retirement (implemented).** `ZoomSpecRemoteItemExecutor` (and its
+module) was deleted (E2A); ZoomSpec is only a registered plugin. The legacy scalar
+remote asset deployment contract was then removed (E2B): `WSP_REMOTE_ASSET_PATHS_JSON`
+now accepts **only** the generic namespaced shape
+(`"<plugin_id>/<plugin_version>/<asset_manifest_sha256>" -> {logical: "/abs"}`); the
+flat ZoomSpec shape is rejected fail-closed, the four `WSP_REMOTE_*` scalar asset
+env vars and `required_worker_env_vars`/`is_complete_worker_env` are gone, and
+`RemoteProfile.asset_paths` no longer exists (only `generic_asset_paths`).
+Plugin-declared logical asset names (e.g. `detector_checkpoint`) remain valid
+*inside* an AssetManifest namespace; the platform no longer knows any plugin's
+specific asset list. Persisted M9.1 result compatibility (D5 legacy ingestion,
+historical canonical SHA) is untouched, and release-less remote stays fail-closed.
+
 The generic executor owns verification/orchestration; the plugin owns science.
 ZoomSpec becomes one registered plugin, not a special case. GroundTruth never
 reaches inference; request-controlled filesystem paths are never accepted. Remote

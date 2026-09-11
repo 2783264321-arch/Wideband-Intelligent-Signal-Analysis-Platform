@@ -14,7 +14,7 @@ from app.remote_execution.schema import (
     RemoteExecutionItemV1,
     RemoteRecordingRefV1,
 )
-from app.remote_execution.transport import RemoteTransportError, SshRunner
+from app.remote_execution.transport import RemoteTransportError, SshRunner, _shell_assignment
 
 
 def _ok(*, stdout="", stderr=""):
@@ -59,11 +59,12 @@ class EnvelopeOnlyRecorder:
         return _ok()
 
 
-_FULL_ASSETS = {
-    "detector_checkpoint": PurePosixPath("/root/models/best.pt"),
-    "frn_checkpoint": PurePosixPath("/root/models/frn.pt"),
-    "frozen_config": PurePosixPath("/root/models/frozen_config.json"),
-    "ls_stft_normalization": PurePosixPath("/root/models/ls_stft_normalization.json"),
+_GENERIC_NAMESPACE = "pipeline_x/1.0/" + "b" * 64
+_GENERIC_ASSETS = {
+    _GENERIC_NAMESPACE: {
+        "detector_checkpoint": PurePosixPath("/root/assets/det.pt"),
+        "frn_checkpoint": PurePosixPath("/root/assets/frn.pt"),
+    }
 }
 
 
@@ -84,7 +85,16 @@ def _profile(tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths=dict(_FULL_ASSETS),
+        manifest_root=PurePosixPath("/root/manifests"),
+        generic_asset_paths=dict(_GENERIC_ASSETS),
+    )
+
+
+def _generic_assets_json():
+    return json.dumps(
+        {ns: {name: path.as_posix() for name, path in mapping.items()}
+         for ns, mapping in _GENERIC_ASSETS.items()},
+        separators=(",", ":"), sort_keys=True,
     )
 
 
@@ -105,7 +115,8 @@ def _profile_env(tmp_path, monkeypatch, **overrides):
         "WSP_REMOTE_PYTHON_PATH": "/opt/wsp-runtime/bin/python",
         "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT": "a" * 40,
         "WSP_REMOTE_DATASET_ROOTS_JSON": json.dumps({"SpaceNet": "/root/autodl-tmp/SpaceNet_Dataset"}),
-        "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({k: v.as_posix() for k, v in _FULL_ASSETS.items()}),
+        "WSP_REMOTE_MANIFEST_ROOT": "/root/manifests",
+        "WSP_REMOTE_ASSET_PATHS_JSON": _generic_assets_json(),
     }
     env.update(overrides)
     for name, value in env.items():
@@ -166,7 +177,25 @@ def test_profile_loads_from_complete_env(tmp_path, monkeypatch, settings):
     assert profile.remote_repo_root == PurePosixPath("/root/repo")
     assert profile.remote_job_root == PurePosixPath("/root/jobs")
     assert profile.dataset_roots == {"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")}
-    assert profile.asset_paths == _FULL_ASSETS
+    assert profile.generic_asset_paths == _GENERIC_ASSETS
+    assert not hasattr(profile, "asset_paths")
+
+
+def test_profile_flat_asset_json_rejected(tmp_path, monkeypatch, settings):
+    flat = json.dumps({"detector_checkpoint": "/root/models/best.pt"})
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_ASSET_PATHS_JSON=flat)
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
+
+
+def test_profile_mixed_flat_and_namespaced_asset_json_rejected(tmp_path, monkeypatch, settings):
+    mixed = json.dumps({
+        "detector_checkpoint": "/root/models/best.pt",
+        _GENERIC_NAMESPACE: {"detector_checkpoint": "/root/assets/det.pt"},
+    })
+    with pytest.raises(PlatformError) as exc:
+        _load_profile(tmp_path, monkeypatch, settings, WSP_REMOTE_ASSET_PATHS_JSON=mixed)
+    assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
 
 
 def test_profile_missing_host_fails(tmp_path, monkeypatch, settings):
@@ -316,7 +345,7 @@ def test_ssh_runner_argv_env_prefix_uses_remote_repo_root(tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths=dict(_FULL_ASSETS),
+        generic_asset_paths=dict(_GENERIC_ASSETS),
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -393,7 +422,7 @@ def test_ssh_runner_argv_uses_custom_remote_python(tmp_path):
         remote_python_path=PurePosixPath("/srv/runtime/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths=dict(_FULL_ASSETS),
+        generic_asset_paths=dict(_GENERIC_ASSETS),
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -420,7 +449,7 @@ def test_ssh_runner_argv_uses_custom_job_root(tmp_path):
         remote_python_path=PurePosixPath("/opt/wsp-runtime/bin/python"),
         required_remote_runtime_commit="a" * 40,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths=dict(_FULL_ASSETS),
+        generic_asset_paths=dict(_GENERIC_ASSETS),
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -869,12 +898,13 @@ def test_probe_submit_work_argv_contain_full_scalar_worker_env(tmp_path, subcomm
         "WSP_REMOTE_PRECISION=float16",
         "WSP_REMOTE_ENVIRONMENT_REF=autodl_primary",
         "WSP_REMOTE_ENVIRONMENT_LABEL=autodl_primary",
-        "WSP_REMOTE_DETECTOR_CHECKPOINT=/root/models/best.pt",
-        "WSP_REMOTE_FRN_CHECKPOINT=/root/models/frn.pt",
-        "WSP_REMOTE_FROZEN_CONFIG=/root/models/frozen_config.json",
-        "WSP_REMOTE_LS_STFT_NORMALIZATION=/root/models/ls_stft_normalization.json",
+        "WSP_REMOTE_MANIFEST_ROOT=/root/manifests",
+        _shell_assignment("WSP_REMOTE_ASSET_PATHS_JSON", _generic_assets_json()),
     ]
     assert env_tokens == expected
+    for legacy in ("WSP_REMOTE_DETECTOR_CHECKPOINT", "WSP_REMOTE_FRN_CHECKPOINT",
+                   "WSP_REMOTE_FROZEN_CONFIG", "WSP_REMOTE_LS_STFT_NORMALIZATION"):
+        assert not any(t.startswith(legacy + "=") for t in env_tokens)
 
 
 def test_status_argv_contains_minimal_env_only(tmp_path):
@@ -888,10 +918,11 @@ def test_status_argv_contains_minimal_env_only(tmp_path):
         "PYTHONPATH=/root/repo/backend",
         "WSP_REMOTE_JOB_ROOT=/root/jobs",
     ]
-    for forbidden in ("WSP_REMOTE_SPACENET_ROOT", "WSP_REMOTE_DETECTOR_CHECKPOINT",
+    for forbidden in ("WSP_REMOTE_SPACENET_ROOT", "WSP_REMOTE_ASSET_PATHS_JSON",
+                      "WSP_REMOTE_MANIFEST_ROOT", "WSP_REMOTE_DETECTOR_CHECKPOINT",
                       "WSP_REMOTE_FRN_CHECKPOINT", "WSP_REMOTE_FROZEN_CONFIG",
                       "WSP_REMOTE_LS_STFT_NORMALIZATION"):
-        assert forbidden not in env_tokens
+        assert not any(t.startswith(forbidden + "=") for t in env_tokens)
 
 
 def test_status_invokes_ssh_with_missing_asset_mappings(tmp_path):
@@ -902,7 +933,7 @@ def test_status_invokes_ssh_with_missing_asset_mappings(tmp_path):
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={}, asset_paths={},
+        dataset_roots={},
     )
     recorder = ProcessRecorder()
     runner = SshRunner(profile, run_process=recorder)
@@ -924,7 +955,7 @@ def test_validate_runner_environment_zero_io(tmp_path):
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={}, asset_paths={},
+        dataset_roots={},
     )
     failing = SshRunner(empty, run_process=recorder)
     for subcommand in ("probe", "submit", "work"):
@@ -941,7 +972,7 @@ def test_validate_runner_environment_full_worker_for_probe_submit_work(tmp_path)
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={}, asset_paths={},
+        dataset_roots={},
     )
     runner = SshRunner(empty, run_process=ProcessRecorder())
     for subcommand in ("probe", "submit", "work"):
@@ -957,7 +988,7 @@ def test_validate_runner_environment_minimal_for_status(tmp_path):
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={}, asset_paths={},
+        dataset_roots={},
     )
     runner = SshRunner(empty, run_process=ProcessRecorder())
     runner.validate_runner_environment("status")  # must not raise
@@ -975,7 +1006,6 @@ def test_validate_runner_environment_without_legacy_assets_ok(tmp_path, subcomma
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths={},
         generic_asset_paths={
             "zoomspec_yolo26n_aug_combined_frn_v3/1.0.0/" + "b" * 64: {
                 "detector_checkpoint": PurePosixPath("/root/assets/det.pt")
@@ -997,7 +1027,6 @@ def test_generic_only_runner_env_prefix_omits_legacy_and_carries_generic(tmp_pat
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
         dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths={},
         generic_asset_paths={
             "zoomspec_yolo26n_aug_combined_frn_v3/1.0.0/" + "b" * 64: {
                 "detector_checkpoint": PurePosixPath("/root/assets/det.pt")
@@ -1023,7 +1052,6 @@ def test_run_runner_internally_validates_before_ssh(tmp_path):
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
         dataset_roots={},
-        asset_paths={},
     )
     recorder = ProcessRecorder()
     runner = SshRunner(missing_dataset, run_process=recorder)
@@ -1043,12 +1071,15 @@ def test_worker_env_values_round_trip(tmp_path):
     assert mapping["WSP_REMOTE_REPO_ROOT"] == profile.remote_repo_root.as_posix()
     assert mapping["WSP_REMOTE_JOB_ROOT"] == profile.remote_job_root.as_posix()
     assert mapping["WSP_REMOTE_SPACENET_ROOT"] == profile.dataset_roots["SpaceNet"].as_posix()
-    assert mapping["WSP_REMOTE_DETECTOR_CHECKPOINT"] == profile.asset_paths["detector_checkpoint"].as_posix()
-    assert mapping["WSP_REMOTE_FRN_CHECKPOINT"] == profile.asset_paths["frn_checkpoint"].as_posix()
-    assert mapping["WSP_REMOTE_FROZEN_CONFIG"] == profile.asset_paths["frozen_config"].as_posix()
-    assert mapping["WSP_REMOTE_LS_STFT_NORMALIZATION"] == profile.asset_paths["ls_stft_normalization"].as_posix()
+    assert mapping["WSP_REMOTE_MANIFEST_ROOT"] == profile.manifest_root.as_posix()
     assert mapping["WSP_REMOTE_REQUIRED_RUNTIME_COMMIT"] == profile.required_remote_runtime_commit
     assert mapping["PYTHONPATH"] == "/root/repo/backend"
+    asset_token = _assignment(env_tokens, "WSP_REMOTE_ASSET_PATHS_JSON")
+    namespaced = json.loads(_unquote_assignment(asset_token).split("=", 1)[1])
+    assert namespaced == {
+        ns: {name: path.as_posix() for name, path in paths.items()}
+        for ns, paths in profile.generic_asset_paths.items()
+    }
 
 
 @pytest.mark.parametrize("subcommand", ["probe", "submit"])
@@ -1060,7 +1091,7 @@ def test_missing_spacenet_mapping_fails_before_ssh(tmp_path, subcommand):
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={}, asset_paths={},
+        dataset_roots={},
     )
     recorder = ProcessRecorder()
     runner = SshRunner(empty, run_process=recorder)
@@ -1069,36 +1100,24 @@ def test_missing_spacenet_mapping_fails_before_ssh(tmp_path, subcommand):
     assert recorder.calls == []
 
 
-@pytest.mark.parametrize("missing", ["detector_checkpoint", "frn_checkpoint",
-                                     "frozen_config", "ls_stft_normalization"])
-def test_missing_legacy_asset_mapping_is_optional_and_not_forwarded(tmp_path, missing):
-    """D3B: a missing legacy flat asset is no longer a preflight failure and is
-    silently omitted from the legacy env bridge (generic assets are separate)."""
+@pytest.mark.parametrize("subcommand", ["probe", "submit", "work"])
+def test_legacy_asset_env_is_never_forwarded(tmp_path, subcommand):
+    """E2B: the four retired legacy scalar asset env vars are never emitted."""
     profile = _profile(tmp_path)
-    assets = dict(_FULL_ASSETS)
-    assets.pop(missing)
-    partial = RemoteProfile(
-        name=profile.name, host=profile.host, port=profile.port, user=profile.user,
-        ssh_key_path=profile.ssh_key_path, known_hosts_path=profile.known_hosts_path,
-        remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
-        remote_python_path=profile.remote_python_path,
-        required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths=assets,
-    )
     recorder = ProcessRecorder()
-    runner = SshRunner(partial, run_process=recorder)
-    runner.run_runner("probe")
-    assert len(recorder.calls) == 1
+    runner = SshRunner(profile, run_process=recorder)
+    if subcommand == "submit":
+        runner.run_runner("submit", ("--request-path", "/root/jobs/incoming/batch_x.request.json"))
+    elif subcommand == "work":
+        runner.run_runner("work", ("--batch-id", "batch_x", "--job-root", "/root/jobs/batch_x"))
+    else:
+        runner.run_runner("probe")
     argv, _ = recorder.calls[0]
     env_tokens = _full_env_tokens(argv)
-    env_name = {
-        "detector_checkpoint": "WSP_REMOTE_DETECTOR_CHECKPOINT",
-        "frn_checkpoint": "WSP_REMOTE_FRN_CHECKPOINT",
-        "frozen_config": "WSP_REMOTE_FROZEN_CONFIG",
-        "ls_stft_normalization": "WSP_REMOTE_LS_STFT_NORMALIZATION",
-    }[missing]
-    assert not any(t.startswith(env_name + "=") for t in env_tokens)
+    for legacy in ("WSP_REMOTE_DETECTOR_CHECKPOINT", "WSP_REMOTE_FRN_CHECKPOINT",
+                   "WSP_REMOTE_FROZEN_CONFIG", "WSP_REMOTE_LS_STFT_NORMALIZATION"):
+        assert not any(t.startswith(legacy + "=") for t in env_tokens)
+    assert any(t.split("=", 1)[0] == "WSP_REMOTE_ASSET_PATHS_JSON" for t in env_tokens)
 
 
 def test_no_config_details_leak_in_transport_errors(tmp_path):
@@ -1109,7 +1128,7 @@ def test_no_config_details_leak_in_transport_errors(tmp_path):
         remote_repo_root=profile.remote_repo_root, remote_job_root=profile.remote_job_root,
         remote_python_path=profile.remote_python_path,
         required_remote_runtime_commit=profile.required_remote_runtime_commit,
-        dataset_roots={}, asset_paths={},
+        dataset_roots={},
     )
     runner = SshRunner(empty, run_process=ProcessRecorder())
     with pytest.raises(RemoteTransportError) as exc:
@@ -1148,8 +1167,13 @@ def test_no_json_mapping_in_remote_command(tmp_path):
     runner.run_runner("probe")
     argv, _ = recorder.calls[0]
     joined = " ".join(argv)
+    # Dataset roots are never transported; the generic asset mapping is forwarded
+    # only as a shell env assignment (not as an argv token), and no legacy scalar
+    # asset env is emitted.
     assert "WSP_REMOTE_DATASET_ROOTS_JSON" not in joined
-    assert "WSP_REMOTE_ASSET_PATHS_JSON" not in joined
+    for legacy in ("WSP_REMOTE_DETECTOR_CHECKPOINT", "WSP_REMOTE_FRN_CHECKPOINT",
+                   "WSP_REMOTE_FROZEN_CONFIG", "WSP_REMOTE_LS_STFT_NORMALIZATION"):
+        assert legacy not in joined
 
 # ---------------------------------------------------------------------------
 # D4 — narrow optional generic config bridge (legacy preserved)
@@ -1197,7 +1221,9 @@ def test_runner_env_prefix_forwards_generic_namespaced_assets(tmp_path):
     }
 
 
-def test_runner_env_prefix_legacy_has_no_generic_env_but_carries_descriptor(tmp_path):
+def test_runner_env_prefix_without_generic_assets_omits_asset_json(tmp_path):
+    import dataclasses
+
     from app.remote_execution.transport import SshRunner
     from app.remote_execution.worker_context import (
         ENV_ASSET_PATHS_JSON,
@@ -1206,7 +1232,8 @@ def test_runner_env_prefix_legacy_has_no_generic_env_but_carries_descriptor(tmp_
         ENV_MANIFEST_ROOT,
     )
 
-    prefix = SshRunner(_profile(tmp_path))._runner_env_prefix(
+    profile = dataclasses.replace(_profile(tmp_path), generic_asset_paths={}, manifest_root=None)
+    prefix = SshRunner(profile)._runner_env_prefix(
         "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
     )
     assert not any(p.startswith(ENV_ASSET_PATHS_JSON + "=") for p in prefix)
@@ -1215,7 +1242,7 @@ def test_runner_env_prefix_legacy_has_no_generic_env_but_carries_descriptor(tmp_
     assert f"{ENV_ENVIRONMENT_LABEL}=autodl_primary" in prefix
 
 
-def test_runner_env_prefix_legacy_and_generic_coexist(tmp_path):
+def test_runner_env_prefix_multi_namespace_generic_roundtrip(tmp_path):
     import dataclasses
     import json
 
@@ -1223,19 +1250,25 @@ def test_runner_env_prefix_legacy_and_generic_coexist(tmp_path):
     from app.remote_execution.worker_context import ENV_ASSET_PATHS_JSON
 
     namespace = "p/1.0.0/" + "b" * 64
+    ns_two = "q/2.0/" + "c" * 64
     profile = dataclasses.replace(
         _profile(tmp_path),
         manifest_root=PurePosixPath("/root/manifests"),
-        generic_asset_paths={namespace: {"w": PurePosixPath("/root/assets/w.pt")}},
+        generic_asset_paths={
+            namespace: {"w": PurePosixPath("/root/assets/w.pt")},
+            ns_two: {"a": PurePosixPath("/root/assets/a.pt"), "b": PurePosixPath("/root/assets/b.pt")},
+        },
     )
     prefix = SshRunner(profile)._runner_env_prefix(
         "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
     )
-    assert "WSP_REMOTE_DETECTOR_CHECKPOINT=/root/models/best.pt" in prefix
     namespaced = json.loads(
         _unquote_assignment(_assignment(prefix, ENV_ASSET_PATHS_JSON)).split("=", 1)[1]
     )
-    assert namespaced == {namespace: {"w": "/root/assets/w.pt"}}
+    assert namespaced == {
+        namespace: {"w": "/root/assets/w.pt"},
+        ns_two: {"a": "/root/assets/a.pt", "b": "/root/assets/b.pt"},
+    }
     runner = SshRunner(profile, run_process=ProcessRecorder())
     runner.validate_runner_environment("work")
 

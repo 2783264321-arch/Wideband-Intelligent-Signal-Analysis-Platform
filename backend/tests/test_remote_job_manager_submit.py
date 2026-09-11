@@ -31,11 +31,12 @@ from app.remote_execution.transport import SshRunner
 
 RUNTIME_COMMIT = "9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c"
 
-_FULL_ASSETS = {
-    "detector_checkpoint": PurePosixPath("/root/models/best.pt"),
-    "frn_checkpoint": PurePosixPath("/root/models/frn.pt"),
-    "frozen_config": PurePosixPath("/root/models/frozen_config.json"),
-    "ls_stft_normalization": PurePosixPath("/root/models/ls_stft_normalization.json"),
+_GENERIC_NAMESPACE = "pipeline_x/1.0/" + "b" * 64
+_GENERIC_ASSETS = {
+    _GENERIC_NAMESPACE: {
+        "detector_checkpoint": PurePosixPath("/root/assets/det.pt"),
+        "frn_checkpoint": PurePosixPath("/root/assets/frn.pt"),
+    }
 }
 
 
@@ -55,7 +56,7 @@ class ProcessRecorder:
         return _ok()
 
 
-def _profile(tmp_path, *, dataset_roots=None, asset_paths=None):
+def _profile(tmp_path, *, dataset_roots=None, generic_asset_paths=None):
     key = tmp_path / "id_ed25519"
     key.write_bytes(b"key")
     hosts = tmp_path / "known_hosts"
@@ -73,7 +74,9 @@ def _profile(tmp_path, *, dataset_roots=None, asset_paths=None):
         required_remote_runtime_commit=RUNTIME_COMMIT,
         dataset_roots=dataset_roots if dataset_roots is not None
         else {"SpaceNet": PurePosixPath("/root/autodl-tmp/SpaceNet_Dataset")},
-        asset_paths=asset_paths if asset_paths is not None else dict(_FULL_ASSETS),
+        generic_asset_paths=(
+            generic_asset_paths if generic_asset_paths is not None else dict(_GENERIC_ASSETS)
+        ),
     )
 
 
@@ -143,7 +146,7 @@ def test_submit_missing_spacenet_root_zero_io(tmp_path):
     """D3B: the four legacy flat assets are optional; the SpaceNet dataset root
     mapping is the remaining full-worker preflight requirement."""
     recorder = ProcessRecorder()
-    profile = _profile(tmp_path, dataset_roots={}, asset_paths=dict(_FULL_ASSETS))
+    profile = _profile(tmp_path, dataset_roots={})
     manager = RemoteGpuJobManager(profile, SshRunner(profile, run_process=recorder))
     batch = _batch()
     with pytest.raises(PlatformError) as exc:
@@ -155,7 +158,7 @@ def test_submit_missing_spacenet_root_zero_io(tmp_path):
 def test_submit_preflight_transport_error_maps_to_platform_error(tmp_path):
     """Preflight raising RemoteTransportError must be mapped to a PlatformError
     inside submit so the Coordinator never receives a raw RemoteTransportError."""
-    profile = _profile(tmp_path, dataset_roots={}, asset_paths={})
+    profile = _profile(tmp_path, dataset_roots={})
     transport = SshRunner(profile, run_process=ProcessRecorder())
     manager = RemoteGpuJobManager(profile, transport)
     batch = _batch()
@@ -210,7 +213,7 @@ def test_status_still_works_with_missing_scientific_mappings(tmp_path):
             "items": [{"item_key": "000000", "status": "running"}],
         })),
     ])
-    profile = _profile(tmp_path, dataset_roots={}, asset_paths={})
+    profile = _profile(tmp_path, dataset_roots={})
     manager = RemoteGpuJobManager(profile, SshRunner(profile, run_process=recorder))
     status = manager.status("batch_x")
     assert isinstance(status, RemoteBatchStatusV1)
@@ -224,7 +227,7 @@ def test_probe_missing_mapping_returns_transport_unavailable(tmp_path):
     from app.pipelines.base import PipelineDefinition
     from types import SimpleNamespace
 
-    profile = _profile(tmp_path, dataset_roots={}, asset_paths={})
+    profile = _profile(tmp_path, dataset_roots={})
     recorder = ProcessRecorder()
     transport = SshRunner(profile, run_process=recorder)
     probe = SshRemoteExecutorProbe(

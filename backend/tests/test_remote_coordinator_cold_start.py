@@ -94,7 +94,11 @@ def _child_env(tmp_path: Path, database_url: str) -> dict[str, str]:
         "WSP_REMOTE_PYTHON_PATH": "/opt/wsp-runtime/bin/python",
         "WSP_REMOTE_REQUIRED_RUNTIME_COMMIT": RUNTIME,
         "WSP_REMOTE_DATASET_ROOTS_JSON": json.dumps({"SpaceNet": "/root/autodl-tmp/SpaceNet_Dataset"}),
-        "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({"detector_checkpoint": "/root/models/best.pt"}),
+        "WSP_REMOTE_ASSET_PATHS_JSON": json.dumps({
+            "zoomspec_yolo26n_aug_combined_frn_v3/1.0.0/" + "b" * 64: {
+                "detector_checkpoint": "/root/models/best.pt"
+            }
+        }),
     }
     return env
 

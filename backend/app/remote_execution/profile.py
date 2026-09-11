@@ -116,54 +116,46 @@ def _safe_posix_mapping(value: str | None, name: str) -> dict[str, PurePosixPath
     return result
 
 
-def _parse_asset_paths(raw: str | None) -> tuple[dict[str, PurePosixPath], dict[str, dict[str, PurePosixPath]]]:
-    """Partition ``WSP_REMOTE_ASSET_PATHS_JSON`` into legacy + generic subsets.
+def _parse_generic_asset_paths(raw: str | None) -> dict[str, dict[str, PurePosixPath]]:
+    """Parse ``WSP_REMOTE_ASSET_PATHS_JSON`` (generic namespaced shape ONLY).
 
-    A single top-level object MAY contain both: legacy ``logical -> "/abs/path"``
-    string entries and generic ``"<plugin>/<version>/<sha>" -> {logical: "/abs"}``
-    object entries. Entries are partitioned deterministically; malformed or
-    ambiguous entries fail closed.
+    Shape: ``{"<plugin_id>/<plugin_version>/<sha256>": {"<logical>": "/abs/path"}}``.
+    The retired legacy flat ZoomSpec shape (``"logical": "/abs"``) is rejected
+    fail-closed; accepting it would create false deployment readiness now that no
+    legacy executor consumes it.
     """
     if raw is None or raw == "":
-        return {}, {}
+        return {}
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
         raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON is not valid JSON.")
     if not isinstance(parsed, dict):
         raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON must be a JSON object.")
-    flat: dict[str, PurePosixPath] = {}
     generic: dict[str, dict[str, PurePosixPath]] = {}
     for key, value in parsed.items():
         if not isinstance(key, str) or not key:
             raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON keys must be non-empty strings.")
-        if isinstance(value, str):
-            _safe_identifier(key, "WSP_REMOTE_ASSET_PATHS_JSON legacy key")
-            flat[key] = _safe_posix_root(value, f"WSP_REMOTE_ASSET_PATHS_JSON[{key}]")
-        elif isinstance(value, dict):
-            parts = key.split("/")
-            if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
-                raise _unavailable(
-                    "WSP_REMOTE_ASSET_PATHS_JSON generic key must be "
-                    "'<plugin_id>/<plugin_version>/<sha256>'."
-                )
-            if not value:
-                raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] must be a non-empty object.")
-            logical: dict[str, PurePosixPath] = {}
-            for logical_name, path_text in value.items():
-                if not isinstance(logical_name, str) or _IDENTIFIER_RE.fullmatch(logical_name) is None:
-                    raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] has an invalid logical name.")
-                if not isinstance(path_text, str):
-                    raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}] must be a string.")
-                logical[logical_name] = _safe_posix_root(
-                    path_text, f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}]"
-                )
-            generic[key] = logical
-        else:
+        parts = key.split("/")
+        if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
             raise _unavailable(
-                "WSP_REMOTE_ASSET_PATHS_JSON entries must be a string (legacy) or object (generic)."
+                "WSP_REMOTE_ASSET_PATHS_JSON key must be '<plugin_id>/<plugin_version>/<sha256>'."
             )
-    return flat, generic
+        if not isinstance(value, dict):
+            raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] must be an object.")
+        if not value:
+            raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] must be a non-empty object.")
+        logical: dict[str, PurePosixPath] = {}
+        for logical_name, path_text in value.items():
+            if not isinstance(logical_name, str) or _IDENTIFIER_RE.fullmatch(logical_name) is None:
+                raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] has an invalid logical name.")
+            if not isinstance(path_text, str):
+                raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}] must be a string.")
+            logical[logical_name] = _safe_posix_root(
+                path_text, f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}]"
+            )
+        generic[key] = logical
+    return generic
 
 
 @dataclass(frozen=True)
@@ -182,9 +174,8 @@ class RemoteProfile:
     required_remote_runtime_commit: str
 
     dataset_roots: dict[str, PurePosixPath]
-    asset_paths: dict[str, PurePosixPath]
 
-    # D4 generic (additive, optional).
+    # Generic namespaced asset mapping only (D4/E2B).
     manifest_root: PurePosixPath | None = None
     generic_asset_paths: dict[str, dict[str, PurePosixPath]] = field(default_factory=dict)
     device_type: str = "cuda"
@@ -247,7 +238,7 @@ class RemoteProfile:
         required_remote_runtime_commit = _require_runtime_commit(_get("WSP_REMOTE_REQUIRED_RUNTIME_COMMIT"))
 
         dataset_roots = _safe_posix_mapping(env.get("WSP_REMOTE_DATASET_ROOTS_JSON"), "WSP_REMOTE_DATASET_ROOTS_JSON")
-        asset_paths, generic_asset_paths = _parse_asset_paths(env.get("WSP_REMOTE_ASSET_PATHS_JSON"))
+        generic_asset_paths = _parse_generic_asset_paths(env.get("WSP_REMOTE_ASSET_PATHS_JSON"))
 
         manifest_root_text = env.get("WSP_REMOTE_MANIFEST_ROOT", "")
         manifest_root = (
@@ -280,7 +271,6 @@ class RemoteProfile:
             remote_python_path=remote_python_path,
             required_remote_runtime_commit=required_remote_runtime_commit,
             dataset_roots=dataset_roots,
-            asset_paths=asset_paths,
             manifest_root=manifest_root,
             generic_asset_paths=generic_asset_paths,
             device_type=device_type,

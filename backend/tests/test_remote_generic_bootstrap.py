@@ -220,7 +220,6 @@ def _profile():
         remote_repo_root=Path("/repo"), remote_job_root=Path("/jobs"),
         remote_python_path=Path("/py"), required_remote_runtime_commit=RUNTIME_COMMIT,
         dataset_roots={"SpaceNet": Path("/sn")},
-        asset_paths={},
         generic_asset_paths={"plugin_a/1.0/" + "a" * 64: {"w": Path("/assets/w.pt")}},
     )
 

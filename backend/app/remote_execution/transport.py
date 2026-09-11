@@ -17,15 +17,11 @@ from app.core.errors import PlatformError
 from app.remote_execution.profile import RemoteProfile, is_safe_remote_posix_path_text
 from app.remote_execution.worker_context import (
     ENV_ASSET_PATHS_JSON,
-    ENV_DETECTOR_CHECKPOINT,
     ENV_DEVICE_INDEX,
     ENV_DEVICE_TYPE,
     ENV_ENVIRONMENT_LABEL,
     ENV_ENVIRONMENT_REF,
-    ENV_FRN_CHECKPOINT,
-    ENV_FROZEN_CONFIG,
     ENV_JOB_ROOT,
-    ENV_LS_STFT_NORMALIZATION,
     ENV_MANIFEST_ROOT,
     ENV_PRECISION,
     ENV_REPO_ROOT,
@@ -36,12 +32,6 @@ from app.remote_execution.worker_context import (
 _RUNNER_COMMANDS = ("probe", "submit", "status", "work")
 _FULL_WORKER_ENV_SUBCOMMANDS = ("probe", "submit", "work")
 _REQUIRED_DATASET_LOGICAL_KEYS = ("SpaceNet",)
-_LEGACY_ASSET_ENV_NAMES = (
-    ("detector_checkpoint", ENV_DETECTOR_CHECKPOINT),
-    ("frn_checkpoint", ENV_FRN_CHECKPOINT),
-    ("frozen_config", ENV_FROZEN_CONFIG),
-    ("ls_stft_normalization", ENV_LS_STFT_NORMALIZATION),
-)
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
 _FLAG_RE = re.compile(r"^--[A-Za-z0-9_-]+$")
 _RUNNER_ERROR_RE = re.compile(r"^([A-Z][A-Z0-9_]{1,63}): (.+)$")
@@ -228,14 +218,8 @@ class SshRunner:
                 _shell_assignment(ENV_ENVIRONMENT_LABEL, self.profile.name),
             ]
         )
-        # Legacy ZoomSpec flat assets are optional; generic deployments carry only
-        # the namespaced subset below. Forward them only when configured.
-        for logical_name, env_name in _LEGACY_ASSET_ENV_NAMES:
-            legacy_path = self.profile.asset_paths.get(logical_name)
-            if legacy_path is not None:
-                prefix.append(_shell_assignment(env_name, legacy_path.as_posix()))
-        # D4 (additive): forward optional generic namespaced assets as compact,
-        # shell-quoted JSON. Legacy scalar envs above are unchanged.
+        # Forward the generic namespaced asset mapping as compact, shell-quoted
+        # JSON. This is the ONLY remote asset deployment language.
         if self.profile.generic_asset_paths:
             if self.profile.manifest_root is not None:
                 prefix.append(_shell_assignment(ENV_MANIFEST_ROOT, self.profile.manifest_root.as_posix()))
