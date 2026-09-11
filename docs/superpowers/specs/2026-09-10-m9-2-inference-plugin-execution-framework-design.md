@@ -706,13 +706,28 @@ credentials are never exposed.
 
 ### 11.4 Remote asset + runtime context and trusted path mapping
 
-`RemoteWorkerContext` is generalized:
+`RemoteWorkerContext` is generalized **additively** by D4; the production
+`runner._cli_work` cutover is D3B, so the legacy path must remain intact during the
+transition:
 
-- required fields become `repo_root`, `job_root`, `required_runtime_commit`,
-  `manifest_root`, and an **asset path configuration** validated as absolute
-  safe POSIX paths;
-- the fixed four ZoomSpec env-var names are replaced by plugin-declared logical
-  asset names resolved through the asset path configuration;
+- it gains `repo_root`, `job_root`, `required_runtime_commit`, a `manifest_root`,
+  and an **asset path configuration** validated as absolute safe POSIX paths,
+  namespaced by `(plugin_id, plugin_version, asset_manifest_sha256)`;
+- generic plugin-declared logical asset names are resolved through that namespaced
+  configuration. Generic resolution MUST NOT read the legacy ZoomSpec-specific
+  fields (`detector_checkpoint`, `frn_checkpoint`, `frozen_config`,
+  `ls_stft_normalization`) as plugin knowledge;
+- the **legacy ZoomSpec scalar env vars/fields are preserved during the D4
+  transition**, so a legacy-only worker configuration that still drives the
+  current `ZoomSpecRemoteItemExecutor` (`runner._cli_work`) keeps constructing and
+  executing until D3B. They are retired only by an explicit post-D3B
+  cleanup/migration;
+- generic trusted-asset/runtime APIs MUST fail closed (`REMOTE_WORKER_CONTEXT_INVALID`)
+  when their own generic configuration is absent or invalid; they MUST NOT
+  silently fall back to legacy ZoomSpec fields;
+- D4 MUST NOT modify `runner._cli_work` or switch production dispatch (D3B owns
+  that); separate generic readiness/config-completeness helpers may be added
+  without changing the legacy required-env semantics prematurely;
 - it still carries **no** SSH/credential reference and no request-controlled
   path;
 - parsing still fails closed on any missing/unsafe field.

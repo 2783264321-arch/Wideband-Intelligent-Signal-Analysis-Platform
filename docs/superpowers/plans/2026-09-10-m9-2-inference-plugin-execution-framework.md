@@ -89,7 +89,7 @@
 | `backend/app/analysis/service.py` | C/D | parameter validation, input compatibility, capability dispatch, resolved release |
 | `backend/app/remote_execution/validation.py` | C | label validation via `resolved_output_label_space` |
 | `backend/app/remote_execution/probe.py` | D | descriptor-driven readiness |
-| `backend/app/remote_execution/worker_context.py` | D | namespaced trusted asset mapping |
+| `backend/app/remote_execution/worker_context.py` | D | namespaced trusted asset mapping (additive; legacy fields preserved until D3B) |
 | `backend/app/remote_execution/package_publisher.py` | D | generic definition + descriptor projection |
 | `backend/app/remote_execution/result_ingestor.py` | D | validate against persisted descriptor projection |
 | `backend/app/remote_execution/runner.py` | D | registry seam in `_cli_work` only |
@@ -1354,28 +1354,47 @@ D4 MUST NOT switch `runner._cli_work` (that is D3B).
 - `backend/app/remote_execution/profile.py` (`asset_paths`).
 - `backend/app/remote_execution/assets.py` (`verify_asset_manifest`).
 
-**Interfaces:**
-- `worker_context`: replace the four fixed asset env vars with `WSP_REMOTE_REPO_ROOT`, `WSP_REMOTE_JOB_ROOT`, `WSP_REMOTE_REQUIRED_RUNTIME_COMMIT`, `WSP_REMOTE_MANIFEST_ROOT`, and `WSP_REMOTE_ASSET_PATHS_JSON`. The JSON mapping is namespaced:
+**Interfaces (ADDITIVE; the runner cutover is D3B, not D4):**
+- `worker_context`: ADD generic fields — `manifest_root` plus a namespaced asset
+  path configuration read from `WSP_REMOTE_MANIFEST_ROOT` +
+  `WSP_REMOTE_ASSET_PATHS_JSON`. The JSON mapping is namespaced:
 
 ```json
 { "<plugin_id>/<plugin_version>/<asset_manifest_sha256>": {
     "<logical_asset_name>": "/abs/safe/posix/path" } }
 ```
 
-All paths validated with the existing `is_safe_remote_posix_path_text`; unknown/missing entries fail closed with `REMOTE_WORKER_CONTEXT_INVALID`.
-- `probe.py`: accept a `RuntimeDescriptor`; assert `device_type == "cpu"` is ready only after interpreter/deps probe, and for `cuda` verify `torch.cuda` device `device_index`. Remove `_DEVICE_INDEX = 0` literal.
+All paths validated with `is_safe_remote_posix_path_text`; unknown/missing generic
+entries fail closed with `REMOTE_WORKER_CONTEXT_INVALID`.
+- **Preserve the legacy ZoomSpec scalar env vars/fields**
+  (`detector_checkpoint`, `frn_checkpoint`, `frozen_config`,
+  `ls_stft_normalization`, `asset_manifest_path`) and the existing
+  `required_worker_env_vars` semantics until D3B or an explicit post-cutover
+  cleanup. A legacy-only worker configuration that still drives the current
+  `ZoomSpecRemoteItemExecutor` MUST still construct and execute.
+- Generic asset resolution MUST NOT read the legacy ZoomSpec fields as plugin
+  knowledge and MUST NOT fall back to them when generic configuration is
+  absent/invalid — it fails closed instead. Add a separate generic
+  readiness/config-completeness helper if needed rather than changing legacy
+  required-env semantics.
+- `probe.py`: accept a `RuntimeDescriptor`; assert `device_type == "cpu"` is ready
+  only after interpreter/deps probe, and for `cuda` verify `torch.cuda` device
+  `device_index`. Remove `_DEVICE_INDEX = 0` literal.
+- **D4 MUST NOT modify `runner._cli_work`** (that is D3B).
 
 **RED test (update `test_remote_worker_context.py`, `test_remote_probe.py`):**
 
 ```python
+def test_legacy_worker_context_still_constructs(): ...          # before D3B
 def test_namespaced_asset_mapping_lookup(): ...
 def test_unknown_asset_namespace_fails_closed(): ...
+def test_generic_resolution_does_not_fall_back_to_legacy_fields(): ...
 def test_unsafe_path_rejected(): ...
 def test_probe_uses_descriptor_device_index(): ...
 def test_probe_cpu_requires_interpreter_check(): ...
 ```
 
-**Expected failure (RED):** fixed env names; probe device 0.
+**Expected failure (RED):** generic namespaced fields/descriptor probe missing.
 
 **GREEN command:**
 ```bash
@@ -1443,6 +1462,11 @@ remote production path remains the active path.
 - No concrete plugin-id branches or ZoomSpec constants remain in the runner work
   path; the ZoomSpec remote run now flows through the generic executor unchanged
   scientifically.
+
+**Post-cutover cleanup boundary:** D3B is the cutover point. Retiring the legacy
+ZoomSpec worker-context scalar env vars/fields (`required_worker_env_vars`
+semantics) is a **post-D3B cleanup/migration only**; D4/D5 must preserve them so
+the legacy `ZoomSpecRemoteItemExecutor` path keeps working until D3B lands.
 
 **RED test (update `backend/tests/test_remote_runner_work_wiring.py`; add to `backend/tests/test_plugin_executor.py`):**
 
