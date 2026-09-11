@@ -8,17 +8,23 @@ trusted absolute POSIX paths may appear in SSH/SCP argv.
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+import json
 import re
 import subprocess
 
 from app.core.errors import PlatformError
 from app.remote_execution.profile import RemoteProfile, is_safe_remote_posix_path_text
 from app.remote_execution.worker_context import (
+    ENV_ASSET_PATHS_JSON,
     ENV_DETECTOR_CHECKPOINT,
+    ENV_DEVICE_INDEX,
+    ENV_DEVICE_TYPE,
     ENV_FRN_CHECKPOINT,
     ENV_FROZEN_CONFIG,
     ENV_JOB_ROOT,
     ENV_LS_STFT_NORMALIZATION,
+    ENV_MANIFEST_ROOT,
+    ENV_PRECISION,
     ENV_REPO_ROOT,
     ENV_REQUIRED_RUNTIME_COMMIT,
     ENV_SPACENET_ROOT,
@@ -204,6 +210,21 @@ class SshRunner:
                 f"{ENV_LS_STFT_NORMALIZATION}={self.profile.asset_paths['ls_stft_normalization'].as_posix()}",
             ]
         )
+        # D4 (additive): forward optional generic namespaced assets + the
+        # deployment-owned descriptor fields when the profile carries them.
+        if self.profile.generic_asset_paths:
+            if self.profile.manifest_root is not None:
+                prefix.append(f"{ENV_MANIFEST_ROOT}={self.profile.manifest_root.as_posix()}")
+            namespaced = {
+                namespace: {
+                    logical: path.as_posix() for logical, path in mapping.items()
+                }
+                for namespace, mapping in self.profile.generic_asset_paths.items()
+            }
+            prefix.append(f"{ENV_ASSET_PATHS_JSON}={json.dumps(namespaced, sort_keys=True)}")
+            prefix.append(f"{ENV_DEVICE_TYPE}={self.profile.device_type}")
+            prefix.append(f"{ENV_DEVICE_INDEX}={self.profile.device_index}")
+            prefix.append(f"{ENV_PRECISION}={self.profile.precision}")
         return prefix
 
     def run_runner(

@@ -1103,3 +1103,45 @@ def test_no_json_mapping_in_remote_command(tmp_path):
     joined = " ".join(argv)
     assert "WSP_REMOTE_DATASET_ROOTS_JSON" not in joined
     assert "WSP_REMOTE_ASSET_PATHS_JSON" not in joined
+
+# ---------------------------------------------------------------------------
+# D4 — narrow optional generic config bridge (legacy preserved)
+# ---------------------------------------------------------------------------
+
+
+def test_runner_env_prefix_forwards_generic_namespaced_assets(tmp_path):
+    import dataclasses
+    import json
+
+    from app.remote_execution.transport import SshRunner
+    from app.remote_execution.worker_context import (
+        ENV_ASSET_PATHS_JSON,
+        ENV_DEVICE_INDEX,
+        ENV_MANIFEST_ROOT,
+    )
+
+    namespace = "p/1.0.0/" + "b" * 64
+    profile = dataclasses.replace(
+        _profile(tmp_path),
+        manifest_root=PurePosixPath("/root/manifests"),
+        generic_asset_paths={namespace: {"w": PurePosixPath("/root/assets/w.pt")}},
+        device_index=1,
+    )
+    prefix = SshRunner(profile)._runner_env_prefix(
+        "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
+    )
+    assert f"{ENV_MANIFEST_ROOT}=/root/manifests" in prefix
+    assert f"{ENV_DEVICE_INDEX}=1" in prefix
+    asset_line = next(p for p in prefix if p.startswith(ENV_ASSET_PATHS_JSON + "="))
+    assert json.loads(asset_line.split("=", 1)[1]) == {namespace: {"w": "/root/assets/w.pt"}}
+
+
+def test_runner_env_prefix_legacy_has_no_generic_env(tmp_path):
+    from app.remote_execution.transport import SshRunner
+    from app.remote_execution.worker_context import ENV_ASSET_PATHS_JSON, ENV_MANIFEST_ROOT
+
+    prefix = SshRunner(_profile(tmp_path))._runner_env_prefix(
+        "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
+    )
+    assert not any(p.startswith(ENV_ASSET_PATHS_JSON + "=") for p in prefix)
+    assert not any(p.startswith(ENV_MANIFEST_ROOT + "=") for p in prefix)

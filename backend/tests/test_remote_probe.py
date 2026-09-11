@@ -22,6 +22,7 @@ from app.remote_execution.assets import (
     compute_asset_manifest_sha256,
 )
 from app.remote_execution.runner import _cli_probe
+from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.schema import RemoteProbeResponseV1
 from app.remote_execution.worker_context import RemoteWorkerContext
 
@@ -150,7 +151,7 @@ def _write_real_deployment(tmp_path: Path, monkeypatch, *, tamper_asset=None):
 
 def test_probe_success_returns_exact_response(tmp_path, monkeypatch):
     worker, manifest = _write_real_deployment(tmp_path, monkeypatch)
-    response = probe_module.run_probe(worker, torch_import=FakeTorch)
+    response = probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert isinstance(response, RemoteProbeResponseV1)
     assert response.schema_version == 1
     assert response.status == "available"
@@ -174,7 +175,7 @@ def test_probe_runtime_commit_mismatch_fails(tmp_path, monkeypatch):
     worker, _ = _write_real_deployment(tmp_path, monkeypatch)
     monkeypatch.setattr("subprocess.run", _fake_git_bad_commit)
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=FakeTorch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert exc.value.code == "REMOTE_IMPLEMENTATION_MISMATCH"
 
 
@@ -184,7 +185,7 @@ def test_probe_asset_manifest_self_hash_mismatch_fails(tmp_path, monkeypatch):
     tampered["pipeline_version"] = "9.9.9"
     worker.asset_manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=FakeTorch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
 
 
@@ -193,7 +194,7 @@ def test_probe_asset_manifest_self_hash_mismatch_fails(tmp_path, monkeypatch):
 def test_probe_asset_byte_mismatch_fails(tmp_path, monkeypatch, asset):
     worker, _ = _write_real_deployment(tmp_path, monkeypatch, tamper_asset=asset)
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=FakeTorch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
 
 
@@ -201,7 +202,7 @@ def test_probe_missing_dataset_root_fails(tmp_path, monkeypatch):
     worker, _ = _write_real_deployment(tmp_path, monkeypatch)
     worker.dataset_root_space_net.rmdir()
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=FakeTorch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert exc.value.code == "REMOTE_PROBE_UNAVAILABLE"
 
 
@@ -209,7 +210,7 @@ def test_probe_label_space_unavailable_fails(tmp_path, monkeypatch):
     worker, _ = _write_real_deployment(tmp_path, monkeypatch)
     (worker.label_space_root / "spacenet_14.json").unlink()
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=FakeTorch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert exc.value.code == "LABEL_SPACE_NOT_FOUND"
 
 
@@ -222,7 +223,7 @@ def test_probe_cuda_unavailable_fails(tmp_path, monkeypatch):
     class NoCudaTorch:
         cuda = NoCuda
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=NoCudaTorch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=NoCudaTorch)
     assert exc.value.code == "REMOTE_PROBE_UNAVAILABLE"
 
 
@@ -235,7 +236,7 @@ def test_probe_device_zero_missing_fails(tmp_path, monkeypatch):
     class NoDevice0Torch:
         cuda = NoDevice0
     with pytest.raises(PlatformError) as exc:
-        probe_module.run_probe(worker, torch_import=NoDevice0Torch)
+        probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=NoDevice0Torch)
     assert exc.value.code == "REMOTE_PROBE_UNAVAILABLE"
 
 
@@ -251,7 +252,7 @@ def test_probe_does_not_instantiate_or_load_models(tmp_path, monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
-    response = probe_module.run_probe(worker, torch_import=FakeTorch)
+    response = probe_module.run_probe(worker, descriptor=worker.runtime_descriptor(), torch_import=FakeTorch)
     assert response.status == "available"
 
 
@@ -265,3 +266,30 @@ def test_runner_module_import_does_not_import_torch_or_ultralytics():
     env["PYTHONPATH"] = BACKEND_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
+
+# ---------------------------------------------------------------------------
+# D4 — descriptor-driven readiness
+# ---------------------------------------------------------------------------
+
+
+def test_probe_uses_descriptor_device_index(tmp_path, monkeypatch):
+    worker, _ = _write_real_deployment(tmp_path, monkeypatch)
+    descriptor = RuntimeDescriptor("remote_gpu", "cuda", 0, "float16")
+    response = probe_module.run_probe(worker, descriptor=descriptor, torch_import=FakeTorch)
+    assert response.device == 0
+
+
+def test_probe_cpu_descriptor_skips_cuda(tmp_path, monkeypatch):
+    worker, _ = _write_real_deployment(tmp_path, monkeypatch)
+
+    class NoCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class NoCudaTorch:
+        cuda = NoCuda
+
+    descriptor = RuntimeDescriptor("remote_gpu", "cpu", None, "float32")
+    response = probe_module.run_probe(worker, descriptor=descriptor, torch_import=NoCudaTorch)
+    assert response.status == "available"

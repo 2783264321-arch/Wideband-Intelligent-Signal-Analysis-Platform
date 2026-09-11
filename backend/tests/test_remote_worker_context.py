@@ -8,17 +8,21 @@ or unsafe scalar field. No GPU, no filesystem I/O.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.errors import PlatformError
 from app.remote_execution.worker_context import (
+    ENV_ASSET_PATHS_JSON,
     ENV_DETECTOR_CHECKPOINT,
     ENV_FRN_CHECKPOINT,
     ENV_FROZEN_CONFIG,
     ENV_JOB_ROOT,
     ENV_LS_STFT_NORMALIZATION,
+    ENV_MANIFEST_ROOT,
     ENV_REPO_ROOT,
     ENV_REQUIRED_RUNTIME_COMMIT,
     ENV_SPACENET_ROOT,
@@ -173,3 +177,80 @@ def test_is_complete_worker_env_missing_false(name):
     env = _full_env()
     env.pop(name)
     assert is_complete_worker_env(env) is False
+
+# ---------------------------------------------------------------------------
+# D4 — additive generic namespaced assets (legacy preserved)
+# ---------------------------------------------------------------------------
+
+_PLUGIN_ID = "zoomspec_yolo26n_aug_combined_frn_v3"
+_PLUGIN_VERSION = "1.0.0"
+_GENERIC_SHA = "b" * 64
+_GENERIC_NAMESPACE = f"{_PLUGIN_ID}/{_PLUGIN_VERSION}/{_GENERIC_SHA}"
+
+
+def test_legacy_only_context_still_constructs(monkeypatch):
+    _apply(monkeypatch, _full_env())
+    context = RemoteWorkerContext.from_env()
+    assert context.manifest_root is None
+    assert dict(context.asset_paths) == {}
+    assert (context.device_type, context.device_index, context.precision) == ("cuda", 0, "float16")
+
+
+def test_namespaced_asset_mapping_lookup(monkeypatch):
+    env = _full_env()
+    env[ENV_MANIFEST_ROOT] = "/root/manifests"
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({_GENERIC_NAMESPACE: {"w": "/root/assets/w.pt"}})
+    _apply(monkeypatch, env)
+    context = RemoteWorkerContext.from_env()
+    assert context.manifest_root == Path("/root/manifests")
+    resolved = context.resolve_assets(
+        plugin_id=_PLUGIN_ID, plugin_version=_PLUGIN_VERSION,
+        asset_manifest_sha256=_GENERIC_SHA, manifest=SimpleNamespace(assets={"w": "x"}),
+    )
+    assert resolved == {"w": Path("/root/assets/w.pt")}
+
+
+def test_unknown_asset_namespace_fails_closed(monkeypatch):
+    env = _full_env()
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({_GENERIC_NAMESPACE: {"w": "/root/assets/w.pt"}})
+    _apply(monkeypatch, env)
+    context = RemoteWorkerContext.from_env()
+    with pytest.raises(PlatformError) as exc:
+        context.resolve_assets(
+            plugin_id="other", plugin_version="1", asset_manifest_sha256="c" * 64,
+            manifest=SimpleNamespace(assets={"w": "x"}),
+        )
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_generic_resolution_never_falls_back_to_legacy_fields(monkeypatch):
+    _apply(monkeypatch, _full_env())  # legacy ZoomSpec asset fields present; no generic config
+    context = RemoteWorkerContext.from_env()
+    with pytest.raises(PlatformError) as exc:
+        context.resolve_assets(
+            plugin_id=_PLUGIN_ID, plugin_version=_PLUGIN_VERSION,
+            asset_manifest_sha256=_GENERIC_SHA, manifest=SimpleNamespace(assets={"w": "x"}),
+        )
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_missing_declared_generic_asset_fails_closed(monkeypatch):
+    env = _full_env()
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({_GENERIC_NAMESPACE: {"other": "/root/assets/o.pt"}})
+    _apply(monkeypatch, env)
+    context = RemoteWorkerContext.from_env()
+    with pytest.raises(PlatformError) as exc:
+        context.resolve_assets(
+            plugin_id=_PLUGIN_ID, plugin_version=_PLUGIN_VERSION,
+            asset_manifest_sha256=_GENERIC_SHA, manifest=SimpleNamespace(assets={"w": "x"}),
+        )
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_unsafe_generic_path_rejected(monkeypatch):
+    env = _full_env()
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({_GENERIC_NAMESPACE: {"w": "/root/../escape"}})
+    _apply(monkeypatch, env)
+    with pytest.raises(PlatformError) as exc:
+        RemoteWorkerContext.from_env()
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"

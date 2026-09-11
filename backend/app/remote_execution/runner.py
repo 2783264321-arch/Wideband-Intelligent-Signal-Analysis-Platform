@@ -592,7 +592,7 @@ def _cli_probe(args: argparse.Namespace) -> int:
     from app.remote_execution.probe import run_probe
     from app.remote_execution.worker_context import RemoteWorkerContext
     worker = RemoteWorkerContext.from_env()
-    response = run_probe(worker)
+    response = run_probe(worker, descriptor=worker.runtime_descriptor())
     print(response.model_dump_json())
     return 0
 

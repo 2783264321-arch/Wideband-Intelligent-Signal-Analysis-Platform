@@ -1,20 +1,26 @@
-"""Remote worker deployment context (server side, Task 12F-B).
+"""Remote worker deployment context (server side).
 
-Constructed on the remote GPU server from exact fixed scalar environment
-variable names only. It carries NO SSH/credential reference and no
-request-controlled path. Parsing is pure (no filesystem/network I/O) and
-fail-closes (``PlatformError("REMOTE_WORKER_CONTEXT_INVALID")``) on any missing
-or unsafe scalar field.
+Constructed on the remote GPU server from environment variables only. It carries
+NO SSH/credential reference and no request-controlled path. Parsing is pure (no
+filesystem/network I/O) and fail-closes
+(``PlatformError("REMOTE_WORKER_CONTEXT_INVALID")``) on any missing or unsafe
+field.
 
-Repo-owned paths (label-space root, asset-manifest path) are derived from the
-validated ``repo_root`` and need no extra deployment configuration.
+D4 is additive: the legacy ZoomSpec scalar env vars/fields are preserved so the
+existing ``ZoomSpecRemoteItemExecutor`` path keeps working until D3B. Optional
+generic configuration (``WSP_REMOTE_MANIFEST_ROOT`` + a namespaced
+``WSP_REMOTE_ASSET_PATHS_JSON``) is parsed in addition. Generic resolution never
+reads the legacy ZoomSpec fields and fails closed when its own configuration is
+absent/invalid.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import re
+from typing import Mapping
 
 from app.core.errors import PlatformError
 from app.remote_execution.profile import is_safe_remote_posix_path_text
@@ -28,11 +34,26 @@ ENV_FRN_CHECKPOINT = "WSP_REMOTE_FRN_CHECKPOINT"
 ENV_FROZEN_CONFIG = "WSP_REMOTE_FROZEN_CONFIG"
 ENV_LS_STFT_NORMALIZATION = "WSP_REMOTE_LS_STFT_NORMALIZATION"
 
+# Generic (D4) configuration — additive; never replaces the legacy fields.
+ENV_MANIFEST_ROOT = "WSP_REMOTE_MANIFEST_ROOT"
+ENV_ASSET_PATHS_JSON = "WSP_REMOTE_ASSET_PATHS_JSON"
+ENV_DEVICE_TYPE = "WSP_REMOTE_DEVICE_TYPE"
+ENV_DEVICE_INDEX = "WSP_REMOTE_DEVICE_INDEX"
+ENV_PRECISION = "WSP_REMOTE_PRECISION"
+
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_DEVICE_TYPE_RE = re.compile(r"^(cpu|cuda)$")
+_PRECISION_RE = re.compile(r"^(float32|float16)$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_LOGICAL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _invalid(message: str) -> PlatformError:
+    return PlatformError("REMOTE_WORKER_CONTEXT_INVALID", message)
 
 
 def required_worker_env_vars() -> tuple[str, ...]:
-    """Exact fixed scalar environment variable names of the worker contract."""
+    """Exact fixed scalar environment variable names of the legacy worker contract."""
     return (
         ENV_REPO_ROOT,
         ENV_JOB_ROOT,
@@ -46,11 +67,49 @@ def required_worker_env_vars() -> tuple[str, ...]:
 
 
 def is_complete_worker_env(env) -> bool:
-    """True iff every required worker scalar env name is present/non-empty."""
+    """True iff every required legacy worker scalar env name is present/non-empty."""
     for name in required_worker_env_vars():
         if not env.get(name):
             return False
     return True
+
+
+def _parse_namespaced_assets(raw: str | None) -> dict[str, dict[str, Path]]:
+    """Parse the optional generic namespaced asset mapping.
+
+    Shape: ``{"<plugin_id>/<plugin_version>/<asset_manifest_sha256>": {"<logical>": "/abs/path"}}``.
+    Absent/empty => {} (generic seam unavailable). Invalid => fail closed.
+    """
+    if raw is None or raw == "":
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        raise _invalid(f"{ENV_ASSET_PATHS_JSON} is not valid JSON.")
+    if not isinstance(parsed, dict):
+        raise _invalid(f"{ENV_ASSET_PATHS_JSON} must be a JSON object.")
+    result: dict[str, dict[str, Path]] = {}
+    for namespace, mapping in parsed.items():
+        if not isinstance(namespace, str):
+            raise _invalid(f"{ENV_ASSET_PATHS_JSON} keys must be strings.")
+        parts = namespace.split("/")
+        if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
+            raise _invalid(
+                f"{ENV_ASSET_PATHS_JSON} key must be '<plugin_id>/<plugin_version>/<sha256>'."
+            )
+        if not isinstance(mapping, dict) or not mapping:
+            raise _invalid(f"{ENV_ASSET_PATHS_JSON}[{namespace}] must be a non-empty object.")
+        logical: dict[str, Path] = {}
+        for name, path_text in mapping.items():
+            if not isinstance(name, str) or _LOGICAL_NAME_RE.fullmatch(name) is None:
+                raise _invalid(f"{ENV_ASSET_PATHS_JSON}[{namespace}] has an invalid logical name.")
+            if not isinstance(path_text, str) or not is_safe_remote_posix_path_text(path_text):
+                raise _invalid(
+                    f"{ENV_ASSET_PATHS_JSON}[{namespace}][{name}] is not a safe absolute POSIX path."
+                )
+            logical[name] = Path(path_text)
+        result[namespace] = logical
+    return result
 
 
 @dataclass(frozen=True)
@@ -66,6 +125,13 @@ class RemoteWorkerContext:
     label_space_root: Path
     asset_manifest_path: Path
 
+    # D4 generic (additive, optional).
+    manifest_root: Path | None = None
+    asset_paths: Mapping[str, Mapping[str, Path]] = field(default_factory=dict)
+    device_type: str = "cuda"
+    device_index: int = 0
+    precision: str = "float16"
+
     @classmethod
     def from_env(cls, env=None) -> "RemoteWorkerContext":
         """Parse the fixed scalar worker environment, failing closed on any
@@ -76,15 +142,9 @@ class RemoteWorkerContext:
         def _require_posix(name: str) -> str:
             value = env.get(name, "")
             if not value:
-                raise PlatformError(
-                    "REMOTE_WORKER_CONTEXT_INVALID",
-                    f"{name} must be configured.",
-                )
+                raise _invalid(f"{name} must be configured.")
             if not is_safe_remote_posix_path_text(value):
-                raise PlatformError(
-                    "REMOTE_WORKER_CONTEXT_INVALID",
-                    f"{name} is not a safe absolute POSIX path.",
-                )
+                raise _invalid(f"{name} is not a safe absolute POSIX path.")
             return value
 
         repo_root_text = _require_posix(ENV_REPO_ROOT)
@@ -92,10 +152,28 @@ class RemoteWorkerContext:
 
         commit = env.get(ENV_REQUIRED_RUNTIME_COMMIT, "")
         if _GIT_COMMIT_RE.fullmatch(commit) is None:
-            raise PlatformError(
-                "REMOTE_WORKER_CONTEXT_INVALID",
-                f"{ENV_REQUIRED_RUNTIME_COMMIT} must be a 40-hex commit.",
-            )
+            raise _invalid(f"{ENV_REQUIRED_RUNTIME_COMMIT} must be a 40-hex commit.")
+
+        manifest_root_text = env.get(ENV_MANIFEST_ROOT, "")
+        manifest_root: Path | None = None
+        if manifest_root_text:
+            if not is_safe_remote_posix_path_text(manifest_root_text):
+                raise _invalid(f"{ENV_MANIFEST_ROOT} is not a safe absolute POSIX path.")
+            manifest_root = Path(manifest_root_text)
+
+        device_type = env.get(ENV_DEVICE_TYPE, "cuda")
+        if _DEVICE_TYPE_RE.fullmatch(device_type) is None:
+            raise _invalid(f"{ENV_DEVICE_TYPE} must be 'cpu' or 'cuda'.")
+        device_index_raw = env.get(ENV_DEVICE_INDEX, "0")
+        try:
+            device_index = int(device_index_raw)
+        except (TypeError, ValueError):
+            raise _invalid(f"{ENV_DEVICE_INDEX} must be an integer.")
+        if device_index < 0:
+            raise _invalid(f"{ENV_DEVICE_INDEX} must be non-negative.")
+        precision = env.get(ENV_PRECISION, "float16")
+        if _PRECISION_RE.fullmatch(precision) is None:
+            raise _invalid(f"{ENV_PRECISION} must be 'float32' or 'float16'.")
 
         repo_root = Path(repo_root_text)
         return cls(
@@ -112,4 +190,48 @@ class RemoteWorkerContext:
                 repo_root / "backend" / "app" / "pipelines"
                 / "zoomspec_yolo26n_aug_combined_frn_v3" / "asset_manifest.json"
             ),
+            manifest_root=manifest_root,
+            asset_paths=_parse_namespaced_assets(env.get(ENV_ASSET_PATHS_JSON)),
+            device_type=device_type,
+            device_index=device_index,
+            precision=precision,
         )
+
+    def runtime_descriptor(self):
+        """Deployment-owned descriptor for this remote worker (probe/runtime)."""
+        from app.remote_execution.runtime import RuntimeDescriptor
+
+        return RuntimeDescriptor(
+            executor="remote_gpu",
+            device_type=self.device_type,
+            device_index=self.device_index if self.device_type == "cuda" else None,
+            precision=self.precision,
+            environment_ref=None,
+            environment_label=None,
+        )
+
+    def resolve_assets(
+        self,
+        *,
+        plugin_id: str,
+        plugin_version: str,
+        asset_manifest_sha256: str,
+        manifest,
+    ) -> dict[str, Path]:
+        """Resolve manifest-authorized logical assets from the generic mapping.
+
+        Fails closed when generic config is absent/invalid or a declared asset is
+        missing. Never reads the legacy ZoomSpec asset fields.
+        """
+        if not self.asset_paths:
+            raise _invalid("Generic remote asset mapping is not configured.")
+        namespace = f"{plugin_id}/{plugin_version}/{asset_manifest_sha256}"
+        namespaced = self.asset_paths.get(namespace)
+        if not namespaced:
+            raise _invalid(f"No generic asset mapping for namespace '{namespace}'.")
+        assets: dict[str, Path] = {}
+        for name in manifest.assets:
+            if name not in namespaced:
+                raise _invalid(f"Generic asset mapping is missing declared asset '{name}'.")
+            assets[name] = namespaced[name]
+        return assets

@@ -25,8 +25,6 @@ from app.remote_execution.assets import (
 from app.remote_execution.schema import RemoteProbeResponseV1
 from app.remote_execution.worker_context import RemoteWorkerContext
 
-_DEVICE_INDEX = 0
-
 
 def _probe_unavailable(message: str) -> PlatformError:
     return PlatformError("REMOTE_PROBE_UNAVAILABLE", message)
@@ -41,22 +39,36 @@ def _require_label_space(label_space_root: Path) -> None:
     LabelSpaceService(label_space_root).get("spacenet_14")
 
 
-def _require_cuda_device_zero(torch_import: Any) -> None:
+def _require_cuda_device(descriptor, torch_import: Any) -> None:
     torch = torch_import if torch_import is not None else __import__("torch")
     if not torch.cuda.is_available():
         raise _probe_unavailable("CUDA is not available on the remote runtime.")
+    index = descriptor.device_index if descriptor.device_index is not None else 0
     try:
-        torch.cuda.get_device_name(_DEVICE_INDEX)
+        torch.cuda.get_device_name(index)
     except Exception:
-        raise _probe_unavailable("CUDA device 0 is not usable on the remote runtime.")
+        raise _probe_unavailable(f"CUDA device {index} is not usable on the remote runtime.")
+
+
+def _require_accelerator(descriptor, torch_import: Any) -> None:
+    """Descriptor-driven readiness: CUDA probes its exact device index; a CPU
+    descriptor performs no CUDA check (CPU readiness is owned by the local
+    inference worker probe, not this remote probe)."""
+    if getattr(descriptor, "device_type", None) == "cuda":
+        _require_cuda_device(descriptor, torch_import)
 
 
 def run_probe(
     worker: RemoteWorkerContext,
     *,
+    descriptor,
     torch_import: Any = None,
 ) -> RemoteProbeResponseV1:
-    """Fail-closed server readiness verification. Never loads models."""
+    """Fail-closed server readiness verification. Never loads models.
+
+    ``descriptor`` is the deployment-owned RuntimeDescriptor; readiness is checked
+    against its exact executor/device_type/device_index/precision.
+    """
     verify_remote_runtime_commit(worker.repo_root, worker.required_runtime_commit)
     manifest = load_pipeline_asset_manifest(worker.asset_manifest_path)
     verify_assets(manifest, {
@@ -67,7 +79,7 @@ def run_probe(
     })
     _require_dataset_root(worker.dataset_root_space_net)
     _require_label_space(worker.label_space_root)
-    _require_cuda_device_zero(torch_import)
+    _require_accelerator(descriptor, torch_import)
     # The verified commit value is legitimate only because verify_remote_runtime_commit
     # just proved the deployed repo HEAD equals worker.required_runtime_commit.
     return RemoteProbeResponseV1(
@@ -75,5 +87,5 @@ def run_probe(
         status="available",
         remote_runtime_commit=worker.required_runtime_commit,
         asset_manifest_sha256=manifest.asset_manifest_sha256,
-        device=_DEVICE_INDEX,
+        device=descriptor.device_index if descriptor.device_index is not None else 0,
     )

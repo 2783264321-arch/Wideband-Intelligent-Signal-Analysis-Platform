@@ -389,14 +389,9 @@ class RemoteGpuExecutorProvider:
         return f"remote:{self._profile.name}:{self._required_runtime_commit}"
 
     def runtime_descriptor(self) -> RuntimeDescriptor:
-        return RuntimeDescriptor(
-            executor=self.name,
-            device_type="cuda",
-            device_index=0,
-            precision="float16",
-            environment_ref=self._profile.name,
-            environment_label=self._profile.name,
-        )
+        # Single deployment-owned descriptor source (RemoteProfile); never
+        # request/wire/plugin data.
+        return self._profile.runtime_descriptor()
 
     def availability(self, definition: PipelineDefinition, model_release: Any, recording: Any) -> ExecutorAvailabilityRead:
         from app.pipelines.compatibility import is_input_compatible

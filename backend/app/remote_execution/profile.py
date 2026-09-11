@@ -5,7 +5,7 @@ and validated POSIX roots/mappings derived from the configured environment.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -19,6 +19,7 @@ _HOST_RE = re.compile(r"^[A-Za-z0-9._:\-]+$")
 _USER_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 _REMOTE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def is_safe_remote_posix_path_text(value: str) -> bool:
@@ -115,6 +116,61 @@ def _safe_posix_mapping(value: str | None, name: str) -> dict[str, PurePosixPath
     return result
 
 
+def _safe_namespaced_posix_mapping(value: str | None, name: str) -> dict[str, dict[str, PurePosixPath]]:
+    """Parse the generic namespaced asset mapping (D4, additive)."""
+    if value is None or value == "":
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        raise _unavailable(f"{name} is not valid JSON.")
+    if not isinstance(parsed, dict):
+        raise _unavailable(f"{name} must be a JSON object.")
+    result: dict[str, dict[str, PurePosixPath]] = {}
+    for namespace, mapping in parsed.items():
+        if not isinstance(namespace, str):
+            raise _unavailable(f"{name} keys must be strings.")
+        parts = namespace.split("/")
+        if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
+            raise _unavailable(f"{name} key must be '<plugin_id>/<plugin_version>/<sha256>'.")
+        if not isinstance(mapping, dict) or not mapping:
+            raise _unavailable(f"{name}[{namespace}] must be a non-empty object.")
+        logical: dict[str, PurePosixPath] = {}
+        for logical_name, raw in mapping.items():
+            if not isinstance(logical_name, str) or _IDENTIFIER_RE.fullmatch(logical_name) is None:
+                raise _unavailable(f"{name}[{namespace}] has an invalid logical asset name.")
+            if not isinstance(raw, str):
+                raise _unavailable(f"{name}[{namespace}][{logical_name}] must be a string.")
+            logical[logical_name] = _safe_posix_root(raw, f"{name}[{namespace}][{logical_name}]")
+        result[namespace] = logical
+    return result
+
+
+def _parse_asset_paths(raw: str | None) -> tuple[dict[str, PurePosixPath], dict[str, dict[str, PurePosixPath]]]:
+    """Discriminate the legacy flat shape from the generic namespaced shape.
+
+    ``WSP_REMOTE_ASSET_PATHS_JSON`` keeps its legacy flat shape
+    (``{"detector_checkpoint": "/abs"}``) while D4 adds the namespaced shape
+    (``{"<plugin>/<version>/<sha>": {"logical": "/abs"}}``). Mixed shapes fail closed.
+    """
+    if raw is None or raw == "":
+        return {}, {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON is not valid JSON.")
+    if not isinstance(parsed, dict):
+        raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON must be a JSON object.")
+    if not parsed:
+        return {}, {}
+    values = list(parsed.values())
+    if all(isinstance(value, str) for value in values):
+        return _safe_posix_mapping(raw, "WSP_REMOTE_ASSET_PATHS_JSON"), {}
+    if all(isinstance(value, dict) for value in values):
+        return {}, _safe_namespaced_posix_mapping(raw, "WSP_REMOTE_ASSET_PATHS_JSON")
+    raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON mixes flat and namespaced shapes.")
+
+
 @dataclass(frozen=True)
 class RemoteProfile:
     name: str
@@ -132,6 +188,30 @@ class RemoteProfile:
 
     dataset_roots: dict[str, PurePosixPath]
     asset_paths: dict[str, PurePosixPath]
+
+    # D4 generic (additive, optional).
+    manifest_root: PurePosixPath | None = None
+    generic_asset_paths: dict[str, dict[str, PurePosixPath]] = field(default_factory=dict)
+    device_type: str = "cuda"
+    device_index: int = 0
+    precision: str = "float16"
+
+    def runtime_descriptor(self):
+        """The deployment-owned RuntimeDescriptor for this remote profile.
+
+        Shared by the control-plane ``RemoteGpuExecutorProvider`` and (via env)
+        the remote worker/probe. Never derived from request/wire/plugin data.
+        """
+        from app.remote_execution.runtime import RuntimeDescriptor
+
+        return RuntimeDescriptor(
+            executor="remote_gpu",
+            device_type=self.device_type,
+            device_index=self.device_index if self.device_type == "cuda" else None,
+            precision=self.precision,
+            environment_ref=self.name,
+            environment_label=self.name,
+        )
 
     @classmethod
     def from_env(cls, settings: Settings) -> "RemoteProfile":
@@ -168,7 +248,26 @@ class RemoteProfile:
         required_remote_runtime_commit = _require_runtime_commit(_get("WSP_REMOTE_REQUIRED_RUNTIME_COMMIT"))
 
         dataset_roots = _safe_posix_mapping(env.get("WSP_REMOTE_DATASET_ROOTS_JSON"), "WSP_REMOTE_DATASET_ROOTS_JSON")
-        asset_paths = _safe_posix_mapping(env.get("WSP_REMOTE_ASSET_PATHS_JSON"), "WSP_REMOTE_ASSET_PATHS_JSON")
+        asset_paths, generic_asset_paths = _parse_asset_paths(env.get("WSP_REMOTE_ASSET_PATHS_JSON"))
+
+        manifest_root_text = env.get("WSP_REMOTE_MANIFEST_ROOT", "")
+        manifest_root = (
+            _safe_posix_root(manifest_root_text, "WSP_REMOTE_MANIFEST_ROOT")
+            if manifest_root_text
+            else None
+        )
+        device_type = env.get("WSP_REMOTE_DEVICE_TYPE", "cuda")
+        if device_type not in ("cpu", "cuda"):
+            raise _unavailable("WSP_REMOTE_DEVICE_TYPE must be 'cpu' or 'cuda'.")
+        try:
+            device_index = int(env.get("WSP_REMOTE_DEVICE_INDEX", "0"))
+        except (TypeError, ValueError):
+            raise _unavailable("WSP_REMOTE_DEVICE_INDEX must be an integer.")
+        if device_index < 0:
+            raise _unavailable("WSP_REMOTE_DEVICE_INDEX must be non-negative.")
+        precision = env.get("WSP_REMOTE_PRECISION", "float16")
+        if precision not in ("float32", "float16"):
+            raise _unavailable("WSP_REMOTE_PRECISION must be 'float32' or 'float16'.")
 
         return cls(
             name=name,
@@ -183,4 +282,9 @@ class RemoteProfile:
             required_remote_runtime_commit=required_remote_runtime_commit,
             dataset_roots=dataset_roots,
             asset_paths=asset_paths,
+            manifest_root=manifest_root,
+            generic_asset_paths=generic_asset_paths,
+            device_type=device_type,
+            device_index=device_index,
+            precision=precision,
         )

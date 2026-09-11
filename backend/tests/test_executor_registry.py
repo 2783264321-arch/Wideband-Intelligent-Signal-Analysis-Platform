@@ -136,7 +136,17 @@ def test_availability_requires_a_certificate():
 
 
 def test_remote_provider_runtime_ref_includes_profile_and_commit():
-    profile = SimpleNamespace(name="autodl_primary")
+    profile = SimpleNamespace(
+        name="autodl_primary",
+        runtime_descriptor=lambda: RuntimeDescriptor(
+            executor="remote_gpu",
+            device_type="cuda",
+            device_index=0,
+            precision="float16",
+            environment_ref="autodl_primary",
+            environment_label="autodl_primary",
+        ),
+    )
     provider = RemoteGpuExecutorProvider(
         profile=profile, probe=object(), launcher=object(),
         required_runtime_commit=RUNTIME_COMMIT,
