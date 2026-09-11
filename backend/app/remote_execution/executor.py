@@ -121,6 +121,14 @@ class SshRemoteExecutorProbe(RemoteExecutorProbe):
                 "PIPELINE_ASSET_MISMATCH",
                 "Remote asset manifest hash does not match the requested release manifest.",
             )
+        # The live-probed device must equal the deployment-owned RuntimeDescriptor
+        # device_index (never a fallback to 0 or another index).
+        descriptor = self._profile.runtime_descriptor()
+        if response.device != descriptor.device_index:
+            return self._unavailable(
+                "REMOTE_PROBE_UNAVAILABLE",
+                "Remote probe device does not match the configured runtime descriptor.",
+            )
         return ExecutorAvailabilityRead(
             executor="remote_gpu",
             available=True,

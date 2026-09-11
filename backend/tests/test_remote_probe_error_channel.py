@@ -40,7 +40,7 @@ def _release(manifest_sha: str = MANIFEST_SHA, release_id: str = RELEASE_ID):
     )
 
 
-def _profile() -> RemoteProfile:
+def _profile(device_index: int = 0) -> RemoteProfile:
     return RemoteProfile(
         name="autodl_primary",
         host="host",
@@ -59,23 +59,26 @@ def _profile() -> RemoteProfile:
             "frozen_config": Path("/m/frozen_config.json"),
             "ls_stft_normalization": Path("/m/norm.json"),
         },
+        device_index=device_index,
     )
 
 
-def _probe_json(manifest_sha: str = MANIFEST_SHA, runtime_commit: str = RUNTIME_COMMIT) -> bytes:
+def _probe_json(manifest_sha: str = MANIFEST_SHA, runtime_commit: str = RUNTIME_COMMIT,
+                device: int = 0) -> bytes:
     return json.dumps({
         "schema_version": 1,
         "status": "available",
         "remote_runtime_commit": runtime_commit,
         "asset_manifest_sha256": manifest_sha,
-        "device": 0,
+        "device": device,
     }).encode("utf-8")
 
 
-def _make_probe(run_process):
-    transport = SshRunner(_profile(), run_process=run_process)
+def _make_probe(run_process, *, device_index: int = 0):
+    profile = _profile(device_index)
+    transport = SshRunner(profile, run_process=run_process)
     return SshRemoteExecutorProbe(
-        _profile(), transport, expected_runtime_commit=RUNTIME_COMMIT
+        profile, transport, expected_runtime_commit=RUNTIME_COMMIT
     )
 
 
@@ -108,6 +111,26 @@ def test_probe_requests_exact_plugin_release_manifest_tokens():
     assert "--plugin-version 1.0.0" in joined
     assert f"--model-release-id {RELEASE_ID}" in joined
     assert f"--asset-manifest-sha256 {MANIFEST_SHA}" in joined
+
+
+@pytest.mark.parametrize("descriptor_index,response_device,expected", [
+    (3, 0, False),
+    (3, 3, True),
+    (0, 0, True),
+    (3, 1, False),
+])
+def test_probe_binds_response_device_to_descriptor(descriptor_index, response_device, expected):
+    """D3B Fix Round 2: the live-probed device must equal the deployment-owned
+    RuntimeDescriptor device_index; a response for another CUDA index must never
+    establish readiness."""
+    probe = _make_probe(
+        lambda *a, **k: _result(0, stdout=_probe_json(device=response_device)),
+        device_index=descriptor_index,
+    )
+    availability = probe.availability(_recording(), PIPELINE, "c" * 64, _release())
+    assert availability.available is expected
+    if not expected:
+        assert availability.reason_code == "REMOTE_PROBE_UNAVAILABLE"
 
 
 def test_probe_release_less_remote_is_unavailable():
