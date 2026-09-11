@@ -744,24 +744,56 @@ assumption is replaced by descriptor-driven checks.
 
 ### 11.5 ItemExecutor / Plugin registry seam
 
-`backend/app/remote_execution/runner.py:645-648` currently hardcodes
-`ZoomSpecRemoteItemExecutor`. M9.2 replaces this with:
+`backend/app/remote_execution/runner.py` `_cli_work` currently hardcodes
+`ZoomSpecRemoteItemExecutor`. M9.2 replaces remote item dispatch with a generic
+`PluginItemExecutor`. The cutover is split so the M9.1 ZoomSpec remote production
+path stays intact until the generic asset/runtime/package seams exist.
+
+**Sequencing (approved ruling): D3A → D4 → D5 → D3B.** The original single D3 was
+BLOCKED with no code change: the generic executor's trusted-assets and package
+seams depend on D4/D5, and cutting `runner._cli_work` before D4 would require
+ZoomSpec hardcoding. Until D3B, the ZoomSpec remote path remains the active path.
+
+**D3A — generic executor core (no runner change).** A generic
+`PluginItemExecutor` (`backend/app/remote_execution/plugin_executor.py`) owns
+request verification/orchestration only and depends on **injected generic seams**
+(trusted-assets resolver, `RuntimeDescriptor`, package-publishing callable):
 
 ```text
-PluginItemExecutor (generic)
+PluginItemExecutor (generic; injected seams; no ZoomSpec constants)
   execute(item, job_root):
-    plugin   = PluginRegistry.get(batch.pipeline.id, batch.pipeline.version)
-    executor = ExecutorRegistry.provider(batch.runtime.executor)
-    adapter  = DatasetAdapterRegistry.get(item.recording.dataset_name)
-    runtime  = executor.runtime_descriptor
-    assets   = ModelReleaseStore.verify(...)
-    resolved = adapter.resolve(...)
-    output   = plugin.execute(resolved.recording_input, item.parameters, workspace, runtime, assets)
-    publish(output, ...)
+    verify batch.required_remote_runtime_commit == worker.required_runtime_commit
+    verify canonical request_sha256
+    handle   = plugin_registry.get(batch.pipeline.id, batch.pipeline.version)
+               (verify definition id/version; batch.pipeline.model_release_id)
+    release  = model_release_store.resolve(exact wire model_release_id)
+               (verify release.manifest.asset_manifest_sha256 == batch.asset_manifest_sha256)
+    assets   = trusted_assets_resolver(plugin_id, plugin_version, asset_manifest_sha256, manifest)
+    resolved = adapter_registry.get(item.recording.dataset_name).resolve(...)
+    validate_plugin_parameters(handle.definition, item.parameters)
+    label_space = LabelSpaceService(worker.label_space_root).get(
+        handle.definition.resolved_output_label_space)
+    runtime  = handle.load_runtime(assets=assets, runtime_descriptor=runtime_descriptor,
+                                   output_label_space=label_space)
+    output   = runtime.execute(resolved.recording_input, item.parameters, workspace)
+    package_publisher(output, handle.definition, runtime_descriptor, item, job_root, ...)
 ```
 
+- **D4** supplies the production `RemoteWorkerContext` (namespaced trusted asset
+  mapping), the deployment-owned `RuntimeDescriptor`, and the descriptor-driven
+  probe.
+- **D5** supplies the production package publisher/ingestor using
+  `handle.definition` + output label space + `RuntimeDescriptor.public_projection()`.
+- **D3B** performs the final `runner._cli_work` cutover to `PluginItemExecutor`
+  using the D4/D5 production dependencies and removes the ZoomSpec literal dispatch.
+- D3A and D4/D5 MUST NOT pre-implement each other; D3A and D4/D5 MUST NOT switch
+  the runner (only D3B does).
+
 The generic executor owns verification/orchestration; the plugin owns science.
-ZoomSpec becomes one registered plugin, not a special case.
+ZoomSpec becomes one registered plugin, not a special case. GroundTruth never
+reaches inference; request-controlled filesystem paths are never accepted. Remote
+release-less execution stays fail-closed (the frozen wire requires
+`asset_manifest_sha256`) unless a later approved task generalizes the wire.
 
 ---
 
@@ -905,8 +937,8 @@ control plane.**
 | 1 | Introduce `PluginDefinition`/registry types additively; existing ZoomSpec definition maps onto them | none (behavior unchanged) |
 | 2 | Wrap ZoomSpec scientific modules behind the plugin declaration; keep numeric constants and orchestration identical | low; covered by existing ZoomSpec tests |
 | 3 | Seed one ModelRelease record that references the current unchanged `asset_manifest.json` (`16cc0534...`); preserve all four logical names and SHAs | low |
-| 4 | Move remote executor dispatch to the generic PluginItemExecutor registry seam | medium; covered by `test_remote_runner_work_wiring.py` |
-| 5 | Generalize worker context assets + RuntimeDescriptor; separate local inference worker runtime; validate ingest against persisted descriptor | medium; covered by remote result tests |
+| 4 | D3A: generic `PluginItemExecutor` core with injected asset/runtime/package seams (no runner change) | low; covered by new `test_plugin_executor.py` |
+| 5 | D4: generic worker context/namespaced assets + descriptor-driven probe; D5: descriptor-driven package publisher/ingestor; D3B: final `runner._cli_work` cutover to `PluginItemExecutor` (removes ZoomSpec literal dispatch) | medium; covered by worker-context/probe/publisher/runner tests |
 | 6 | Add the CPN-only second plugin (§17) | low |
 | 7 | Record ZoomSpec CPU status as technically feasible / not certified (§18) | none |
 | 8 | Run the consolidated final live GPU acceptance gate (§21.1) before pinning a new runtime | medium; CPU-only work through A–F otherwise |
@@ -1043,7 +1075,7 @@ M9.2 does **not** auto-select the best executor for a plugin/run.
   certificate lookup use that resolved release (`model_release_id=None` for
   release-less plugins).
 - The remote `ItemExecutor` is resolved through the registry; no ZoomSpec
-  literal dispatch remains.
+  literal dispatch remains (finalized by D3B via the D3A/D4/D5 path).
 - `RuntimeDescriptor` replaces all `cuda:0` / device-0 hardcodes in probe,
   executor, package publisher, and result ingestor; the public package exposes
   only `executor`, `device` (`cpu`/`cuda:N`), and non-sensitive `environment`.

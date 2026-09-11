@@ -60,7 +60,7 @@
 | `backend/app/remote_execution/runtime.py` | D | `RuntimeDescriptor`, `ExecutionCertificate`, `ExecutionCertificateStore`, `ExecutorProvider`, `ExecutorRegistry` |
 | `backend/app/analysis/local_executor.py` | D | `LocalInferenceWorkerProvider` (separate worker process) |
 | `backend/app/analysis/local_inference_worker.py` | D | generic plugin-native local worker entrypoint |
-| `backend/app/remote_execution/plugin_executor.py` | D | generic `PluginItemExecutor` |
+| `backend/app/remote_execution/plugin_executor.py` | D3A/D3B | generic `PluginItemExecutor` |
 | `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/plugin.py` | E | ZoomSpec `PLUGIN` + lazy runtime factory |
 | `backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/model_releases/golden.json` | B | golden ModelRelease record (references existing manifest) |
 | `backend/app/pipelines/cpn_bandwidth_tier/__init__.py` | F | CPN-only plugin package |
@@ -1202,7 +1202,8 @@ and lifecycle differ. The legacy `app.analysis.worker` (`create_pipeline_registr
 - `backend/app/remote_execution/worker_context.py` (existing trusted-path validation) as the reference for the trusted-local-assets validation style.
 
 D2B defines the **local** resolution sequence directly; the remote equivalent
-(`plugin_executor.py`) is implemented later in D3 and must match it step for step.
+(`plugin_executor.py`) is implemented later as the D3A generic core and wired into
+the runner by D3B, and must match it step for step.
 D4 later generalizes the remote namespaced asset mapping; the local mapping uses
 the same namespace shape defined here.
 
@@ -1262,72 +1263,90 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_l
 
 ---
 
-## TASK D3 — Generic `PluginItemExecutor` + runner seam (remote)
+## TASK D3A — Generic `PluginItemExecutor` core (no runner cutover)
+
+**Sequencing (approved ruling): D3A → D4 → D5 → D3B.** The original single D3 was
+BLOCKED with no code change: its trusted-assets and package seams depend on D4/D5,
+and cutting `runner._cli_work` before D4 would require ZoomSpec hardcoding. Until
+D3B, the existing ZoomSpec remote production path stays intact.
 
 **First: read before editing**
-- `backend/app/remote_execution/runner.py:634-650` (`_cli_work`).
 - `backend/app/remote_execution/zoomspec_executor.py` (verification sequence to generalize).
-- `backend/app/pipelines/plugin_registry.py`, `backend/app/datasets/adapter.py`, `backend/app/remote_execution/model_release.py`.
+- `backend/app/pipelines/plugin_registry.py`, `backend/app/pipelines/plugin.py`,
+  `backend/app/datasets/adapter.py`, `backend/app/remote_execution/model_release.py`,
+  `backend/app/remote_execution/runtime.py`.
 
 **Interfaces (create `backend/app/remote_execution/plugin_executor.py`):**
 
 ```python
 class PluginItemExecutor:
-    def __init__(self, *, batch, worker, plugin_registry, adapter_registry,
-                 model_release_store, certificate_store, runtime_descriptor) -> None: ...
+    def __init__(
+        self, *, batch, worker, plugin_registry, adapter_registry,
+        model_release_store, certificate_store, runtime_descriptor,
+        trusted_assets_resolver, package_publisher,
+    ) -> None: ...
     def execute(self, item, job_root: Path) -> None:
-        # 1 verify batch runtime commit vs worker
-        # 2 validate request_sha256
-        # 3 handle = plugin_registry.get(batch.pipeline.id, batch.pipeline.version)
-        #   verify batch.pipeline.model_release_id and definition id/version
-        # 4 resolve model release (by wire model_release_id; verify asset_manifest_sha256)
-        # 5 verify asset manifest + asset bytes (namespaced trusted paths)
-        # 6 resolve recording via DatasetAdapter
-        # 7 validate parameters against handle.definition.parameter_schema
-        # 8 ensure_asset_manifest verified; label_space = LabelSpaceService.get(
-        #       handle.definition.resolved_output_label_space)   # executor owns this resolution
-        #   runtime = handle.load_runtime(assets=assets,
-        #                                 runtime_descriptor=runtime_descriptor,
+        # 1 verify batch.required_remote_runtime_commit == worker.required_runtime_commit
+        # 2 validate canonical request_sha256
+        # 3 handle = plugin_registry.get(batch.pipeline.id, batch.pipeline.version);
+        #   verify definition id/version and batch.pipeline.model_release_id
+        # 4 release = model_release_store.resolve(exact wire model_release_id);
+        #   verify release.manifest.asset_manifest_sha256 == batch.asset_manifest_sha256
+        # 5 assets = trusted_assets_resolver(plugin_id, plugin_version, asset_manifest_sha256, manifest)
+        # 6 resolved = adapter_registry.get(item.recording.dataset_name).resolve(...)
+        # 7 validate_plugin_parameters(handle.definition, item.parameters)
+        # 8 label_space = LabelSpaceService(worker.label_space_root).get(
+        #       handle.definition.resolved_output_label_space)
+        #   runtime = handle.load_runtime(assets=assets, runtime_descriptor=runtime_descriptor,
         #                                 output_label_space=label_space)
-        #   output = runtime.execute(recording_input, item.parameters, workspace)
-        # 9 build package with handle.definition + runtime_descriptor.public_projection()
-        # 10 publish envelope + zip (write-once)
+        #   output = runtime.execute(resolved.recording_input, item.parameters, workspace)
+        # 9 package_publisher(output, handle.definition, runtime_descriptor, item, job_root, ...)
 ```
 
-`PluginItemExecutor` MUST call `PluginHandle.load_runtime(assets=..., runtime_descriptor=..., output_label_space=...)`;
-there is no `PluginRegistry.load_runtime`. The executor resolves the output
-`LabelSpace` (via `LabelSpaceService`) before invoking the factory; the factory
-never resolves label spaces itself. Modify `runner._cli_work` to construct
-`PluginItemExecutor` from the registry seam instead of importing
-`ZoomSpecRemoteItemExecutor`. The runner stays the lifecycle owner.
+- `trusted_assets_resolver` and `package_publisher` are injected generic seams:
+  **D4** supplies the production trusted-assets mapping + deployment
+  `RuntimeDescriptor`; **D5** supplies the production package publisher. D3A
+  defines only the seam protocols and the orchestration.
+- D3A MUST NOT modify `runner._cli_work` and MUST NOT reference ZoomSpec-specific
+  fields/constants.
+- `PluginItemExecutor` MUST call `PluginHandle.load_runtime(assets=...,
+  runtime_descriptor=..., output_label_space=...)`; there is no
+  `PluginRegistry.load_runtime`. The executor resolves the output `LabelSpace`
+  (via `LabelSpaceService`) before invoking the factory.
+- Recording resolution happens only through the DatasetAdapter; GroundTruth never
+  reaches inference. Request-controlled filesystem paths are never accepted.
+- Remote release-less stays fail-closed (the frozen wire requires
+  `asset_manifest_sha256`).
 
-**RED test (`backend/tests/test_plugin_executor.py`, new; update `test_remote_runner_work_wiring.py`):**
+**RED test (`backend/tests/test_plugin_executor.py`, new):**
 
 ```python
-def test_cli_work_builds_generic_executor(monkeypatch): ...
 def test_plugin_executor_uses_handle_load_runtime(): ...
-    # fake registry returns a handle whose load_runtime() is observed
 def test_plugin_executor_passes_assets_descriptor_and_output_label_space(): ...
 def test_plugin_executor_verifies_wire_release_id_and_manifest_hash(): ...
-    # batch.pipeline.model_release_id drives release selection; mismatch fails closed
 def test_plugin_executor_fails_closed_on_release_mismatch(): ...
 def test_plugin_executor_fails_closed_on_asset_mismatch(): ...
 def test_plugin_executor_fails_closed_on_parameter_invalid(): ...
-def test_runner_import_still_gpu_free(): ...
+def test_plugin_executor_uses_dataset_adapter_only(): ...
+def test_plugin_executor_module_import_is_torch_free(): ...
 ```
 
-**Expected failure (RED):** `_cli_work` still imports the ZoomSpec executor.
+**Expected failure (RED):** module missing.
 
 **GREEN command:**
 ```bash
-PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_plugin_executor.py backend/tests/test_remote_runner_work_wiring.py -v
+PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_plugin_executor.py -v
 ```
 
-**Commit checkpoint:** `feat: dispatch remote items through generic plugin executor`
+**Commit checkpoint:** `feat: add generic remote plugin item executor core`
 
 ---
 
 ## TASK D4 — Descriptor-driven probe + namespaced worker context
+
+**Supplies D3A's production seams:** the generic `RemoteWorkerContext`
+(namespaced trusted asset mapping) and the deployment-owned `RuntimeDescriptor`.
+D4 MUST NOT switch `runner._cli_work` (that is D3B).
 
 **First: read before editing**
 - `backend/app/remote_execution/probe.py`.
@@ -1369,6 +1388,9 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 
 ## TASK D5 — Package publisher + result ingestor descriptor projection
 
+**Supplies D3A's production package seam.** D5 MUST NOT switch `runner._cli_work`
+(that is D3B).
+
 **First: read before editing**
 - `backend/app/remote_execution/package_publisher.py` (`manifest_for`, `_LABEL_SPACE`, `device=0`).
 - `backend/app/remote_execution/result_ingestor.py:134-159`.
@@ -1402,6 +1424,41 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_r
 ```
 
 **Commit checkpoint:** `feat: project runtime descriptor into package and ingest`
+
+---
+
+## TASK D3B — Final `runner._cli_work` cutover to `PluginItemExecutor`
+
+**Depends on:** D3A (generic executor core) + D4 (namespaced assets + deployment
+`RuntimeDescriptor`) + D5 (descriptor-driven package publisher/ingestor). This is
+the only task that changes the runner. Until it completes, the existing ZoomSpec
+remote production path remains the active path.
+
+**Interfaces (modify `backend/app/remote_execution/runner.py` `_cli_work`):**
+- Stop importing `ZoomSpecRemoteItemExecutor`; construct `PluginItemExecutor` from
+  the D4/D5 production dependencies: the D4 trusted-assets resolver + deployment
+  `RuntimeDescriptor`, the plugin registry, the dataset-adapter registry, the model
+  release store, the certificate store, and the D5 package publisher.
+- The runner remains the lifecycle/write-once/status owner.
+- No concrete plugin-id branches or ZoomSpec constants remain in the runner work
+  path; the ZoomSpec remote run now flows through the generic executor unchanged
+  scientifically.
+
+**RED test (update `backend/tests/test_remote_runner_work_wiring.py`; add to `backend/tests/test_plugin_executor.py`):**
+
+```python
+def test_cli_work_builds_generic_executor(monkeypatch): ...
+def test_cli_work_no_zoomspec_executor_import(): ...
+```
+
+**Expected failure (RED):** `_cli_work` still imports/constructs `ZoomSpecRemoteItemExecutor`.
+
+**GREEN command:**
+```bash
+PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_plugin_executor.py backend/tests/test_remote_runner_work_wiring.py -v
+```
+
+**Commit checkpoint:** `feat: dispatch remote items through generic plugin executor`
 
 ---
 
@@ -1468,7 +1525,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 ## TASK E2 — Route ZoomSpec remote execution through the generic seam
 
 **First: read before editing**
-- `backend/app/remote_execution/plugin_executor.py` (Task D3).
+- `backend/app/remote_execution/plugin_executor.py` (Task D3A/D3B).
 - `backend/app/remote_execution/zoomspec_executor.py` (retire).
 - `backend/tests/test_zoomspec_remote_executor.py`, `backend/tests/test_remote_live_loop.py`.
 
@@ -1771,7 +1828,7 @@ Rules:
 | §11.2 executor registry / local+remote symmetry | D2, D2B |
 | §11.3 RuntimeDescriptor + public projection | D1, D5 |
 | §11.4 namespaced trusted paths + probe | D4 |
-| §11.5 generic PluginItemExecutor | D3, E2 |
+| §11.5 generic PluginItemExecutor | D3A/D3B, E2 |
 | §12 control-plane torch-free | A3, F2, GATE 1 |
 | §13 error codes | A2, B1, C1, C4, D1, D2 |
 | §14 provenance invariants | B3, D5 |
@@ -1805,7 +1862,7 @@ Rules:
   `runtime_ref`; it launches `app.analysis.local_inference_worker` (D2B) and
   never uses `sys.executable` or `app.analysis.worker`.
 
-**Dependency order:** A→B→C→D→E→F. Within B, B5 (golden release/default) precedes Phase D so D1's seed certificate is never dangling. A3 declares ZoomSpec technical capability before D2 activates certificate-driven projections. D2B (local worker) precedes E2 so local and remote share the plugin contract before ZoomSpec migrates. C3/C4 consume A2; D3 consumes A3+B1+B5+C1; E consumes D; F consumes E. No forward dependency.
+**Dependency order:** A→B→C→D→E→F. Within B, B5 (golden release/default) precedes Phase D so D1's seed certificate is never dangling. A3 declares ZoomSpec technical capability before D2 activates certificate-driven projections. D2B (local worker) precedes E2 so local and remote share the plugin contract before ZoomSpec migrates. C3/C4 consume A2. **Within D: D3A → D4 → D5 → D3B** — D3A (generic executor core, injected seams) consumes A3+B1+B5+C1; D4 supplies the namespaced worker context + deployment RuntimeDescriptor; D5 supplies the descriptor-driven package publisher/ingestor; D3B performs the final `runner._cli_work` cutover and is the only task that removes the ZoomSpec literal dispatch. Until D3B, the ZoomSpec remote production path stays intact. E consumes D; F consumes E. No forward dependency.
 
 **YAGNI:** no model registry service, no multi-GPU scheduler, no release UI, no streaming/CDN, no vendor abstraction. `local_gpu` is declared but not required to be implemented (matches spec); `local_cpu` requires an explicitly configured interpreter + runtime ref and is unavailable otherwise. M9.3 excluded.
 
@@ -1819,7 +1876,7 @@ Rules:
 
 **Control-plane edit guard:** F2's guard test is the objective proof that adding a plugin required no control-plane logic edits; `plugin_modules.json`, `model_release_defaults.json`, and `execution_certificates.json` are configuration data, not logic.
 
-**Coordinator/recovery/transport:** untouched. D3 changes only `runner._cli_work` construction; D2 adds providers around existing `SshRemoteExecutorProbe`/`CoordinatorJobManager` without changing their internals, and adds a new `LocalInferenceWorkerProvider` + `local_inference_worker` rather than altering `LocalJobManager` or `app.analysis.worker`.
+**Coordinator/recovery/transport:** untouched. D3B changes only `runner._cli_work` construction; D4/D5 add the generic worker context/probe/package seams; D2 adds providers around existing `SshRemoteExecutorProbe`/`CoordinatorJobManager` without changing their internals, and adds a new `LocalInferenceWorkerProvider` + `local_inference_worker` rather than altering `LocalJobManager` or `app.analysis.worker`.
 
 **Required-fix coverage (architect reviews):**
 1. `environment_ref` private / `environment_label` public — D1 + tests.
