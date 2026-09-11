@@ -24,11 +24,20 @@ def validate_extracted_package(
     root: Path,
     recording: RecordingModel,
     labels: LabelSpaceService,
+    *,
+    expected_label_space: str | None = None,
 ) -> ValidatedAnalysisPackage:
     try:
         manifest = Manifest.model_validate(read_json(root / "manifest.json"))
-        if manifest.label_space != recording.label_space:
-            raise invalid("Package label_space does not match the selected Recording.")
+        # Default (imported packages): the package label space must equal the
+        # Recording label space. Remote generic ingestion overrides this with the
+        # plugin's resolved OUTPUT label space so input and output label spaces
+        # stay decoupled.
+        required_label_space = (
+            expected_label_space if expected_label_space is not None else recording.label_space
+        )
+        if manifest.label_space != required_label_space:
+            raise invalid("Package label_space does not match the expected label space.")
         labels.get(manifest.label_space)
         if Path(manifest.results.detections).name != "detections.json":
             raise invalid("The detections result must point to detections.json.")

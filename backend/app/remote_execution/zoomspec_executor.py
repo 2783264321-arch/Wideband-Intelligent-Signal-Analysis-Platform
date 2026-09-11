@@ -27,6 +27,7 @@ from app.remote_execution.assets import verify_asset_manifest
 from app.remote_execution.package_publisher import build_analysis_package_zip
 from app.remote_execution.result_publisher import publish_result
 from app.remote_execution.resolver import resolve_space_net
+from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.schema import RemoteExecutionBatchV1, RemoteExecutionItemV1
 from app.remote_execution.worker_context import RemoteWorkerContext
 
@@ -174,9 +175,18 @@ class ZoomSpecRemoteItemExecutor:
         runtime_info = self._runtime_info_provider()
         zip_path = build_analysis_package_zip(
             output,
-            recording.dataset_key,
-            recording.dataset_name,
-            workspace,
+            pipeline_definition=ZOOMSPEC_FROZEN_DEFINITION,
+            label_space=ZOOMSPEC_FROZEN_DEFINITION.resolved_output_label_space,
+            runtime_descriptor=RuntimeDescriptor(
+                executor="remote_gpu",
+                device_type="cuda",
+                device_index=_DEVICE_INDEX,
+                precision="float16",
+            ),
+            parameters=item.parameters,
+            recording_name=recording.dataset_key,
+            dataset_name=recording.dataset_name,
+            workspace=workspace,
         )
 
         remote_finished_at = datetime.now(timezone.utc)

@@ -20,6 +20,7 @@ from app.imported_runs.archive import extract_package
 from app.imported_runs.validation import validate_extracted_package
 from app.pipelines.base import DetectionPayload, PipelineOutput
 from app.recordings.model import RecordingModel
+from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.schema import RemoteExecutionEnvelopeV1
 from app.remote_execution.source_hash import compute_file_sha256
 from app.remote_execution.validation import AnalysisResultWriter
@@ -143,22 +144,29 @@ def _validate_manifest_consistency(
     recording: RecordingModel,
     envelope: RemoteExecutionEnvelopeV1,
     writer: AnalysisResultWriter,
+    runtime_descriptor,
 ) -> None:
     if not (manifest.pipeline.id == run.pipeline_id == envelope.pipeline_id == writer.pipeline_definition.id):
         raise _remote_invalid("Remote package pipeline id does not match the AnalysisRun.")
     if not (manifest.pipeline.version == run.pipeline_version == envelope.pipeline_version
             == writer.pipeline_definition.version):
         raise _remote_invalid("Remote package pipeline version does not match the AnalysisRun.")
-    if manifest.label_space != recording.label_space or manifest.label_space != writer.pipeline_definition.label_space:
-        raise _remote_invalid("Remote package label space does not match the Recording.")
-    if manifest.execution.executor != "remote_gpu":
-        raise _remote_invalid("Remote package execution executor is not remote_gpu.")
-    if manifest.execution.device != "cuda:0":
-        raise _remote_invalid("Remote package execution device is not cuda:0.")
-    if manifest.execution.environment is not None:
-        raise _remote_invalid("Remote package execution environment must be null.")
-    if manifest.parameters != {}:
-        raise _remote_invalid("Remote package parameters must be empty.")
+    # The package carries the plugin's resolved OUTPUT label space; it must NOT be
+    # conflated with the Recording's INPUT label space.
+    if manifest.label_space != writer.pipeline_definition.resolved_output_label_space:
+        raise _remote_invalid("Remote package label space does not match the plugin output label space.")
+    # Execution metadata must equal the persisted deployment descriptor projection.
+    # Legacy runs (no descriptor) retain only the frozen remote_gpu/cuda:0/None fallback.
+    if runtime_descriptor is not None:
+        expected_execution = runtime_descriptor.public_projection()
+    else:
+        expected_execution = {"executor": "remote_gpu", "device": "cuda:0", "environment": None}
+    if manifest.execution.model_dump() != expected_execution:
+        raise _remote_invalid(
+            "Remote package execution metadata does not match the persisted runtime descriptor."
+        )
+    if manifest.parameters != dict(run.parameters_json or {}):
+        raise _remote_invalid("Remote package parameters do not match the frozen run parameters.")
     if manifest.recording.name != recording.name:
         raise _remote_invalid("Remote package recording name does not match the Recording.")
     if manifest.recording.dataset != recording.dataset_name:
@@ -215,6 +223,10 @@ def ingest_remote_result(
         raise _remote_invalid("Remote results may only target a remote_gpu AnalysisRun.")
 
     metadata = _verify_envelope_identity(run, recording, envelope, writer)
+    try:
+        runtime_descriptor = RuntimeDescriptor.from_metadata(metadata.get("runtime_descriptor"))
+    except PlatformError:
+        raise _remote_invalid("Persisted runtime descriptor is invalid.")
 
     if not zip_path.is_file():
         raise _remote_invalid("Remote result ZIP is missing or is not a regular file.")
@@ -238,14 +250,21 @@ def ingest_remote_result(
         try:
             with zip_path.open("rb") as source:
                 root = extract_package(source, Path(temp_dir))
-            validated = validate_extracted_package(root, recording, writer.label_service)
+            validated = validate_extracted_package(
+                root,
+                recording,
+                writer.label_service,
+                expected_label_space=writer.pipeline_definition.resolved_output_label_space,
+            )
         except PlatformError as exc:
             if exc.code in {"INVALID_IMPORT_PACKAGE", "LABEL_SPACE_NOT_FOUND"}:
                 raise _remote_invalid(exc.message) from exc
             raise
         except Exception:
             raise _remote_invalid("Remote result package is invalid.")
-        _validate_manifest_consistency(validated.manifest, run, recording, envelope, writer)
+        _validate_manifest_consistency(
+            validated.manifest, run, recording, envelope, writer, runtime_descriptor
+        )
         output = _package_to_pipeline_output(validated, envelope)
 
     writer.persist(run=run, recording=recording, output=output)

@@ -18,6 +18,7 @@ from app.remote_execution.result_ingestor import (
     parse_remote_execution_envelope_json,
 )
 from app.remote_execution.schema import RemoteExecutionEnvelopeV1
+from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.source_hash import compute_file_sha256
 from app.remote_execution.validation import AnalysisResultWriter
 
@@ -34,12 +35,13 @@ class SpyWriter(AnalysisResultWriter):
         return super().persist(*args, **kwargs)
 
 
-def _definition():
+def _definition(*, output_label_space=None, label_space="spacenet_14"):
     return PipelineDefinition(
         id="pipeline_x",
         name="Pipeline X",
         version="1.0",
-        label_space="spacenet_14",
+        label_space=label_space,
+        output_label_space=output_label_space,
         recommended_device="CPU",
         cpu_supported=True,
         stages=(),
@@ -56,7 +58,8 @@ def _seed_recording(session):
     return recording
 
 
-def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_key=None, executor="remote_gpu"):
+def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_key=None,
+                     executor="remote_gpu", runtime_descriptor=None, parameters_json=None):
     _seed_recording(session)
     metadata = {
         "request_id": "req_1",
@@ -68,6 +71,8 @@ def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_
         "required_remote_runtime_commit": ORCHESTRATOR_COMMIT,
         "asset_manifest_sha256": "c" * 64,
     }
+    if runtime_descriptor is not None:
+        metadata["runtime_descriptor"] = runtime_descriptor
     if payload_sha256 is not None:
         metadata = dict(metadata)
         metadata["payload_sha256"] = payload_sha256
@@ -80,7 +85,7 @@ def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_
         pipeline_version="1.0",
         executor=executor,
         status=status,
-        parameters_json={},
+        parameters_json=dict(parameters_json or {}),
         execution_metadata_json=metadata,
     )
     session.add(run)
@@ -156,11 +161,11 @@ def _write_analysis_result_zip(tmp_path, *, manifest_overrides=None, detection_o
     return zip_path, payload
 
 
-def _writer(session, settings, workspace):
+def _writer(session, settings, workspace, definition=None):
     return SpyWriter(
         session=session,
         label_service=LabelSpaceService(settings.label_space_root),
-        pipeline_definition=_definition(),
+        pipeline_definition=definition or _definition(),
         workspace=workspace,
     )
 
@@ -554,3 +559,189 @@ def test_ingestor_owns_no_transaction(session, tmp_path, settings, monkeypatch):
     assert result == payload
     assert run.status == "completed"
     original_rollback()
+
+
+# ---------------------------------------------------------------------------
+# D5 — descriptor projection + input/output label space + parameters
+# ---------------------------------------------------------------------------
+
+_M9_2_DESCRIPTOR = RuntimeDescriptor(
+    executor="remote_gpu",
+    device_type="cuda",
+    device_index=3,
+    precision="float16",
+    environment_ref="private-autodl-ref",
+    environment_label="autodl_primary",
+)
+
+
+def _descriptor_metadata(descriptor=_M9_2_DESCRIPTOR):
+    return descriptor.to_metadata()
+
+
+def test_m9_2_descriptor_projection_is_required_exactly(session, tmp_path, settings):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(tmp_path, manifest_overrides={
+        "execution": {"executor": "remote_gpu", "device": "cuda:3", "environment": "autodl_primary"},
+    })
+    run = _seed_remote_run(session, status="running", runtime_descriptor=_descriptor_metadata())
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    result = ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+
+    assert result == payload
+    assert run.status == "completed"
+    assert writer.persist_calls == 1
+
+
+@pytest.mark.parametrize("execution_override", [
+    {"device": "cuda:0"},
+    {"device": "cuda:2"},
+    {"environment": None},
+    {"executor": "local_cpu"},
+])
+def test_m9_2_descriptor_projection_mismatch_fails_closed(
+    session, tmp_path, settings, execution_override
+):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    execution = {"executor": "remote_gpu", "device": "cuda:3", "environment": "autodl_primary"}
+    execution.update(execution_override)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"execution": execution}
+    )
+    _seed_remote_run(session, status="running", runtime_descriptor=_descriptor_metadata())
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+
+
+def test_legacy_run_without_descriptor_retains_cuda_0_none_fallback(session, tmp_path, settings):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    # No runtime_descriptor in the persisted metadata -> frozen legacy fallback.
+    zip_path, payload = _write_analysis_result_zip(tmp_path)
+    _seed_remote_run(session, status="running")
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    assert ingest_remote_result(session, "run_r", envelope, zip_path, writer) == payload
+    assert writer.persist_calls == 1
+
+
+def test_m9_2_descriptor_private_ref_never_needed_by_package(session, tmp_path, settings):
+    """The package only needs the public projection; the private environment_ref
+    is internal provenance and is not part of the manifest contract."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(tmp_path, manifest_overrides={
+        "execution": {"executor": "remote_gpu", "device": "cuda:3", "environment": "autodl_primary"},
+    })
+    _seed_remote_run(session, status="running", runtime_descriptor=_descriptor_metadata())
+    writer = _writer(session, settings, workspace)
+    assert ingest_remote_result(session, "run_r", _envelope(payload), zip_path, writer) == payload
+
+
+def test_output_label_space_package_is_accepted(session, tmp_path, settings):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path,
+        manifest_overrides={"label_space": "signal_presence_v1"},
+        detection_overrides={"class_id": 0, "class_name": "Signal"},
+    )
+    run = _seed_remote_run(session, status="running")
+    envelope = _envelope(payload)
+    writer = _writer(
+        session, settings, workspace,
+        definition=_definition(output_label_space="signal_presence_v1"),
+    )
+
+    assert ingest_remote_result(session, "run_r", envelope, zip_path, writer) == payload
+    assert writer.persist_calls == 1
+    assert run.status == "completed"
+    detections = _detections(session)
+    assert detections[0].class_name == "Signal"
+
+
+def test_output_label_space_rejects_input_label_space_package(session, tmp_path, settings):
+    """A package labelled with the INPUT label space must fail when the plugin's
+    resolved OUTPUT label space differs (C4 debt fixed)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(tmp_path)  # label_space spacenet_14
+    _seed_remote_run(session, status="running")
+    envelope = _envelope(payload)
+    writer = _writer(
+        session, settings, workspace,
+        definition=_definition(output_label_space="signal_presence_v1"),
+    )
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+
+
+def test_output_label_space_class_validation_uses_output_space(session, tmp_path, settings):
+    """Class validation must use the OUTPUT label space, while physical-box
+    validation still uses the Recording."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    # 'LoRa 250kHz' (class 9) is valid for spacenet_14 but not signal_presence_v1.
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"label_space": "signal_presence_v1"},
+    )
+    _seed_remote_run(session, status="running")
+    envelope = _envelope(payload)
+    writer = _writer(
+        session, settings, workspace,
+        definition=_definition(output_label_space="signal_presence_v1"),
+    )
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+
+
+def test_manifest_parameters_must_match_frozen_run_parameters(session, tmp_path, settings):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"parameters": {"threshold": 0.5}},
+    )
+    _seed_remote_run(session, status="running", parameters_json={"threshold": 0.5})
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    assert ingest_remote_result(session, "run_r", envelope, zip_path, writer) == payload
+    assert writer.persist_calls == 1
+
+
+@pytest.mark.parametrize("parameters_override", [
+    {"threshold": 0.5},
+    {"threshold": 0.5, "extra": 1},
+])
+def test_manifest_parameters_mismatch_fails_closed(
+    session, tmp_path, settings, parameters_override
+):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"parameters": parameters_override},
+    )
+    _seed_remote_run(session, status="running", parameters_json={})
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0

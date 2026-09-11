@@ -17,11 +17,13 @@ from benchmark_fixture import add_recording
 from app.analysis.model import AnalysisRunModel
 from app.core.errors import PlatformError
 from app.pipelines.base import DetectionPayload, PipelineOutput
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition import ZOOMSPEC_FROZEN_DEFINITION
 from app.recordings.model import RecordingModel
 from app.remote_execution.coordinator import Coordinator
 from app.remote_execution.package_publisher import build_analysis_package_zip
 from app.remote_execution.request_builder import freeze_request_provenance
 from app.remote_execution.result_publisher import publish_result
+from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.schema import RemoteBatchStatusV1, RemoteItemStatusV1
 
 RUN = "a" * 40
@@ -113,7 +115,16 @@ def _materialize_real(batch_id, item_key, dest):
                          f_high_hz=2440700000.0, class_id=9,
                          class_name="LoRa 250kHz", confidence=0.94),
     ])
-    zip_path = build_analysis_package_zip(output, "0", "SpaceNet", scratch / "work")
+    zip_path = build_analysis_package_zip(
+        output,
+        pipeline_definition=ZOOMSPEC_FROZEN_DEFINITION,
+        label_space="spacenet_14",
+        runtime_descriptor=RuntimeDescriptor("remote_gpu", "cuda", 0, "float16"),
+        parameters={},
+        recording_name="0",
+        dataset_name="SpaceNet",
+        workspace=scratch / "work",
+    )
     publish_result(
         job_root=scratch, item=item, batch=batch, zip_path=zip_path,
         remote_runtime_commit=RUN, asset_manifest_sha256=MANIFEST,

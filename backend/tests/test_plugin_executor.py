@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 from hashlib import sha256
+import json
 from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
+import zipfile
 
 import pytest
 
@@ -409,6 +411,40 @@ def test_executor_rejects_incompatible_recording_label_space(tmp_path):
     assert adapter.calls == []          # before adapter resolution
     assert handle.load_runtime_calls == []
     assert publisher.calls == []
+
+
+def test_executor_accepts_production_publish_package_seam(tmp_path, monkeypatch):
+    """D5's production ``publish_package`` is directly injectable into the D3A
+    package-publisher seam: the generic executor drives a real ZIP + delegated
+    write-once publication with no ZoomSpec knowledge."""
+    from app.remote_execution import package_publisher as package_publisher_module
+    from app.remote_execution.package_publisher import publish_package
+
+    captured = {}
+    monkeypatch.setattr(
+        package_publisher_module, "publish_result", lambda **kwargs: captured.update(kwargs)
+    )
+    manifest, asset = _manifest(tmp_path)
+    resolved = _resolved(manifest)
+    batch = _batch(manifest)
+    executor, handle, _ = _executor(
+        batch=batch, definition=_definition(), store=_FakeStore(resolved),
+        resolver=_Recorder({"w": asset}), publisher=publish_package,
+    )
+    executor.execute(batch.items[0], tmp_path / "job")
+
+    assert captured["zip_path"].is_file()
+    assert captured["item"] is batch.items[0]
+    assert captured["remote_runtime_commit"] == RUN
+    with zipfile.ZipFile(captured["zip_path"]) as archive:
+        package_manifest = json.loads(archive.read("manifest.json"))
+    assert package_manifest["pipeline"]["id"] == PLUGIN_ID
+    assert package_manifest["execution"] == {
+        "executor": "remote_gpu",
+        "device": "cuda:0",
+        "environment": DESCRIPTOR.environment_label,
+    }
+    assert package_manifest["parameters"] == {}
 
 
 def test_plugin_executor_module_import_is_torch_free():

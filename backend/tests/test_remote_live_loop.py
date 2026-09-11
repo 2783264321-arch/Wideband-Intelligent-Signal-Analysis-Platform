@@ -18,11 +18,13 @@ from benchmark_fixture import add_detection, add_ground_truth, add_recording
 from app.analysis.model import AnalysisRunModel
 from app.detections.model import DetectionResultModel
 from app.pipelines.base import DetectionPayload, PipelineOutput
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition import ZOOMSPEC_FROZEN_DEFINITION
 from app.recordings.model import RecordingModel
 from app.remote_execution.coordinator import Coordinator, make_production_writer_factory
 from app.remote_execution.package_publisher import build_analysis_package_zip
 from app.remote_execution.request_builder import freeze_request_provenance
 from app.remote_execution.result_publisher import publish_result
+from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.schema import RemoteBatchStatusV1, RemoteItemStatusV1
 
 RUN = "a" * 40
@@ -128,8 +130,14 @@ class MaterializingJobManager:
         scratch = Path(tempfile.mkdtemp(prefix="live_loop_terminal_"))
         output = PipelineOutput(detections=[_to_payload(d) for d in self.detections])
         zip_path = build_analysis_package_zip(
-            output, item.recording.dataset_key, item.recording.dataset_name,
-            scratch / "work",
+            output,
+            pipeline_definition=ZOOMSPEC_FROZEN_DEFINITION,
+            label_space="spacenet_14",
+            runtime_descriptor=RuntimeDescriptor("remote_gpu", "cuda", 0, "float16"),
+            parameters={},
+            recording_name=item.recording.dataset_key,
+            dataset_name=item.recording.dataset_name,
+            workspace=scratch / "work",
         )
         publish_result(
             job_root=scratch,
