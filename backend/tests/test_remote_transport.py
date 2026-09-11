@@ -868,6 +868,11 @@ def test_probe_submit_work_argv_contain_full_scalar_worker_env(tmp_path, subcomm
         "WSP_REMOTE_FRN_CHECKPOINT=/root/models/frn.pt",
         "WSP_REMOTE_FROZEN_CONFIG=/root/models/frozen_config.json",
         "WSP_REMOTE_LS_STFT_NORMALIZATION=/root/models/ls_stft_normalization.json",
+        "WSP_REMOTE_DEVICE_TYPE=cuda",
+        "WSP_REMOTE_DEVICE_INDEX=0",
+        "WSP_REMOTE_PRECISION=float16",
+        "WSP_REMOTE_ENVIRONMENT_REF=autodl_primary",
+        "WSP_REMOTE_ENVIRONMENT_LABEL=autodl_primary",
     ]
     assert env_tokens == expected
 
@@ -1109,6 +1114,18 @@ def test_no_json_mapping_in_remote_command(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _unquote_assignment(token: str) -> str:
+    """Undo the value-only quoting applied by the transport's remote-shell bridge."""
+    name, sep, value = token.partition("=")
+    if len(value) >= 2 and value.startswith("'") and value.endswith("'"):
+        value = value[1:-1].replace("'\"'\"'", "'")
+    return f"{name}{sep}{value}"
+
+
+def _assignment(prefix, name):
+    return next(p for p in prefix if p.split("=", 1)[0] == name)
+
+
 def test_runner_env_prefix_forwards_generic_namespaced_assets(tmp_path):
     import dataclasses
     import json
@@ -1132,16 +1149,123 @@ def test_runner_env_prefix_forwards_generic_namespaced_assets(tmp_path):
     )
     assert f"{ENV_MANIFEST_ROOT}=/root/manifests" in prefix
     assert f"{ENV_DEVICE_INDEX}=1" in prefix
-    asset_line = next(p for p in prefix if p.startswith(ENV_ASSET_PATHS_JSON + "="))
-    assert json.loads(asset_line.split("=", 1)[1]) == {namespace: {"w": "/root/assets/w.pt"}}
+    asset_line = _assignment(prefix, ENV_ASSET_PATHS_JSON)
+    assert json.loads(_unquote_assignment(asset_line).split("=", 1)[1]) == {
+        namespace: {"w": "/root/assets/w.pt"}
+    }
 
 
-def test_runner_env_prefix_legacy_has_no_generic_env(tmp_path):
+def test_runner_env_prefix_legacy_has_no_generic_env_but_carries_descriptor(tmp_path):
     from app.remote_execution.transport import SshRunner
-    from app.remote_execution.worker_context import ENV_ASSET_PATHS_JSON, ENV_MANIFEST_ROOT
+    from app.remote_execution.worker_context import (
+        ENV_ASSET_PATHS_JSON,
+        ENV_ENVIRONMENT_LABEL,
+        ENV_ENVIRONMENT_REF,
+        ENV_MANIFEST_ROOT,
+    )
 
     prefix = SshRunner(_profile(tmp_path))._runner_env_prefix(
         "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
     )
     assert not any(p.startswith(ENV_ASSET_PATHS_JSON + "=") for p in prefix)
     assert not any(p.startswith(ENV_MANIFEST_ROOT + "=") for p in prefix)
+    assert f"{ENV_ENVIRONMENT_REF}=autodl_primary" in prefix
+    assert f"{ENV_ENVIRONMENT_LABEL}=autodl_primary" in prefix
+
+
+def test_runner_env_prefix_legacy_and_generic_coexist(tmp_path):
+    import dataclasses
+    import json
+
+    from app.remote_execution.transport import SshRunner
+    from app.remote_execution.worker_context import ENV_ASSET_PATHS_JSON
+
+    namespace = "p/1.0.0/" + "b" * 64
+    profile = dataclasses.replace(
+        _profile(tmp_path),
+        manifest_root=PurePosixPath("/root/manifests"),
+        generic_asset_paths={namespace: {"w": PurePosixPath("/root/assets/w.pt")}},
+    )
+    prefix = SshRunner(profile)._runner_env_prefix(
+        "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
+    )
+    assert "WSP_REMOTE_DETECTOR_CHECKPOINT=/root/models/best.pt" in prefix
+    namespaced = json.loads(
+        _unquote_assignment(_assignment(prefix, ENV_ASSET_PATHS_JSON)).split("=", 1)[1]
+    )
+    assert namespaced == {namespace: {"w": "/root/assets/w.pt"}}
+    runner = SshRunner(profile, run_process=ProcessRecorder())
+    runner.validate_runner_environment("work")
+
+
+def test_runner_env_prefix_remote_shell_roundtrip_preserves_namespaced_json(tmp_path):
+    """Run the real env-prefix tokens through ``sh -c`` the way OpenSSH does."""
+    import dataclasses
+    import json
+    import shlex
+    import shutil
+    import subprocess as sp
+
+    from app.remote_execution.transport import SshRunner
+    from app.remote_execution.worker_context import ENV_ASSET_PATHS_JSON
+
+    sh = shutil.which("sh")
+    assert sh is not None
+    namespace = "p/1.0.0/" + "b" * 64
+    profile = dataclasses.replace(
+        _profile(tmp_path),
+        manifest_root=PurePosixPath("/root/manifests"),
+        generic_asset_paths={namespace: {"w": PurePosixPath("/root/assets/w.pt")}},
+    )
+    prefix = SshRunner(profile)._runner_env_prefix(
+        "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
+    )
+    # OpenSSH concatenates the remote command args with single spaces and hands the
+    # string to the login shell; emulate with `sh -c "env <assignments> sh -c '...'"`.
+    remote_command = " ".join(prefix) + " " + sh + " -c " + shlex.quote('printf %s "$WSP_REMOTE_ASSET_PATHS_JSON"')
+    completed = sp.run([sh, "-c", remote_command], capture_output=True, text=True, check=True)
+    assert completed.stdout == json.dumps(
+        {namespace: {"w": "/root/assets/w.pt"}}, separators=(",", ":"), sort_keys=True
+    )
+    assert json.loads(completed.stdout) == {namespace: {"w": "/root/assets/w.pt"}}
+
+
+def test_profile_and_worker_descriptor_identity_after_remote_shell(tmp_path):
+    """The worker reconstructs the exact deployment-owned descriptor after the
+    env bridge, including environment identity, even without generic assets."""
+    import dataclasses
+    import shlex
+    import shutil
+    import subprocess as sp
+
+    from app.remote_execution.transport import SshRunner
+    from app.remote_execution.worker_context import RemoteWorkerContext
+
+    sh = shutil.which("sh")
+    assert sh is not None
+    profile = dataclasses.replace(_profile(tmp_path), device_index=3)
+    prefix = SshRunner(profile)._runner_env_prefix(
+        "work", PurePosixPath("/root/repo/backend"), PurePosixPath("/root/jobs")
+    )
+    remote = " ".join(prefix) + " " + sh + " -c " + shlex.quote("env")
+    stdout = sp.run([sh, "-c", remote], capture_output=True, text=True, check=True).stdout
+    env = {}
+    for line in stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            env[key] = value
+    worker = RemoteWorkerContext.from_env(env)
+    assert worker.runtime_descriptor() == profile.runtime_descriptor()
+    assert worker.runtime_descriptor().environment_ref == profile.name
+    assert worker.runtime_descriptor().environment_label == profile.name
+
+
+def test_remote_profile_descriptor_cuda_only_and_index_required(tmp_path):
+    import dataclasses
+
+    base = _profile(tmp_path)
+    with pytest.raises(PlatformError):
+        dataclasses.replace(base, device_type="cpu").runtime_descriptor()
+    with pytest.raises(PlatformError):
+        dataclasses.replace(base, device_index=None).runtime_descriptor()
+    assert dataclasses.replace(base, device_index=2).runtime_descriptor().device_index == 2

@@ -116,42 +116,13 @@ def _safe_posix_mapping(value: str | None, name: str) -> dict[str, PurePosixPath
     return result
 
 
-def _safe_namespaced_posix_mapping(value: str | None, name: str) -> dict[str, dict[str, PurePosixPath]]:
-    """Parse the generic namespaced asset mapping (D4, additive)."""
-    if value is None or value == "":
-        return {}
-    try:
-        parsed = json.loads(value)
-    except (ValueError, TypeError):
-        raise _unavailable(f"{name} is not valid JSON.")
-    if not isinstance(parsed, dict):
-        raise _unavailable(f"{name} must be a JSON object.")
-    result: dict[str, dict[str, PurePosixPath]] = {}
-    for namespace, mapping in parsed.items():
-        if not isinstance(namespace, str):
-            raise _unavailable(f"{name} keys must be strings.")
-        parts = namespace.split("/")
-        if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
-            raise _unavailable(f"{name} key must be '<plugin_id>/<plugin_version>/<sha256>'.")
-        if not isinstance(mapping, dict) or not mapping:
-            raise _unavailable(f"{name}[{namespace}] must be a non-empty object.")
-        logical: dict[str, PurePosixPath] = {}
-        for logical_name, raw in mapping.items():
-            if not isinstance(logical_name, str) or _IDENTIFIER_RE.fullmatch(logical_name) is None:
-                raise _unavailable(f"{name}[{namespace}] has an invalid logical asset name.")
-            if not isinstance(raw, str):
-                raise _unavailable(f"{name}[{namespace}][{logical_name}] must be a string.")
-            logical[logical_name] = _safe_posix_root(raw, f"{name}[{namespace}][{logical_name}]")
-        result[namespace] = logical
-    return result
-
-
 def _parse_asset_paths(raw: str | None) -> tuple[dict[str, PurePosixPath], dict[str, dict[str, PurePosixPath]]]:
-    """Discriminate the legacy flat shape from the generic namespaced shape.
+    """Partition ``WSP_REMOTE_ASSET_PATHS_JSON`` into legacy + generic subsets.
 
-    ``WSP_REMOTE_ASSET_PATHS_JSON`` keeps its legacy flat shape
-    (``{"detector_checkpoint": "/abs"}``) while D4 adds the namespaced shape
-    (``{"<plugin>/<version>/<sha>": {"logical": "/abs"}}``). Mixed shapes fail closed.
+    A single top-level object MAY contain both: legacy ``logical -> "/abs/path"``
+    string entries and generic ``"<plugin>/<version>/<sha>" -> {logical: "/abs"}``
+    object entries. Entries are partitioned deterministically; malformed or
+    ambiguous entries fail closed.
     """
     if raw is None or raw == "":
         return {}, {}
@@ -161,14 +132,38 @@ def _parse_asset_paths(raw: str | None) -> tuple[dict[str, PurePosixPath], dict[
         raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON is not valid JSON.")
     if not isinstance(parsed, dict):
         raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON must be a JSON object.")
-    if not parsed:
-        return {}, {}
-    values = list(parsed.values())
-    if all(isinstance(value, str) for value in values):
-        return _safe_posix_mapping(raw, "WSP_REMOTE_ASSET_PATHS_JSON"), {}
-    if all(isinstance(value, dict) for value in values):
-        return {}, _safe_namespaced_posix_mapping(raw, "WSP_REMOTE_ASSET_PATHS_JSON")
-    raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON mixes flat and namespaced shapes.")
+    flat: dict[str, PurePosixPath] = {}
+    generic: dict[str, dict[str, PurePosixPath]] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str) or not key:
+            raise _unavailable("WSP_REMOTE_ASSET_PATHS_JSON keys must be non-empty strings.")
+        if isinstance(value, str):
+            _safe_identifier(key, "WSP_REMOTE_ASSET_PATHS_JSON legacy key")
+            flat[key] = _safe_posix_root(value, f"WSP_REMOTE_ASSET_PATHS_JSON[{key}]")
+        elif isinstance(value, dict):
+            parts = key.split("/")
+            if len(parts) != 3 or not parts[0] or not parts[1] or _SHA256_RE.fullmatch(parts[2]) is None:
+                raise _unavailable(
+                    "WSP_REMOTE_ASSET_PATHS_JSON generic key must be "
+                    "'<plugin_id>/<plugin_version>/<sha256>'."
+                )
+            if not value:
+                raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] must be a non-empty object.")
+            logical: dict[str, PurePosixPath] = {}
+            for logical_name, path_text in value.items():
+                if not isinstance(logical_name, str) or _IDENTIFIER_RE.fullmatch(logical_name) is None:
+                    raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}] has an invalid logical name.")
+                if not isinstance(path_text, str):
+                    raise _unavailable(f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}] must be a string.")
+                logical[logical_name] = _safe_posix_root(
+                    path_text, f"WSP_REMOTE_ASSET_PATHS_JSON[{key}][{logical_name}]"
+                )
+            generic[key] = logical
+        else:
+            raise _unavailable(
+                "WSP_REMOTE_ASSET_PATHS_JSON entries must be a string (legacy) or object (generic)."
+            )
+    return flat, generic
 
 
 @dataclass(frozen=True)
@@ -204,10 +199,14 @@ class RemoteProfile:
         """
         from app.remote_execution.runtime import RuntimeDescriptor
 
+        if self.device_type != "cuda":
+            raise _unavailable("remote_gpu is CUDA-only; non-cuda profiles are unsupported.")
+        if self.device_index is None or self.device_index < 0:
+            raise _unavailable("Remote CUDA device_index must be a configured non-negative integer.")
         return RuntimeDescriptor(
             executor="remote_gpu",
-            device_type=self.device_type,
-            device_index=self.device_index if self.device_type == "cuda" else None,
+            device_type="cuda",
+            device_index=self.device_index,
             precision=self.precision,
             environment_ref=self.name,
             environment_label=self.name,
@@ -257,8 +256,8 @@ class RemoteProfile:
             else None
         )
         device_type = env.get("WSP_REMOTE_DEVICE_TYPE", "cuda")
-        if device_type not in ("cpu", "cuda"):
-            raise _unavailable("WSP_REMOTE_DEVICE_TYPE must be 'cpu' or 'cuda'.")
+        if device_type != "cuda":
+            raise _unavailable("remote_gpu is CUDA-only; WSP_REMOTE_DEVICE_TYPE must be 'cuda'.")
         try:
             device_index = int(env.get("WSP_REMOTE_DEVICE_INDEX", "0"))
         except (TypeError, ValueError):

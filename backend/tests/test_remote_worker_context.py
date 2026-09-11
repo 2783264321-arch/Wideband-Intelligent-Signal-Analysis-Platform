@@ -18,6 +18,9 @@ from app.core.errors import PlatformError
 from app.remote_execution.worker_context import (
     ENV_ASSET_PATHS_JSON,
     ENV_DETECTOR_CHECKPOINT,
+    ENV_DEVICE_TYPE,
+    ENV_ENVIRONMENT_LABEL,
+    ENV_ENVIRONMENT_REF,
     ENV_FRN_CHECKPOINT,
     ENV_FROZEN_CONFIG,
     ENV_JOB_ROOT,
@@ -254,3 +257,51 @@ def test_unsafe_generic_path_rejected(monkeypatch):
     with pytest.raises(PlatformError) as exc:
         RemoteWorkerContext.from_env()
     assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_mixed_legacy_and_namespaced_assets_parse_together(monkeypatch):
+    env = _full_env()
+    env[ENV_MANIFEST_ROOT] = "/root/manifests"
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({
+        "detector_checkpoint": DETECTOR,
+        "extra_legacy": "/root/models/extra.pt",
+        _GENERIC_NAMESPACE: {"w": "/root/assets/w.pt"},
+    })
+    _apply(monkeypatch, env)
+    context = RemoteWorkerContext.from_env()
+    assert context.detector_checkpoint == Path(DETECTOR)
+    resolved = context.resolve_assets(
+        plugin_id=_PLUGIN_ID, plugin_version=_PLUGIN_VERSION,
+        asset_manifest_sha256=_GENERIC_SHA, manifest=SimpleNamespace(assets={"w": "x"}),
+    )
+    assert resolved == {"w": Path("/root/assets/w.pt")}
+
+
+def test_malformed_mixed_asset_entry_rejected(monkeypatch):
+    env = _full_env()
+    env[ENV_ASSET_PATHS_JSON] = json.dumps({"detector_checkpoint": 123})
+    _apply(monkeypatch, env)
+    with pytest.raises(PlatformError) as exc:
+        RemoteWorkerContext.from_env()
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_non_cuda_remote_worker_rejected(monkeypatch):
+    env = _full_env()
+    env[ENV_DEVICE_TYPE] = "cpu"
+    _apply(monkeypatch, env)
+    with pytest.raises(PlatformError) as exc:
+        RemoteWorkerContext.from_env()
+    assert exc.value.code == "REMOTE_WORKER_CONTEXT_INVALID"
+
+
+def test_worker_descriptor_carries_environment_identity(monkeypatch):
+    env = _full_env()
+    env[ENV_ENVIRONMENT_REF] = "remote:autodl_primary:abc"
+    env[ENV_ENVIRONMENT_LABEL] = "autodl_primary"
+    _apply(monkeypatch, env)
+    descriptor = RemoteWorkerContext.from_env().runtime_descriptor()
+    assert descriptor.executor == "remote_gpu"
+    assert (descriptor.device_type, descriptor.device_index) == ("cuda", 0)
+    assert descriptor.environment_ref == "remote:autodl_primary:abc"
+    assert descriptor.environment_label == "autodl_primary"

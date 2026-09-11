@@ -40,10 +40,12 @@ def _require_label_space(label_space_root: Path) -> None:
 
 
 def _require_cuda_device(descriptor, torch_import: Any) -> None:
+    index = descriptor.device_index
+    if index is None or index < 0:
+        raise _probe_unavailable("Remote CUDA device_index must be a configured non-negative integer.")
     torch = torch_import if torch_import is not None else __import__("torch")
     if not torch.cuda.is_available():
         raise _probe_unavailable("CUDA is not available on the remote runtime.")
-    index = descriptor.device_index if descriptor.device_index is not None else 0
     try:
         torch.cuda.get_device_name(index)
     except Exception:
@@ -51,11 +53,11 @@ def _require_cuda_device(descriptor, torch_import: Any) -> None:
 
 
 def _require_accelerator(descriptor, torch_import: Any) -> None:
-    """Descriptor-driven readiness: CUDA probes its exact device index; a CPU
-    descriptor performs no CUDA check (CPU readiness is owned by the local
-    inference worker probe, not this remote probe)."""
-    if getattr(descriptor, "device_type", None) == "cuda":
-        _require_cuda_device(descriptor, torch_import)
+    """Descriptor-driven readiness: remote_gpu is CUDA-only in M9.2. A non-cuda
+    descriptor fails closed; a CUDA descriptor probes its exact device_index."""
+    if getattr(descriptor, "device_type", None) != "cuda":
+        raise _probe_unavailable("remote_gpu is CUDA-only; non-cuda descriptors are unsupported.")
+    _require_cuda_device(descriptor, torch_import)
 
 
 def run_probe(
@@ -87,5 +89,5 @@ def run_probe(
         status="available",
         remote_runtime_commit=worker.required_runtime_commit,
         asset_manifest_sha256=manifest.asset_manifest_sha256,
-        device=descriptor.device_index if descriptor.device_index is not None else 0,
+        device=descriptor.device_index,
     )

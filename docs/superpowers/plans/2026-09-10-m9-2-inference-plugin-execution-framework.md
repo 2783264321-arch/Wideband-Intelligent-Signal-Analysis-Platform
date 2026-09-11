@@ -1377,9 +1377,15 @@ entries fail closed with `REMOTE_WORKER_CONTEXT_INVALID`.
   absent/invalid — it fails closed instead. Add a separate generic
   readiness/config-completeness helper if needed rather than changing legacy
   required-env semantics.
-- `probe.py`: accept a `RuntimeDescriptor`; assert `device_type == "cpu"` is ready
-  only after interpreter/deps probe, and for `cuda` verify `torch.cuda` device
-  `device_index`. Remove `_DEVICE_INDEX = 0` literal.
+- `probe.py`: accept a `RuntimeDescriptor`; `remote_gpu` is **CUDA-only** in
+  M9.2 — a non-`cuda` descriptor fails closed (there is no remote-CPU readiness
+  path). A `cuda` descriptor MUST carry a non-null, non-negative `device_index`
+  and probes exactly that index; `None` is never substituted with `0`. Remove the
+  `_DEVICE_INDEX = 0` literal.
+- `profile.runtime_descriptor()` and the worker's reconstructed descriptor MUST
+  agree after the transport env bridge, including `environment_ref` /
+  `environment_label`; descriptor metadata is forwarded independently of generic
+  asset presence.
 - **D4 MUST NOT modify `runner._cli_work`** (that is D3B).
 
 **RED test (update `test_remote_worker_context.py`, `test_remote_probe.py`):**
@@ -1391,7 +1397,9 @@ def test_unknown_asset_namespace_fails_closed(): ...
 def test_generic_resolution_does_not_fall_back_to_legacy_fields(): ...
 def test_unsafe_path_rejected(): ...
 def test_probe_uses_descriptor_device_index(): ...
-def test_probe_cpu_requires_interpreter_check(): ...
+def test_probe_non_cuda_descriptor_fails_closed(): ...
+def test_probe_cuda_none_index_fails_closed(): ...
+def test_profile_and_worker_descriptor_identity_after_remote_shell(): ...
 ```
 
 **Expected failure (RED):** generic namespaced fields/descriptor probe missing.

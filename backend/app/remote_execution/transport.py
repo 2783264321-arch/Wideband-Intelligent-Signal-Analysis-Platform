@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import json
 import re
+import shlex
 import subprocess
 
 from app.core.errors import PlatformError
@@ -19,6 +20,8 @@ from app.remote_execution.worker_context import (
     ENV_DETECTOR_CHECKPOINT,
     ENV_DEVICE_INDEX,
     ENV_DEVICE_TYPE,
+    ENV_ENVIRONMENT_LABEL,
+    ENV_ENVIRONMENT_REF,
     ENV_FRN_CHECKPOINT,
     ENV_FROZEN_CONFIG,
     ENV_JOB_ROOT,
@@ -100,6 +103,18 @@ def _validate_remote_posix_path(path: str | PurePosixPath) -> PurePosixPath:
     if not is_safe_remote_posix_path_text(text):
         raise PlatformError("REMOTE_TRANSPORT_ERROR", "Remote path is not a safe absolute POSIX path.")
     return PurePosixPath(text)
+
+
+def _shell_assignment(name: str, value: str) -> str:
+    """Render a ``NAME=value`` env assignment that survives remote-shell parsing.
+
+    Only the *value* is shell-quoted; the ``NAME=`` prefix stays unquoted because
+    POSIX shells (notably ``dash``) only recognise unquoted assignment words.
+    ``shlex.quote`` leaves shell-safe values untouched and single-quotes any value
+    containing shell metacharacters (e.g. compact JSON), so the remote shell
+    reconstructs the exact byte value.
+    """
+    return f"{name}={shlex.quote(value)}"
 
 
 class SshRunner:
@@ -191,40 +206,54 @@ class SshRunner:
         job_root: PurePosixPath,
     ) -> list[str]:
         """Subcommand-specific scalar env bridge. probe/submit/work receive the
-        full worker env; status receives minimal env only."""
+        full worker env; status receives minimal env only.
+
+        Each ``NAME=value`` assignment is shell-quoted (``shlex.quote``) so the
+        deployed legacy scalar envs and the generic namespaced JSON survive
+        OpenSSH remote-shell parsing exactly. Descriptor metadata (device + the
+        deployment environment identity) is forwarded independently of generic
+        asset presence so the worker reconstructs the control-plane descriptor.
+        """
         prefix = [
-            f"PYTHONPATH={module_root.as_posix()}",
-            f"{ENV_JOB_ROOT}={job_root.as_posix()}",
+            _shell_assignment("PYTHONPATH", module_root.as_posix()),
+            _shell_assignment(ENV_JOB_ROOT, job_root.as_posix()),
         ]
         if subcommand not in _FULL_WORKER_ENV_SUBCOMMANDS:
             return prefix
         repo_root = _validate_remote_posix_path(self.profile.remote_repo_root)
         prefix.extend(
             [
-                f"{ENV_REPO_ROOT}={repo_root.as_posix()}",
-                f"{ENV_REQUIRED_RUNTIME_COMMIT}={self.profile.required_remote_runtime_commit}",
-                f"{ENV_SPACENET_ROOT}={self.profile.dataset_roots[_REQUIRED_DATASET_LOGICAL_KEYS[0]].as_posix()}",
-                f"{ENV_DETECTOR_CHECKPOINT}={self.profile.asset_paths['detector_checkpoint'].as_posix()}",
-                f"{ENV_FRN_CHECKPOINT}={self.profile.asset_paths['frn_checkpoint'].as_posix()}",
-                f"{ENV_FROZEN_CONFIG}={self.profile.asset_paths['frozen_config'].as_posix()}",
-                f"{ENV_LS_STFT_NORMALIZATION}={self.profile.asset_paths['ls_stft_normalization'].as_posix()}",
+                _shell_assignment(ENV_REPO_ROOT, repo_root.as_posix()),
+                _shell_assignment(ENV_REQUIRED_RUNTIME_COMMIT, self.profile.required_remote_runtime_commit),
+                _shell_assignment(ENV_SPACENET_ROOT, self.profile.dataset_roots[_REQUIRED_DATASET_LOGICAL_KEYS[0]].as_posix()),
+                _shell_assignment(ENV_DETECTOR_CHECKPOINT, self.profile.asset_paths['detector_checkpoint'].as_posix()),
+                _shell_assignment(ENV_FRN_CHECKPOINT, self.profile.asset_paths['frn_checkpoint'].as_posix()),
+                _shell_assignment(ENV_FROZEN_CONFIG, self.profile.asset_paths['frozen_config'].as_posix()),
+                _shell_assignment(ENV_LS_STFT_NORMALIZATION, self.profile.asset_paths['ls_stft_normalization'].as_posix()),
+                _shell_assignment(ENV_DEVICE_TYPE, self.profile.device_type),
+                _shell_assignment(ENV_DEVICE_INDEX, str(self.profile.device_index)),
+                _shell_assignment(ENV_PRECISION, self.profile.precision),
+                _shell_assignment(ENV_ENVIRONMENT_REF, self.profile.name),
+                _shell_assignment(ENV_ENVIRONMENT_LABEL, self.profile.name),
             ]
         )
-        # D4 (additive): forward optional generic namespaced assets + the
-        # deployment-owned descriptor fields when the profile carries them.
+        # D4 (additive): forward optional generic namespaced assets as compact,
+        # shell-quoted JSON. Legacy scalar envs above are unchanged.
         if self.profile.generic_asset_paths:
             if self.profile.manifest_root is not None:
-                prefix.append(f"{ENV_MANIFEST_ROOT}={self.profile.manifest_root.as_posix()}")
+                prefix.append(_shell_assignment(ENV_MANIFEST_ROOT, self.profile.manifest_root.as_posix()))
             namespaced = {
                 namespace: {
                     logical: path.as_posix() for logical, path in mapping.items()
                 }
                 for namespace, mapping in self.profile.generic_asset_paths.items()
             }
-            prefix.append(f"{ENV_ASSET_PATHS_JSON}={json.dumps(namespaced, sort_keys=True)}")
-            prefix.append(f"{ENV_DEVICE_TYPE}={self.profile.device_type}")
-            prefix.append(f"{ENV_DEVICE_INDEX}={self.profile.device_index}")
-            prefix.append(f"{ENV_PRECISION}={self.profile.precision}")
+            prefix.append(
+                _shell_assignment(
+                    ENV_ASSET_PATHS_JSON,
+                    json.dumps(namespaced, separators=(",", ":"), sort_keys=True),
+                )
+            )
         return prefix
 
     def run_runner(

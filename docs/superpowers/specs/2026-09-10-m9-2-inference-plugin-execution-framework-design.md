@@ -720,8 +720,15 @@ transition:
 - the **legacy ZoomSpec scalar env vars/fields are preserved during the D4
   transition**, so a legacy-only worker configuration that still drives the
   current `ZoomSpecRemoteItemExecutor` (`runner._cli_work`) keeps constructing and
-  executing until D3B. They are retired only by an explicit post-D3B
-  cleanup/migration;
+  executing until D3B. A single deployment config object MAY carry **both** the
+  legacy flat subset (`logical -> "/abs"`) and the generic namespaced subset
+  (`"<plugin_id>/<plugin_version>/<sha256>" -> {logical: "/abs"}`); D4 partitions
+  them deterministically and rejects malformed/ambiguous entries. `SshRunner`
+  derives the legacy scalar envs from the flat subset and sends only the generic
+  namespaced subset as `WSP_REMOTE_ASSET_PATHS_JSON` (compact, shell-quoted so it
+  survives the remote login shell). Legacy fields are retired only by the D3B
+  cutover / an explicit post-D3B cleanup — generic-only operation is **not**
+  required before D3B;
 - generic trusted-asset/runtime APIs MUST fail closed (`REMOTE_WORKER_CONTEXT_INVALID`)
   when their own generic configuration is absent or invalid; they MUST NOT
   silently fall back to legacy ZoomSpec fields;
@@ -752,10 +759,15 @@ SHA256 only.
 **Readiness probe.** Executor readiness is probed per `RuntimeDescriptor`; the
 platform MUST NOT assume any device is always ready. A `local_cpu`/`local_gpu`
 probe verifies the configured inference interpreter, the plugin's runtime
-dependencies, and the resolved assets. A `remote_gpu` probe verifies the pinned
-runtime commit, asset manifest + bytes, dataset root, and the descriptor's CUDA
-device index. The existing `backend/app/remote_execution/probe.py` device-0
-assumption is replaced by descriptor-driven checks.
+dependencies, and the resolved assets. `remote_gpu` is **CUDA-only** in M9.2: a
+non-`cuda` remote descriptor fails closed (there is no remote-CPU readiness
+path). A `remote_gpu` probe verifies the pinned runtime commit, asset manifest +
+bytes, dataset root, and a configured **non-null, non-negative** CUDA
+`device_index` (never substituted with `0`). The existing
+`backend/app/remote_execution/probe.py` device-0 assumption is replaced by
+descriptor-driven checks, and `RemoteProfile.runtime_descriptor()` and the
+worker's reconstructed descriptor agree after the transport env bridge, including
+environment identity.
 
 ### 11.5 ItemExecutor / Plugin registry seam
 

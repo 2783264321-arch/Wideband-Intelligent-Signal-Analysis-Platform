@@ -279,7 +279,7 @@ def test_probe_uses_descriptor_device_index(tmp_path, monkeypatch):
     assert response.device == 0
 
 
-def test_probe_cpu_descriptor_skips_cuda(tmp_path, monkeypatch):
+def test_probe_non_cuda_descriptor_fails_closed(tmp_path, monkeypatch):
     worker, _ = _write_real_deployment(tmp_path, monkeypatch)
 
     class NoCuda:
@@ -291,5 +291,41 @@ def test_probe_cpu_descriptor_skips_cuda(tmp_path, monkeypatch):
         cuda = NoCuda
 
     descriptor = RuntimeDescriptor("remote_gpu", "cpu", None, "float32")
-    response = probe_module.run_probe(worker, descriptor=descriptor, torch_import=NoCudaTorch)
+    with pytest.raises(PlatformError) as exc:
+        probe_module.run_probe(worker, descriptor=descriptor, torch_import=NoCudaTorch)
+    assert exc.value.code == "REMOTE_PROBE_UNAVAILABLE"
+
+
+def test_probe_cuda_none_index_fails_closed(tmp_path, monkeypatch):
+    worker, _ = _write_real_deployment(tmp_path, monkeypatch)
+    descriptor = RuntimeDescriptor("remote_gpu", "cuda", None, "float16")
+    with pytest.raises(PlatformError) as exc:
+        probe_module.run_probe(worker, descriptor=descriptor, torch_import=FakeTorch)
+    assert exc.value.code == "REMOTE_PROBE_UNAVAILABLE"
+
+
+def test_probe_uses_configured_nonzero_index(tmp_path, monkeypatch):
+    worker, _ = _write_real_deployment(tmp_path, monkeypatch)
+
+    class NonZeroCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def get_device_name(index):
+            if index != 3:
+                raise RuntimeError("no such device")
+            return "NVIDIA RTX 5090"
+
+    class NonZeroTorch:
+        cuda = NonZeroCuda
+
+    descriptor = RuntimeDescriptor("remote_gpu", "cuda", 3, "float16")
+    response = probe_module.run_probe(worker, descriptor=descriptor, torch_import=NonZeroTorch)
     assert response.status == "available"
+    assert response.device == 3
+
+    bad = RuntimeDescriptor("remote_gpu", "cuda", 1, "float16")
+    with pytest.raises(PlatformError):
+        probe_module.run_probe(worker, descriptor=bad, torch_import=NonZeroTorch)
