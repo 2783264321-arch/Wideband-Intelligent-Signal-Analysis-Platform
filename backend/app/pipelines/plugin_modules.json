@@ -2,6 +2,6 @@
   "modules": [
     "app.pipelines.dummy",
     "app.pipelines.stft_energy.pipeline",
-    "app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition"
+    "app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin"
   ]
 }

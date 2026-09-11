@@ -1,20 +1,50 @@
-"""TASK E1 — ZoomSpec plugin runtime factory (device-propagation gate).
+"""TASK E1 — ZoomSpec plugin runtime factory + registration.
 
-This file currently contains the E1 pre-implementation device-propagation gate.
-The frozen scientific pipeline must preserve an exact RuntimeDescriptor
-``device_index`` across LS-STFT preprocessing, CPN, and FRN. If it cannot, E1 is
-blocked pending an architect ruling (see E1_BLOCKED_BY_ZOOMSPEC_DEVICE_PROPAGATION).
-No GPU / torch / ultralytics are used.
+Covers (a) the accepted E1-A CUDA device-index plumbing characterization and
+(b) the E1-B ZoomSpec ``plugin.py`` declaration, lazy ``build_runtime`` factory,
+declarative discovery, normalization/asset handling, and the full generic
+``PluginItemExecutor`` -> ZoomSpec runtime path. No GPU / torch / ultralytics
+scientific execution is performed.
 """
 from __future__ import annotations
 
+import hashlib
+import importlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from app.core.errors import PlatformError
+from app.datasets.adapter import ResolvedRecordingInput
+from app.labels.service import LabelSpaceService
+from app.pipelines.base import PipelineOutput, RecordingInput
+from app.pipelines.plugin_registry import create_plugin_registry
 from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3 import pipeline as pipeline_module
+from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition import (
+    ZOOMSPEC_FROZEN_DEFINITION,
+)
 from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.frn import _is_cuda_device
+from app.remote_execution.assets import (
+    PipelineAssetManifest,
+    compute_asset_manifest_sha256,
+)
+from app.remote_execution.plugin_executor import PluginItemExecutor
+from app.remote_execution.request_builder import build_batch, freeze_request_provenance
+from app.remote_execution.runtime import RuntimeDescriptor
+
+PLUGIN_MODULE = "app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin"
+FACTORY_REF = PLUGIN_MODULE + ":build_runtime"
+ZP_ID = "zoomspec_yolo26n_aug_combined_frn_v3"
+ZP_VERSION = "1.0.0"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LABEL_ROOT = REPO_ROOT / "label_spaces"
+RUNTIME_COMMIT = "68b1464842d0fb366fc211f53436d0ba49e3fbef"
 
 
 def _label_space():
@@ -22,6 +52,25 @@ def _label_space():
         id="spacenet_14",
         classes=[SimpleNamespace(id=i, name=f"class_{i}") for i in range(14)],
     )
+
+
+def _recording():
+    return SimpleNamespace(
+        id="rec",
+        data_path="ignored",
+        data_format="float16_interleaved_le",
+        sample_rate_hz=1_000_000.0,
+        center_frequency_hz=2.4e9,
+        frequency_low_hz=2.4e9,
+        frequency_high_hz=2.41e9,
+        duration_s=1.0,
+        label_space="spacenet_14",
+    )
+
+
+# ---------------------------------------------------------------------------
+# E1-A — LS-STFT/CPN/FRN exact device plumbing (accepted)
+# ---------------------------------------------------------------------------
 
 
 def _spy_pipeline(monkeypatch):
@@ -53,20 +102,6 @@ def _spy_pipeline(monkeypatch):
     return captured
 
 
-def _recording():
-    return SimpleNamespace(
-        id="rec",
-        data_path="ignored",
-        data_format="float16_interleaved_le",
-        sample_rate_hz=1_000_000.0,
-        center_frequency_hz=2.4e9,
-        frequency_low_hz=2.4e9,
-        frequency_high_hz=2.41e9,
-        duration_s=1.0,
-        label_space="spacenet_14",
-    )
-
-
 def _run(monkeypatch, device):
     captured = _spy_pipeline(monkeypatch)
     pipeline = pipeline_module.ZoomSpecFrozenPipeline(
@@ -76,18 +111,15 @@ def _run(monkeypatch, device):
         label_space=_label_space(),
         device=device,
     )
-    pipeline.run(_recording(), {}, __import__("pathlib").Path("/tmp/e1_ws"))
+    pipeline.run(_recording(), {}, Path("/tmp/e1_ws"))
     return captured
 
 
 def test_descriptor_index_3_propagates_exactly(monkeypatch):
-    """INTENDED (RED): RuntimeDescriptor.device_index=3 must reach LS-STFT, CPN and
-    FRN as CUDA device 3 exactly."""
+    """RuntimeDescriptor.device_index=3 reaches LS-STFT, CPN and FRN as CUDA device 3."""
     captured = _run(monkeypatch, 3)
     assert captured["detector_device"] == 3
     assert captured["frn_device"] == 3
-    # This assertion fails on the current frozen pipeline: int 3 is coerced to the
-    # generic string "cuda" (device 0) for LS-STFT preprocessing.
     assert captured["preprocess_device"] == "cuda:3"
 
 
@@ -123,3 +155,323 @@ def test_int_index_0_preserves_accepted_m91_semantics(monkeypatch):
     assert captured["detector_device"] == 0
     assert captured["frn_device"] == 0
     assert _is_cuda_device(0) is True
+
+
+# ---------------------------------------------------------------------------
+# E1-B — declaration + discovery
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_declaration_module_exposes_frozen_definition():
+    mod = importlib.import_module(PLUGIN_MODULE)
+    assert mod.PLUGIN.definition is ZOOMSPEC_FROZEN_DEFINITION
+    assert mod.PLUGIN.runtime_factory_ref == FACTORY_REF
+
+
+def test_plugin_modules_json_registers_plugin_module_only():
+    payload = json.loads(
+        (REPO_ROOT / "backend" / "app" / "pipelines" / "plugin_modules.json").read_text()
+    )
+    modules = payload["modules"]
+    assert PLUGIN_MODULE in modules
+    assert "app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.definition" not in modules
+    assert modules.count(PLUGIN_MODULE) == 1
+
+
+def test_create_plugin_registry_discovers_e1_factory_once():
+    registry = create_plugin_registry()
+    handle = registry.get(ZP_ID, ZP_VERSION)
+    assert handle.declaration.runtime_factory_ref == FACTORY_REF
+    matches = [d for d in registry.declarations() if d.definition.id == ZP_ID]
+    assert len(matches) == 1
+
+
+def _subprocess(code: str) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "backend") + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+
+
+def test_plugin_module_import_is_ml_free():
+    code = (
+        "import importlib, sys;"
+        f"importlib.import_module('{PLUGIN_MODULE}');"
+        "assert 'torch' not in sys.modules, 'torch imported';"
+        "assert 'ultralytics' not in sys.modules, 'ultralytics imported'"
+    )
+    result = _subprocess(code)
+    assert result.returncode == 0, result.stderr
+
+
+def test_create_plugin_registry_is_ml_free():
+    code = (
+        "import sys; from app.pipelines.plugin_registry import create_plugin_registry;"
+        "create_plugin_registry();"
+        "assert 'torch' not in sys.modules, 'torch imported';"
+        "assert 'ultralytics' not in sys.modules, 'ultralytics imported'"
+    )
+    result = _subprocess(code)
+    assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# E1-B — build_runtime factory
+# ---------------------------------------------------------------------------
+
+
+def _descriptor(index: int = 0) -> RuntimeDescriptor:
+    return RuntimeDescriptor(
+        "remote_gpu", "cuda", index, "float16",
+        environment_ref="deploy-ref", environment_label="autodl_primary",
+    )
+
+
+def _factory_assets(tmp_path: Path) -> dict:
+    norm = tmp_path / "ls_stft_normalization.json"
+    norm.write_text(json.dumps({
+        "percentile_low": 1.0, "percentile_high": 99.0,
+        "value_low": 0.0, "value_high": 1.0,
+    }))
+    return {
+        "detector_checkpoint": tmp_path / "detector.pt",
+        "frn_checkpoint": tmp_path / "frn.pt",
+        "ls_stft_normalization": norm,
+        "frozen_config": tmp_path / "frozen_config.json",
+    }
+
+
+def _patch_pipeline(monkeypatch):
+    captured: dict = {}
+
+    class _FakePipeline:
+        def __init__(self, *, detector_checkpoint_path, frn_checkpoint_path,
+                     normalization, label_space, device):
+            captured.update(
+                detector=detector_checkpoint_path, frn=frn_checkpoint_path,
+                normalization=normalization, label_space=label_space, device=device,
+            )
+            self.runs = 0
+
+        def run(self, recording, parameters, workspace):
+            self.runs += 1
+            captured["run"] = (recording, parameters, workspace)
+            return PipelineOutput(detections=[])
+
+    monkeypatch.setattr(pipeline_module, "ZoomSpecFrozenPipeline", _FakePipeline)
+    return captured
+
+
+@pytest.mark.parametrize("descriptor", [
+    RuntimeDescriptor("local_cpu", "cpu", 0, "float32"),
+    RuntimeDescriptor("remote_gpu", "cpu", 0, "float16"),
+    RuntimeDescriptor("remote_gpu", "cuda", None, "float16"),
+    RuntimeDescriptor("remote_gpu", "cuda", -1, "float16"),
+    RuntimeDescriptor("remote_gpu", "cuda", 0, "float32"),
+    None,
+])
+def test_build_runtime_requires_certified_descriptor(tmp_path, descriptor):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    with pytest.raises(PlatformError) as exc:
+        zp.build_runtime(
+            assets=_factory_assets(tmp_path),
+            runtime_descriptor=descriptor,
+            output_label_space=_label_space(),
+        )
+    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("index", [0, 3])
+def test_build_runtime_wires_assets_label_space_and_device(monkeypatch, tmp_path, index):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    captured = _patch_pipeline(monkeypatch)
+    assets = _factory_assets(tmp_path)
+    label_space = _label_space()
+
+    runtime = zp.build_runtime(
+        assets=assets, runtime_descriptor=_descriptor(index),
+        output_label_space=label_space,
+    )
+
+    assert captured["detector"] == assets["detector_checkpoint"]
+    assert captured["frn"] == assets["frn_checkpoint"]
+    assert captured["device"] == index
+    assert captured["label_space"] is label_space
+    from app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.preprocessing import LSSTFTNormalization
+    assert captured["normalization"] == LSSTFTNormalization(1.0, 99.0, 0.0, 1.0)
+
+    recording = _recording()
+    workspace = tmp_path / "ws"
+    output = runtime.execute(recording, {}, workspace)
+    assert isinstance(output, PipelineOutput)
+    assert captured["run"] == (recording, {}, workspace)
+
+
+def test_build_runtime_missing_required_asset_fails_closed(monkeypatch, tmp_path):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    _patch_pipeline(monkeypatch)
+    assets = _factory_assets(tmp_path)
+    assets.pop("detector_checkpoint")
+    with pytest.raises(PlatformError) as exc:
+        zp.build_runtime(assets=assets, runtime_descriptor=_descriptor(0), output_label_space=_label_space())
+    assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+@pytest.mark.parametrize("bad_normalization", [
+    "{not-json",
+    json.dumps({"percentile_low": 1.0}),
+    json.dumps({"percentile_low": "x", "percentile_high": 99.0, "value_low": 0.0, "value_high": 1.0}),
+])
+def test_build_runtime_bad_normalization_fails_closed(monkeypatch, tmp_path, bad_normalization):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    _patch_pipeline(monkeypatch)
+    assets = _factory_assets(tmp_path)
+    assets["ls_stft_normalization"].write_text(bad_normalization)
+    with pytest.raises(PlatformError) as exc:
+        zp.build_runtime(assets=assets, runtime_descriptor=_descriptor(0), output_label_space=_label_space())
+    assert exc.value.code == "PIPELINE_ASSET_MISMATCH"
+
+
+def test_build_runtime_does_not_consume_frozen_config(monkeypatch, tmp_path):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    _patch_pipeline(monkeypatch)
+    assets = _factory_assets(tmp_path)
+    assets.pop("frozen_config")
+    runtime = zp.build_runtime(assets=assets, runtime_descriptor=_descriptor(0), output_label_space=_label_space())
+    assert runtime is not None
+
+
+def test_handle_load_runtime_resolves_the_real_e1_factory(monkeypatch, tmp_path):
+    captured = _patch_pipeline(monkeypatch)
+    handle = create_plugin_registry().get(ZP_ID, ZP_VERSION)
+    runtime = handle.load_runtime(
+        assets=_factory_assets(tmp_path), runtime_descriptor=_descriptor(3),
+        output_label_space=_label_space(),
+    )
+    zp = importlib.import_module(PLUGIN_MODULE)
+    assert isinstance(runtime, zp._ZoomSpecRuntime)
+    assert captured["device"] == 3
+
+
+def test_plugin_module_does_not_depend_on_legacy_executor():
+    source = (REPO_ROOT / "backend" / "app" / "pipelines"
+              / "zoomspec_yolo26n_aug_combined_frn_v3" / "plugin.py").read_text()
+    assert "zoomspec_executor" not in source
+    assert "ZoomSpecRemoteItemExecutor" not in source
+
+
+# ---------------------------------------------------------------------------
+# E1-B — full generic PluginItemExecutor -> ZoomSpec runtime path
+# ---------------------------------------------------------------------------
+
+
+def _write_assets(tmp_path: Path):
+    blobs = {
+        "detector_checkpoint": b"det-weights",
+        "frn_checkpoint": b"frn-weights",
+        "frozen_config": b"frozen-config",
+        "ls_stft_normalization": json.dumps({
+            "percentile_low": 1.0, "percentile_high": 99.0,
+            "value_low": 0.0, "value_high": 1.0,
+        }).encode("utf-8"),
+    }
+    paths: dict[str, Path] = {}
+    hashes: dict[str, str] = {}
+    for name, blob in blobs.items():
+        path = tmp_path / name
+        path.write_bytes(blob)
+        paths[name] = path
+        hashes[name] = hashlib.sha256(blob).hexdigest()
+    provisional = PipelineAssetManifest(
+        pipeline_id=ZP_ID, pipeline_version=ZP_VERSION,
+        assets=hashes, asset_manifest_sha256="0" * 64,
+    )
+    manifest = PipelineAssetManifest(
+        pipeline_id=ZP_ID, pipeline_version=ZP_VERSION,
+        assets=hashes, asset_manifest_sha256=compute_asset_manifest_sha256(provisional),
+    )
+    return manifest, paths
+
+
+class _Store:
+    def __init__(self, resolved):
+        self._resolved = resolved
+        self.calls = []
+
+    def resolve(self, plugin_id, plugin_version, requested):
+        self.calls.append((plugin_id, plugin_version, requested))
+        return self._resolved
+
+
+class _Adapter:
+    def resolve(self, *, split, key, label_space, expected_fingerprint,
+                expected_source_hash, label_space_root):
+        return ResolvedRecordingInput(
+            recording_fingerprint=expected_fingerprint,
+            source_data_sha256=expected_source_hash,
+            recording_input=RecordingInput(
+                id=key, data_path=Path("/deploy/rec.bin"),
+                data_format="float16_interleaved_le",
+                sample_rate_hz=1.0, center_frequency_hz=0.0,
+                frequency_low_hz=0.0, frequency_high_hz=1.0,
+                duration_s=1.0, label_space=label_space,
+            ),
+        )
+
+
+class _AdapterRegistry:
+    def get(self, dataset_name):
+        return _Adapter()
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def test_generic_executor_runs_zoomspec_through_e1_factory(monkeypatch, tmp_path):
+    manifest, paths = _write_assets(tmp_path)
+    captured = _patch_pipeline(monkeypatch)
+    metadata = freeze_request_provenance(
+        local_run_id="run_x", recording_fingerprint="2" * 64,
+        source_data_sha256="1" * 64, dataset_name="SpaceNet", dataset_split="test",
+        dataset_key="0", label_space="spacenet_14",
+        pipeline_id=ZP_ID, pipeline_version=ZP_VERSION,
+        required_remote_runtime_commit=RUNTIME_COMMIT, orchestrator_commit="a" * 40,
+        asset_manifest_sha256=manifest.asset_manifest_sha256,
+        remote_profile="autodl_primary", model_release_id="golden", parameters={},
+    )
+    batch = build_batch(metadata)
+    descriptor = RuntimeDescriptor("remote_gpu", "cuda", 3, "float16")
+
+    def _resolve_assets(*, plugin_id, plugin_version, asset_manifest_sha256, manifest):
+        return {name: paths[name] for name in manifest.assets}
+
+    worker = SimpleNamespace(
+        required_runtime_commit=RUNTIME_COMMIT,
+        label_space_root=LABEL_ROOT,
+        resolve_assets=_resolve_assets,
+        runtime_descriptor=lambda: descriptor,
+    )
+    resolved = SimpleNamespace(
+        release=SimpleNamespace(model_release_id="golden"), manifest=manifest
+    )
+    publisher = _Recorder()
+    executor = PluginItemExecutor(
+        batch=batch, worker=worker, plugin_registry=create_plugin_registry(),
+        adapter_registry=_AdapterRegistry(), model_release_store=_Store(resolved),
+        certificate_store=object(), runtime_descriptor=descriptor,
+        trusted_assets_resolver=worker.resolve_assets, package_publisher=publisher,
+    )
+
+    executor.execute(batch.items[0], tmp_path / "job")
+
+    assert len(publisher.calls) == 1
+    assert captured["device"] == 3
+    assert captured["detector"] == paths["detector_checkpoint"]
+    assert captured["frn"] == paths["frn_checkpoint"]
+    assert captured["label_space"].id == "spacenet_14"
+    assert isinstance(captured["label_space"], type(LabelSpaceService(LABEL_ROOT).get("spacenet_14")))
+    assert captured["run"][1] == {}
