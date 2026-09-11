@@ -20,6 +20,7 @@ from app.imported_runs.archive import extract_package
 from app.imported_runs.validation import validate_extracted_package
 from app.pipelines.base import DetectionPayload, PipelineOutput
 from app.recordings.model import RecordingModel
+from app.remote_execution.request_builder import build_batch, verify_request_sha256
 from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.schema import RemoteExecutionEnvelopeV1
 from app.remote_execution.source_hash import compute_file_sha256
@@ -138,6 +139,28 @@ def _verify_envelope_identity(
     return metadata
 
 
+def _verify_frozen_request_identity(metadata: dict) -> dict:
+    """Reconstruct the canonical batch from the persisted frozen metadata and
+    revalidate its ``request_sha256``; return the authoritative frozen parameters.
+
+    ``execution_metadata_json`` is the frozen request authority. Recomputing the
+    canonical request hash catches any partial mutation of the metadata (including
+    a tampered ``parameters``) that did not also update the persisted hash.
+    """
+    try:
+        batch = build_batch(metadata)
+        if not verify_request_sha256(batch, metadata):
+            raise _remote_invalid("Persisted frozen request identity is inconsistent.")
+    except PlatformError:
+        raise
+    except Exception:
+        raise _remote_invalid("Persisted frozen request metadata is invalid.")
+    parameters = metadata.get("parameters")
+    if not isinstance(parameters, dict):
+        raise _remote_invalid("Persisted frozen request parameters are invalid.")
+    return dict(parameters)
+
+
 def _validate_manifest_consistency(
     manifest,
     run: AnalysisRunModel,
@@ -145,6 +168,7 @@ def _validate_manifest_consistency(
     envelope: RemoteExecutionEnvelopeV1,
     writer: AnalysisResultWriter,
     runtime_descriptor,
+    frozen_parameters: dict,
 ) -> None:
     if not (manifest.pipeline.id == run.pipeline_id == envelope.pipeline_id == writer.pipeline_definition.id):
         raise _remote_invalid("Remote package pipeline id does not match the AnalysisRun.")
@@ -165,8 +189,8 @@ def _validate_manifest_consistency(
         raise _remote_invalid(
             "Remote package execution metadata does not match the persisted runtime descriptor."
         )
-    if manifest.parameters != dict(run.parameters_json or {}):
-        raise _remote_invalid("Remote package parameters do not match the frozen run parameters.")
+    if manifest.parameters != frozen_parameters:
+        raise _remote_invalid("Remote package parameters do not match the frozen request parameters.")
     if manifest.recording.name != recording.name:
         raise _remote_invalid("Remote package recording name does not match the Recording.")
     if manifest.recording.dataset != recording.dataset_name:
@@ -223,6 +247,11 @@ def ingest_remote_result(
         raise _remote_invalid("Remote results may only target a remote_gpu AnalysisRun.")
 
     metadata = _verify_envelope_identity(run, recording, envelope, writer)
+    frozen_parameters = _verify_frozen_request_identity(metadata)
+    if dict(run.parameters_json or {}) != frozen_parameters:
+        raise _remote_invalid(
+            "Local run parameters diverged from the frozen request parameters."
+        )
     try:
         runtime_descriptor = RuntimeDescriptor.from_metadata(metadata.get("runtime_descriptor"))
     except PlatformError:
@@ -263,7 +292,8 @@ def ingest_remote_result(
         except Exception:
             raise _remote_invalid("Remote result package is invalid.")
         _validate_manifest_consistency(
-            validated.manifest, run, recording, envelope, writer, runtime_descriptor
+            validated.manifest, run, recording, envelope, writer,
+            runtime_descriptor, frozen_parameters,
         )
         output = _package_to_pipeline_output(validated, envelope)
 

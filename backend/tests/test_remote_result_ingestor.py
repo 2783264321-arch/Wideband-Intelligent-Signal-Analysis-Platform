@@ -17,6 +17,7 @@ from app.remote_execution.result_ingestor import (
     ingest_remote_result,
     parse_remote_execution_envelope_json,
 )
+from app.remote_execution.request_builder import build_batch, freeze_request_provenance
 from app.remote_execution.schema import RemoteExecutionEnvelopeV1
 from app.remote_execution.runtime import RuntimeDescriptor
 from app.remote_execution.source_hash import compute_file_sha256
@@ -58,26 +59,51 @@ def _seed_recording(session):
     return recording
 
 
-def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_key=None,
-                     executor="remote_gpu", runtime_descriptor=None, parameters_json=None):
-    _seed_recording(session)
-    metadata = {
-        "request_id": "req_1",
-        "batch_id": "batch_x",
-        "item_key": "000000",
-        "recording_fingerprint": "a" * 64,
-        "source_data_sha256": "b" * 64,
-        "orchestrator_commit": ORCHESTRATOR_COMMIT,
-        "required_remote_runtime_commit": ORCHESTRATOR_COMMIT,
-        "asset_manifest_sha256": "c" * 64,
-    }
+def _frozen_metadata(*, parameters=None, runtime_descriptor=None, dataset_key="r"):
+    """Full FROZEN REQUEST metadata (parameters + request_sha256), as production
+    ``freeze_request_provenance`` persists it. IDs are deterministic to match
+    ``_envelope``."""
+    ids = iter(["req_1", "batch_x", "000000"])
+    metadata = freeze_request_provenance(
+        local_run_id="run_r",
+        recording_fingerprint="a" * 64,
+        source_data_sha256="b" * 64,
+        dataset_name="SpaceNet",
+        dataset_split="test",
+        dataset_key=dataset_key,
+        label_space="spacenet_14",
+        pipeline_id="pipeline_x",
+        pipeline_version="1.0",
+        required_remote_runtime_commit=ORCHESTRATOR_COMMIT,
+        orchestrator_commit=ORCHESTRATOR_COMMIT,
+        asset_manifest_sha256="c" * 64,
+        remote_profile="autodl_primary",
+        model_release_id=None,
+        parameters=parameters,
+        id_factory=lambda: next(ids),
+    )
     if runtime_descriptor is not None:
         metadata["runtime_descriptor"] = runtime_descriptor
+    return metadata
+
+
+def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_key=None,
+                     executor="remote_gpu", runtime_descriptor=None,
+                     parameters=None, metadata_parameters=None, run_parameters_json=None):
+    _seed_recording(session)
+    frozen_parameters = dict(
+        metadata_parameters if metadata_parameters is not None else (parameters or {})
+    )
+    metadata = _frozen_metadata(
+        parameters=frozen_parameters, runtime_descriptor=runtime_descriptor
+    )
     if payload_sha256 is not None:
-        metadata = dict(metadata)
         metadata["payload_sha256"] = payload_sha256
     if missing_key is not None:
         metadata.pop(missing_key, None)
+    local_parameters = (
+        dict(run_parameters_json) if run_parameters_json is not None else dict(frozen_parameters)
+    )
     run = AnalysisRunModel(
         id="run_r",
         recording_id="rec_r",
@@ -85,7 +111,7 @@ def _seed_remote_run(session, *, status="running", payload_sha256=None, missing_
         pipeline_version="1.0",
         executor=executor,
         status=status,
-        parameters_json=dict(parameters_json or {}),
+        parameters_json=local_parameters,
         execution_metadata_json=metadata,
     )
     session.add(run)
@@ -717,7 +743,7 @@ def test_manifest_parameters_must_match_frozen_run_parameters(session, tmp_path,
     zip_path, payload = _write_analysis_result_zip(
         tmp_path, manifest_overrides={"parameters": {"threshold": 0.5}},
     )
-    _seed_remote_run(session, status="running", parameters_json={"threshold": 0.5})
+    _seed_remote_run(session, status="running", parameters={"threshold": 0.5})
     envelope = _envelope(payload)
     writer = _writer(session, settings, workspace)
 
@@ -737,7 +763,7 @@ def test_manifest_parameters_mismatch_fails_closed(
     zip_path, payload = _write_analysis_result_zip(
         tmp_path, manifest_overrides={"parameters": parameters_override},
     )
-    _seed_remote_run(session, status="running", parameters_json={})
+    _seed_remote_run(session, status="running", parameters={})
     envelope = _envelope(payload)
     writer = _writer(session, settings, workspace)
 
@@ -745,3 +771,118 @@ def test_manifest_parameters_mismatch_fails_closed(
         ingest_remote_result(session, "run_r", envelope, zip_path, writer)
     assert exc.value.code == "REMOTE_RESULT_INVALID"
     assert writer.persist_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# D5 Fix Round 1 — bind remote results to frozen request parameters
+# ---------------------------------------------------------------------------
+
+
+def test_run_projection_diverges_from_frozen_metadata_with_matching_package_fails(
+    session, tmp_path, settings
+):
+    """metadata frozen=0.5; run.parameters_json=0.9; package=0.9 -> reject."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"parameters": {"threshold": 0.9}},
+    )
+    _seed_remote_run(
+        session, status="running",
+        metadata_parameters={"threshold": 0.5}, run_parameters_json={"threshold": 0.9},
+    )
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+
+
+def test_run_projection_diverges_from_frozen_metadata_even_when_package_matches_frozen(
+    session, tmp_path, settings
+):
+    """metadata frozen=0.5; run.parameters_json=0.9; package=0.5 -> reject."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"parameters": {"threshold": 0.5}},
+    )
+    _seed_remote_run(
+        session, status="running",
+        metadata_parameters={"threshold": 0.5}, run_parameters_json={"threshold": 0.9},
+    )
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+
+
+def test_tampered_frozen_metadata_parameters_fail_request_sha_revalidation(
+    session, tmp_path, settings
+):
+    """metadata parameters tampered to 0.9 while the persisted request_sha256 still
+    commits to 0.5; run projection and package both say 0.9 -> still reject."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"parameters": {"threshold": 0.9}},
+    )
+    run = _seed_remote_run(
+        session, status="running",
+        metadata_parameters={"threshold": 0.5}, run_parameters_json={"threshold": 0.9},
+    )
+    tampered = dict(run.execution_metadata_json)
+    tampered["parameters"] = {"threshold": 0.9}
+    run.execution_metadata_json = tampered
+    session.commit()
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    with pytest.raises(PlatformError) as exc:
+        ingest_remote_result(session, "run_r", envelope, zip_path, writer)
+    assert exc.value.code == "REMOTE_RESULT_INVALID"
+    assert writer.persist_calls == 0
+
+
+def test_matching_frozen_metadata_run_and_package_parameters_ingest(
+    session, tmp_path, settings
+):
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(
+        tmp_path, manifest_overrides={"parameters": {"threshold": 0.5}},
+    )
+    _seed_remote_run(
+        session, status="running",
+        metadata_parameters={"threshold": 0.5}, run_parameters_json={"threshold": 0.5},
+    )
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    assert ingest_remote_result(session, "run_r", envelope, zip_path, writer) == payload
+    assert writer.persist_calls == 1
+
+
+def test_legacy_parameters_and_legacy_request_sha256_remain_accepted(
+    session, tmp_path, settings
+):
+    """M9.1 metadata already carries parameters={} and a valid request_sha256; the
+    frozen-request revalidation must not require any legacy fallback relaxation."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    zip_path, payload = _write_analysis_result_zip(tmp_path)  # parameters {}
+    run = _seed_remote_run(session, status="running")  # no runtime_descriptor
+    assert run.execution_metadata_json["parameters"] == {}
+    assert run.execution_metadata_json["request_sha256"] == build_batch(
+        run.execution_metadata_json
+    ).request_sha256
+    envelope = _envelope(payload)
+    writer = _writer(session, settings, workspace)
+
+    assert ingest_remote_result(session, "run_r", envelope, zip_path, writer) == payload
+    assert writer.persist_calls == 1

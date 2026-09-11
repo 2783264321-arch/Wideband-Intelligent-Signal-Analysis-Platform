@@ -111,6 +111,9 @@ def _set_local_release(run, release_id):
         metadata.pop("model_release_id", None)
     else:
         metadata["model_release_id"] = release_id
+    # Keep the persisted frozen request identity internally consistent so the
+    # ingestor's request_sha256 revalidation reflects the actual metadata.
+    metadata["request_sha256"] = build_batch(metadata).request_sha256
     run.execution_metadata_json = metadata
 
 
