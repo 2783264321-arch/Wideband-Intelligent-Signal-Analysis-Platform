@@ -8,7 +8,7 @@ import pytest
 
 from app.core.errors import PlatformError
 from app.pipelines.base import ExecutionCapability, PipelineDefinition, PipelineOutput, RecordingInput
-from app.pipelines.plugin import PipelineRuntimeAdapter, validate_plugin_parameters
+from app.pipelines.plugin import PipelineRuntimeAdapter, PluginDeclaration, validate_plugin_parameters
 from app.pipelines.plugin_registry import (
     PluginHandle,
     PluginRegistry,
@@ -22,6 +22,16 @@ _EXPECTED_PLUGIN_IDS = {
     "stft_energy_detector",
     "zoomspec_yolo26n_aug_combined_frn_v3",
 }
+
+
+def _declaration(plugin_id: str, version: str, *, name: str = "P", factory_ref=None) -> PluginDeclaration:
+    return PluginDeclaration(
+        definition=PipelineDefinition(
+            id=plugin_id, name=name, version=version, label_space="spacenet_14",
+            recommended_device="CPU", cpu_supported=True, stages=(), inspectable_stages=(),
+        ),
+        runtime_factory_ref=factory_ref,
+    )
 
 
 def _recording_input(path: Path) -> RecordingInput:
@@ -182,3 +192,43 @@ def test_stft_parameter_schema_accepts_supported_and_rejects_unknown():
             {**_STFT_SUPPORTED_PARAMETERS, "unknown_parameter": 1},
         )
     assert excinfo.value.code == "PLUGIN_PARAMETERS_INVALID"
+
+
+# --- PRE-F1 fix: immutable PluginVersion identity is fail-closed -------------
+
+
+def test_registry_rejects_duplicate_exact_identity():
+    first = _declaration("pref1_dup", "1.0", name="A", factory_ref="pkg.factory:fa")
+    second = _declaration("pref1_dup", "1.0", name="B", factory_ref="pkg.factory:fb")
+    with pytest.raises(PlatformError) as excinfo:
+        PluginRegistry([first, second])
+    assert excinfo.value.code == "PLUGIN_REGISTRY_CONFLICT"
+    assert "pref1_dup" in excinfo.value.message
+    assert "1.0" in excinfo.value.message
+
+
+def test_registry_rejects_duplicate_identity_even_when_identical():
+    first = _declaration("pref1_dup", "1.0", name="Same")
+    second = _declaration("pref1_dup", "1.0", name="Same")
+    with pytest.raises(PlatformError) as excinfo:
+        PluginRegistry([first, second])
+    assert excinfo.value.code == "PLUGIN_REGISTRY_CONFLICT"
+
+
+def test_registry_rejects_duplicate_identity_in_either_order():
+    a = _declaration("pref1_dup", "1.0", name="A")
+    b = _declaration("pref1_dup", "1.0", name="B")
+    for declarations in ([a, b], [b, a]):
+        with pytest.raises(PlatformError) as excinfo:
+            PluginRegistry(declarations)
+        assert excinfo.value.code == "PLUGIN_REGISTRY_CONFLICT"
+
+
+def test_registry_allows_distinct_versions_of_one_id():
+    registry = PluginRegistry([
+        _declaration("pref1_versions", "1.0", name="One"),
+        _declaration("pref1_versions", "2.0", name="Two"),
+    ])
+    assert registry.get("pref1_versions", "1.0").definition.name == "One"
+    assert registry.get("pref1_versions", "2.0").definition.name == "Two"
+    assert {d.version for d in registry.list()} == {"1.0", "2.0"}

@@ -137,3 +137,18 @@ def test_core_files_have_no_plugin_id_branch():
     for rel in _CORE_FILES:
         source = (REPO_ROOT / rel).read_text()
         assert PLUGIN_ID not in source, f"{rel} contains plugin id branching"
+
+
+def test_duplicate_exact_identity_fails_closed_both_discovery_orders(monkeypatch, tmp_path):
+    """PRE-F1 fix: two distinct declaration modules with the SAME (id, version)
+    must fail closed regardless of discovery order (no silent overwrite)."""
+    _write_synthetic_module(tmp_path, "pref1_col_a", plugin_id="pref1_collision", version="1.0")
+    _write_synthetic_module(tmp_path, "pref1_col_b", plugin_id="pref1_collision", version="1.0")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for order in ("pref1_col_a,pref1_col_b", "pref1_col_b,pref1_col_a"):
+        monkeypatch.setenv("WISA_PLUGIN_MODULES", order)
+        with pytest.raises(PlatformError) as exc:
+            create_plugin_registry()
+        assert exc.value.code == "PLUGIN_REGISTRY_CONFLICT"
+        assert "pref1_collision" in exc.value.message
+        assert "1.0" in exc.value.message

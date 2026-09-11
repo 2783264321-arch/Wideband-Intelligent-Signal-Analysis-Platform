@@ -896,6 +896,7 @@ crash the control plane. New/renamed codes:
 | Code | Trigger |
 |---|---|
 | `PLUGIN_NOT_FOUND` | unknown `plugin_id`/`plugin_version` |
+| `PLUGIN_REGISTRY_CONFLICT` | the same immutable `(plugin_id, plugin_version)` identity is declared more than once (fail closed; no silent overwrite / order dependence) |
 | `PLUGIN_API_INCOMPATIBLE` | plugin API version unsupported |
 | `PLUGIN_PARAMETERS_INVALID` | parameters violate plugin schema |
 | `MODEL_RELEASE_NOT_FOUND` | release unknown for plugin version |

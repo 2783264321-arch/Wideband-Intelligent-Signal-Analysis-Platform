@@ -56,7 +56,14 @@ class PluginRegistry:
         self._handles: dict[tuple[str, str], PluginHandle] = {}
         for declaration in declarations:
             definition = declaration.definition
-            self._handles[(definition.plugin_id, definition.plugin_version)] = PluginHandle(declaration)
+            key = (definition.plugin_id, definition.plugin_version)
+            if key in self._handles:
+                raise PlatformError(
+                    "PLUGIN_REGISTRY_CONFLICT",
+                    f"Plugin '{definition.plugin_id}' version "
+                    f"'{definition.plugin_version}' is registered more than once.",
+                )
+            self._handles[key] = PluginHandle(declaration)
 
     def list(self) -> list[PipelineDefinition]:
         return [self._handles[key].definition for key in sorted(self._handles)]
