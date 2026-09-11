@@ -475,3 +475,181 @@ def test_generic_executor_runs_zoomspec_through_e1_factory(monkeypatch, tmp_path
     assert captured["label_space"].id == "spacenet_14"
     assert isinstance(captured["label_space"], type(LabelSpaceService(LABEL_ROOT).get("spacenet_14")))
     assert captured["run"][1] == {}
+
+
+# ---------------------------------------------------------------------------
+# E3 — ZoomSpec local_cpu technical capability (NOT certified/runnable)
+# ---------------------------------------------------------------------------
+
+_CPU_RUNTIME_REF = "local:autodl_primary:cpu:a1237f8faae7"
+_REMOTE_RUNTIME_REF = "remote:autodl_primary:5bb5be4b04d04a071bc9d8f4f61172595ecee037"
+
+
+def _cpu_descriptor() -> RuntimeDescriptor:
+    return RuntimeDescriptor(
+        "local_cpu", "cpu", None, "float32",
+        environment_ref="/usr/bin/python3", environment_label=_CPU_RUNTIME_REF,
+    )
+
+
+def test_definition_declares_remote_and_cpu_technical_capabilities():
+    caps = {
+        (c.executor, c.device_type, c.precision)
+        for c in ZOOMSPEC_FROZEN_DEFINITION.technical_execution_capabilities
+    }
+    assert ("remote_gpu", "cuda", "float16") in caps
+    assert ("local_cpu", "cpu", "float32") in caps
+    assert ZOOMSPEC_FROZEN_DEFINITION.cpu_supported is False
+    assert ZOOMSPEC_FROZEN_DEFINITION.recommended_execution == "remote_gpu"
+
+
+def test_no_zoomspec_local_cpu_certificate_exists():
+    certs = json.loads(
+        (REPO_ROOT / "backend" / "app" / "pipelines" / "execution_certificates.json").read_text()
+    )["certificates"]
+    assert [
+        c for c in certs
+        if c["plugin_id"] == ZP_ID and c["plugin_version"] == ZP_VERSION and c["executor"] == "local_cpu"
+    ] == []
+
+
+def test_build_runtime_accepts_canonical_local_cpu_descriptor(monkeypatch, tmp_path):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    captured = _patch_pipeline(monkeypatch)
+    runtime = zp.build_runtime(
+        assets=_factory_assets(tmp_path), runtime_descriptor=_cpu_descriptor(),
+        output_label_space=_label_space(),
+    )
+    assert captured["device"] == "cpu"
+    assert runtime is not None
+
+
+def test_cpu_descriptor_reaches_ls_stft_cpn_frn_as_cpu(monkeypatch, tmp_path):
+    """End-to-end CPU device propagation through the REAL frozen pipeline:
+    local_cpu/cpu/float32 -> LS-STFT/CPN/FRN all target the CPU device."""
+    zp = importlib.import_module(PLUGIN_MODULE)
+    captured = _spy_pipeline(monkeypatch)
+    runtime = zp.build_runtime(
+        assets=_factory_assets(tmp_path), runtime_descriptor=_cpu_descriptor(),
+        output_label_space=_label_space(),
+    )
+    runtime.execute(_recording(), {}, tmp_path / "ws")
+    assert captured["preprocess_device"] == "cpu"
+    assert captured["detector_device"] == "cpu"
+    assert captured["frn_device"] == "cpu"
+
+
+@pytest.mark.parametrize("bad", [
+    RuntimeDescriptor("remote_gpu", "cpu", 0, "float32"),
+    RuntimeDescriptor("local_cpu", "cuda", 0, "float16"),
+    RuntimeDescriptor("local_cpu", "cpu", 0, "float32"),
+    RuntimeDescriptor("local_cpu", "cpu", None, "float16"),
+    RuntimeDescriptor("local_cpu", "cpu", -1, "float32"),
+    RuntimeDescriptor("local_cpu", "cpu", True, "float32"),
+    RuntimeDescriptor("remote_gpu", "cuda", True, "float16"),
+    RuntimeDescriptor("unknown_executor", "cuda", 0, "float16"),
+    None,
+])
+def test_build_runtime_rejects_crossed_or_invalid_descriptors(monkeypatch, tmp_path, bad):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    _patch_pipeline(monkeypatch)
+    with pytest.raises(PlatformError) as exc:
+        zp.build_runtime(
+            assets=_factory_assets(tmp_path), runtime_descriptor=bad,
+            output_label_space=_label_space(),
+        )
+    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+
+
+def test_local_worker_cpu_descriptor_matches_factory_contract(monkeypatch, tmp_path):
+    from app.analysis.local_executor import LocalInferenceWorkerProvider
+
+    provider = LocalInferenceWorkerProvider(
+        interpreter=tmp_path / "py", runtime_ref=_CPU_RUNTIME_REF,
+        work_root=tmp_path / "work", executor_kind="local_cpu",
+    )
+    desc = provider.runtime_descriptor()
+    assert (desc.executor, desc.device_type, desc.device_index, desc.precision) == (
+        "local_cpu", "cpu", None, "float32",
+    )
+    zp = importlib.import_module(PLUGIN_MODULE)
+    captured = _patch_pipeline(monkeypatch)
+    zp.build_runtime(
+        assets=_factory_assets(tmp_path), runtime_descriptor=desc,
+        output_label_space=_label_space(),
+    )
+    assert captured["device"] == "cpu"
+
+
+class _StubProvider:
+    def __init__(self, name, runtime_ref, descriptor, *, calls):
+        self.name = name
+        self._runtime_ref = runtime_ref
+        self._descriptor = descriptor
+        self._calls = calls
+
+    @property
+    def runtime_ref(self):
+        return self._runtime_ref
+
+    def runtime_descriptor(self):
+        return self._descriptor
+
+    def availability(self, *args, **kwargs):
+        self._calls.append("availability")
+        return SimpleNamespace(available=True)
+
+    def launch(self, *args, **kwargs):
+        return 1
+
+
+def _real_cert_store():
+    from app.remote_execution.runtime import (
+        ExecutionCertificateStore,
+        load_execution_certificates,
+    )
+
+    certs = load_execution_certificates(
+        REPO_ROOT / "backend" / "app" / "pipelines" / "execution_certificates.json"
+    )
+    return ExecutionCertificateStore(certs)
+
+
+def test_projection_excludes_zoomspec_local_cpu_without_certificate():
+    from app.remote_execution.runtime import ExecutorRegistry
+
+    calls: list = []
+    remote = _StubProvider(
+        "remote_gpu", _REMOTE_RUNTIME_REF,
+        RuntimeDescriptor("remote_gpu", "cuda", 0, "float16"), calls=[],
+    )
+    local = _StubProvider("local_cpu", _CPU_RUNTIME_REF, _cpu_descriptor(), calls=calls)
+    registry = ExecutorRegistry(
+        {"remote_gpu": remote, "local_cpu": local}, _real_cert_store()
+    )
+    supported, recommended = registry.deployment_qualified_executors(
+        ZOOMSPEC_FROZEN_DEFINITION, "golden"
+    )
+    assert "local_cpu" not in supported
+    assert "remote_gpu" in supported
+    assert recommended == "remote_gpu"
+    assert calls == []  # configuration projection never probes
+
+
+def test_availability_for_local_cpu_is_not_certified_before_probe():
+    from app.remote_execution.runtime import ExecutorRegistry
+
+    calls: list = []
+    local = _StubProvider("local_cpu", _CPU_RUNTIME_REF, _cpu_descriptor(), calls=calls)
+    registry = ExecutorRegistry({"local_cpu": local}, _real_cert_store())
+    release = SimpleNamespace(
+        release=SimpleNamespace(model_release_id="golden"),
+        manifest=SimpleNamespace(asset_manifest_sha256="a" * 64),
+    )
+    recording = SimpleNamespace(id="r", label_space="spacenet_14", source_data_sha256="b" * 64)
+    availability = registry.availability_for(
+        ZOOMSPEC_FROZEN_DEFINITION, release, recording, "local_cpu"
+    )
+    assert availability.available is False
+    assert availability.reason_code == "EXECUTION_NOT_CERTIFIED"
+    assert calls == []  # live provider readiness is never reached without a certificate

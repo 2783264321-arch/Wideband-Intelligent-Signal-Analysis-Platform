@@ -1091,6 +1091,14 @@ Rules:
 4. ZoomSpec `local_cpu` remains without a certificate; `cpu_supported` is legacy
    technical metadata only and MUST NOT imply `local_cpu` is runnable. The
    deployment-qualified `executors_supported` projection (§8.2) is the runnable set.
+   **E3 implementation note:** ZoomSpec now *declares* both
+   `remote_gpu/cuda/float16` and `local_cpu/cpu/float32` in
+   `technical_execution_capabilities`, and its single `build_runtime` factory
+   accepts the canonical CPU `RuntimeDescriptor` (`local_cpu`/`cpu`/`float32`,
+   `device_index=None`) as well as the remote CUDA descriptor — so the technical
+   claim and the factory agree. No CPU `ExecutionCertificate` is added; the
+   platform still derives runnability from the exact certificate, so ZoomSpec
+   `local_cpu` stays unavailable.
 5. A certificate is created only after an explicit platform gate records:
    accuracy within an agreed tolerance versus the reference device, an agreed
    latency envelope, and a reproducible evidence reference. Because

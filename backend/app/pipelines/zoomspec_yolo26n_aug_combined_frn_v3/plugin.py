@@ -69,30 +69,48 @@ def _load_normalization(path: Path):
         raise _asset_mismatch("ls_stft_normalization asset is invalid.") from exc
 
 
-def _require_device_index(runtime_descriptor) -> int:
-    """ZoomSpec's E1 factory is bound to its declared/certified remote capability.
+def _require_device_index(runtime_descriptor):
+    """Resolve the scientific-pipeline device from the deployment descriptor.
 
-    Fails closed on any descriptor other than remote_gpu/cuda/float16 with an
-    explicit non-negative integer device index. Never assumes/defaults device 0.
+    ZoomSpec declares TWO technical execution capabilities and its factory matches
+    that claim exactly:
+
+    - ``remote_gpu``/``cuda``/``float16`` with an explicit non-negative integer
+      ``device_index`` -> that CUDA index (int) is passed to the frozen pipeline
+      (E1-A plumbing maps it to ``cuda:N``; ``0`` keeps the historical path).
+    - ``local_cpu``/``cpu``/``float32`` with a canonical ``device_index=None`` ->
+      the ``"cpu"`` device string is passed to the frozen pipeline.
+
+    Technical executability is NOT certification: the platform still requires an
+    exact ExecutionCertificate before either capability becomes runnable. Any
+    other / crossed tuple fails closed with ``EXECUTOR_UNAVAILABLE``.
     """
     if runtime_descriptor is None:
         raise PlatformError("EXECUTOR_UNAVAILABLE", "ZoomSpec requires a runtime descriptor.")
-    if (
-        getattr(runtime_descriptor, "executor", None) != "remote_gpu"
-        or getattr(runtime_descriptor, "device_type", None) != "cuda"
-        or getattr(runtime_descriptor, "precision", None) != "float16"
-    ):
-        raise PlatformError(
-            "EXECUTOR_UNAVAILABLE",
-            "ZoomSpec requires the certified remote_gpu/cuda/float16 runtime descriptor.",
-        )
+    executor = getattr(runtime_descriptor, "executor", None)
+    device_type = getattr(runtime_descriptor, "device_type", None)
+    precision = getattr(runtime_descriptor, "precision", None)
     index = getattr(runtime_descriptor, "device_index", None)
-    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-        raise PlatformError(
-            "EXECUTOR_UNAVAILABLE",
-            "ZoomSpec requires an explicit non-negative integer CUDA device index.",
-        )
-    return index
+
+    if (executor, device_type, precision) == ("remote_gpu", "cuda", "float16"):
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise PlatformError(
+                "EXECUTOR_UNAVAILABLE",
+                "remote_gpu requires an explicit non-negative integer CUDA device index.",
+            )
+        return index
+    if (executor, device_type, precision) == ("local_cpu", "cpu", "float32"):
+        if index is not None:
+            raise PlatformError(
+                "EXECUTOR_UNAVAILABLE",
+                "local_cpu requires the canonical CPU descriptor (device_index is null).",
+            )
+        return "cpu"
+    raise PlatformError(
+        "EXECUTOR_UNAVAILABLE",
+        "ZoomSpec supports only the certified remote_gpu/cuda/float16 or the "
+        "technical local_cpu/cpu/float32 runtime descriptor.",
+    )
 
 
 class _ZoomSpecRuntime:
@@ -115,7 +133,7 @@ def build_runtime(*, assets, runtime_descriptor, output_label_space) -> _ZoomSpe
         ZoomSpecFrozenPipeline,
     )
 
-    device_index = _require_device_index(runtime_descriptor)
+    device = _require_device_index(runtime_descriptor)
     detector_checkpoint = _require_asset(assets, "detector_checkpoint")
     frn_checkpoint = _require_asset(assets, "frn_checkpoint")
     normalization = _load_normalization(_require_asset(assets, "ls_stft_normalization"))
@@ -125,6 +143,6 @@ def build_runtime(*, assets, runtime_descriptor, output_label_space) -> _ZoomSpe
         frn_checkpoint_path=frn_checkpoint,
         normalization=normalization,
         label_space=output_label_space,
-        device=device_index,
+        device=device,
     )
     return _ZoomSpecRuntime(pipeline)

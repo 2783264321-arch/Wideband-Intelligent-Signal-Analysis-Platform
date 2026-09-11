@@ -30,7 +30,10 @@ ZOOMSPEC_FROZEN_DEFINITION = PipelineDefinition(
     input_compatibility=("spacenet_14",),
     dataset_adapters=("SpaceNet",),
     model_release_required=True,
-    technical_execution_capabilities=(ExecutionCapability("remote_gpu", "cuda", "float16"),),
+    technical_execution_capabilities=(
+        ExecutionCapability("remote_gpu", "cuda", "float16"),
+        ExecutionCapability("local_cpu", "cpu", "float32"),
+    ),
     recommended_execution="remote_gpu",
 )
 

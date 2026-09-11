@@ -1624,6 +1624,10 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_z
 
 **Interfaces:**
 - ZoomSpec `PipelineDefinition.technical_execution_capabilities` includes `local_cpu/cpu/float32` (technical claim only).
+- The single ZoomSpec `build_runtime` factory must accept the canonical CPU
+  `RuntimeDescriptor` (`local_cpu`/`cpu`/`float32`, `device_index=None`) in addition
+  to the remote CUDA descriptor, mapping it to the frozen pipeline's `"cpu"` device;
+  crossed/invalid tuples still fail closed. The technical claim and factory must agree.
 - `execution_certificates.json` does **not** contain a ZoomSpec `local_cpu` certificate.
 - Read-model `cpu_supported` stays `False` (legacy technical metadata; it never implies local runnability).
 
