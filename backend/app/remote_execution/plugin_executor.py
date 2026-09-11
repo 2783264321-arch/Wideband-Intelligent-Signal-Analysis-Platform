@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from app.core.errors import PlatformError
 from app.labels.service import LabelSpaceService
+from app.pipelines.compatibility import is_input_compatible
 from app.pipelines.plugin import validate_plugin_parameters
 from app.remote_execution.assets import verify_assets
 from app.remote_execution.canonical import compute_request_sha256
@@ -98,17 +99,30 @@ class PluginItemExecutor:
                 "Resolved model release does not match the frozen request identity.",
             )
 
-        # 5. Trusted assets via the injected deployment seam; verify bytes.
-        assets = self._trusted_assets_resolver(
+        # 5. Input compatibility before any adapter/model work (spec §10.3).
+        recording = item.recording
+        if not is_input_compatible(definition, recording.label_space):
+            raise PlatformError(
+                "INPUT_INCOMPATIBLE",
+                "Plugin does not accept this recording dataset label space.",
+            )
+
+        # 6. Trusted assets via the injected deployment seam. The manifest is the
+        # sole asset authority: only declared logical assets may reach the runtime.
+        raw_assets = self._trusted_assets_resolver(
             plugin_id=definition.plugin_id,
             plugin_version=definition.plugin_version,
             asset_manifest_sha256=batch.asset_manifest_sha256,
             manifest=resolved.manifest,
         )
-        verify_assets(resolved.manifest, dict(assets))
+        assets = {
+            name: raw_assets[name]
+            for name in resolved.manifest.assets
+            if name in raw_assets
+        }
+        verify_assets(resolved.manifest, assets)
 
-        # 6. Recording resolution only through the DatasetAdapter (GT stays out).
-        recording = item.recording
+        # 7. Recording resolution only through the DatasetAdapter (GT stays out).
         adapter = self._adapter_registry.get(recording.dataset_name)
         resolved_input = adapter.resolve(
             split=recording.dataset_split,
@@ -119,10 +133,10 @@ class PluginItemExecutor:
             label_space_root=self._worker.label_space_root,
         )
 
-        # 7. Validate parameters before any runtime construction.
+        # 8. Validate parameters before any runtime construction.
         validate_plugin_parameters(definition, item.parameters)
 
-        # 8. Output label space, then the exact load_runtime contract, then execute.
+        # 9. Output label space, then the exact load_runtime contract, then execute.
         label_space = LabelSpaceService(self._worker.label_space_root).get(
             definition.resolved_output_label_space
         )
@@ -134,7 +148,7 @@ class PluginItemExecutor:
         workspace = Path(job_root) / "work" / item.item_key
         output = runtime.execute(resolved_input.recording_input, item.parameters, workspace)
 
-        # 9. Hand the generic result to the injected package/publish seam.
+        # 10. Hand the generic result to the injected package/publish seam.
         remote_finished_at = datetime.now(timezone.utc)
         if remote_finished_at < remote_started_at:
             raise PlatformError(

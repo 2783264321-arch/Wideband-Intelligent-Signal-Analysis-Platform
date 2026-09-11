@@ -30,6 +30,7 @@ from app.db.migrations import run_additive_migrations
 from app.db.session import Database
 from app.labels.service import LabelSpaceService
 from app.pipelines.base import RecordingInput
+from app.pipelines.compatibility import is_input_compatible
 from app.pipelines.plugin_registry import create_plugin_registry
 from app.recordings.model import RecordingModel
 from app.remote_execution.assets import verify_assets
@@ -225,6 +226,13 @@ def execute_local_run(
 
             handle = plugin_registry.get(run.pipeline_id, run.pipeline_version)
             definition = handle.definition
+            # Same input-compatibility defense-in-depth as the remote executor
+            # (spec §10.3): fail closed before adapter/model work.
+            if not is_input_compatible(definition, recording.label_space):
+                raise PlatformError(
+                    "INPUT_INCOMPATIBLE",
+                    "Plugin does not accept this recording dataset label space.",
+                )
             metadata = dict(run.execution_metadata_json or {})
 
             descriptor = _resolve_descriptor(metadata, run)

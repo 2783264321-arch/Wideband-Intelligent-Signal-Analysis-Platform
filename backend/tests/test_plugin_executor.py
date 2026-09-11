@@ -41,7 +41,7 @@ _PARAM_SCHEMA = {
 }
 
 
-def _definition(*, label_space="spacenet_14", schema=None) -> PipelineDefinition:
+def _definition(*, label_space="spacenet_14", schema=None, input_compatibility=()) -> PipelineDefinition:
     return PipelineDefinition(
         id=PLUGIN_ID,
         name="Generic",
@@ -55,6 +55,7 @@ def _definition(*, label_space="spacenet_14", schema=None) -> PipelineDefinition
         executors_supported=("remote_gpu",),
         recommended_executor="remote_gpu",
         model_release_required=True,
+        input_compatibility=tuple(input_compatibility),
         parameter_schema=schema if schema is not None else {},
     )
 
@@ -84,7 +85,7 @@ def _resolved(manifest: PipelineAssetManifest) -> ResolvedModelRelease:
     return ResolvedModelRelease(release=release, manifest=manifest)
 
 
-def _batch(manifest: PipelineAssetManifest, *, release_id="golden", commit=RUN, parameters=None):
+def _batch(manifest: PipelineAssetManifest, *, release_id="golden", commit=RUN, parameters=None, label_space="spacenet_14"):
     metadata = freeze_request_provenance(
         local_run_id="run_x",
         recording_fingerprint="2" * 64,
@@ -92,7 +93,7 @@ def _batch(manifest: PipelineAssetManifest, *, release_id="golden", commit=RUN, 
         dataset_name="SpaceNet",
         dataset_split="test",
         dataset_key="0",
-        label_space="spacenet_14",
+        label_space=label_space,
         pipeline_id=PLUGIN_ID,
         pipeline_version=PLUGIN_VERSION,
         required_remote_runtime_commit=commit,
@@ -373,6 +374,41 @@ def test_executor_resolves_recording_only_through_adapter(tmp_path):
     recording_input = handle.runtime.calls[0][0]
     assert not hasattr(recording_input, "ground_truth")
     assert not hasattr(recording_input, "signals")
+
+
+def test_executor_exposes_only_manifest_declared_assets(tmp_path):
+    manifest, asset = _manifest(tmp_path)
+    extra = tmp_path / "extra.bin"
+    extra.write_bytes(b"extra")
+    batch = _batch(manifest)
+    publisher = _Recorder()
+    executor, handle, _ = _executor(
+        batch=batch, definition=_definition(), store=_FakeStore(_resolved(manifest)),
+        resolver=_Recorder({"w": asset, "extra": extra}), publisher=publisher,
+    )
+    executor.execute(batch.items[0], tmp_path / "job")
+
+    assets = handle.load_runtime_calls[0]["assets"]
+    assert set(assets) == {"w"}  # manifest is the sole asset authority
+    assert "extra" not in assets
+
+
+def test_executor_rejects_incompatible_recording_label_space(tmp_path):
+    manifest, asset = _manifest(tmp_path)
+    batch = _batch(manifest, label_space="signal_presence_v1")
+    definition = _definition(input_compatibility=("spacenet_14",))
+    adapter = _FakeAdapter()
+    publisher = _Recorder()
+    executor, handle, _ = _executor(
+        batch=batch, definition=definition, store=_FakeStore(_resolved(manifest)),
+        resolver=_Recorder({"w": asset}), publisher=publisher, adapter=adapter,
+    )
+    with pytest.raises(PlatformError) as exc:
+        executor.execute(batch.items[0], tmp_path / "job")
+    assert exc.value.code == "INPUT_INCOMPATIBLE"
+    assert adapter.calls == []          # before adapter resolution
+    assert handle.load_runtime_calls == []
+    assert publisher.calls == []
 
 
 def test_plugin_executor_module_import_is_torch_free():

@@ -61,7 +61,7 @@ def _database(settings: Settings) -> Database:
     return database
 
 
-def _definition(*, plugin_id: str, model_release_required: bool, label_space: str) -> PipelineDefinition:
+def _definition(*, plugin_id: str, model_release_required: bool, label_space: str, input_compatibility=()) -> PipelineDefinition:
     return PipelineDefinition(
         id=plugin_id,
         name="Local Test",
@@ -75,10 +75,11 @@ def _definition(*, plugin_id: str, model_release_required: bool, label_space: st
         executors_supported=("local_cpu",),
         recommended_executor="local_cpu",
         model_release_required=model_release_required,
+        input_compatibility=tuple(input_compatibility),
     )
 
 
-def _add_run(database: Database, *, run_id: str, pipeline_id: str, metadata: dict) -> None:
+def _add_run(database: Database, *, run_id: str, pipeline_id: str, metadata: dict, label_space: str = "spacenet_14") -> None:
     with database.session_factory() as session:
         session.add(
             RecordingModel(
@@ -95,7 +96,7 @@ def _add_run(database: Database, *, run_id: str, pipeline_id: str, metadata: dic
                 duration_s=0.001,
                 dataset_name="SpaceNet",
                 dataset_split="test",
-                label_space="spacenet_14",
+                label_space=label_space,
                 has_ground_truth=False,
             )
         )
@@ -433,6 +434,30 @@ def test_local_worker_pending_run_still_executes(tmp_path):
 # ---------------------------------------------------------------------------
 # Import boundary
 # ---------------------------------------------------------------------------
+
+
+def test_local_worker_rejects_incompatible_recording_label_space(tmp_path):
+    settings = _settings(tmp_path)
+    database = _database(settings)
+    definition = _definition(
+        plugin_id="code_only",
+        model_release_required=False,
+        label_space="spacenet_14",
+        input_compatibility=("spacenet_14",),
+    )
+    _add_run(
+        database,
+        run_id="run_incompat",
+        pipeline_id="code_only",
+        metadata={"runtime_descriptor": _CPU_DESCRIPTOR},
+        label_space="signal_presence_v1",
+    )
+    handle = _FakeHandle(definition)
+    with pytest.raises(PlatformError) as exc:
+        _run(database, settings, handle, _FakeStore(), "run_incompat")
+    assert exc.value.code == "INPUT_INCOMPATIBLE"
+    assert handle.load_runtime_calls == []
+    assert handle.runtime.calls == []
 
 
 def test_local_inference_worker_import_is_torch_free():
