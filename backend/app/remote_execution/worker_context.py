@@ -6,12 +6,12 @@ filesystem/network I/O) and fail-closes
 (``PlatformError("REMOTE_WORKER_CONTEXT_INVALID")``) on any missing or unsafe
 field.
 
-D4 is additive: the legacy ZoomSpec scalar env vars/fields are preserved so the
-existing ``ZoomSpecRemoteItemExecutor`` path keeps working until D3B. Optional
-generic configuration (``WSP_REMOTE_MANIFEST_ROOT`` + a namespaced
-``WSP_REMOTE_ASSET_PATHS_JSON``) is parsed in addition. Generic resolution never
-reads the legacy ZoomSpec fields and fails closed when its own configuration is
-absent/invalid.
+Optional generic configuration (``WSP_REMOTE_MANIFEST_ROOT`` + a namespaced
+``WSP_REMOTE_ASSET_PATHS_JSON``) is parsed for the generic runner path. The legacy
+ZoomSpec scalar asset fields are retained as optional post-cutover cleanup debt
+(E2B owns their retirement) and are not part of the generic readiness contract.
+Generic resolution never reads the legacy ZoomSpec fields and fails closed when
+its own configuration is absent/invalid.
 """
 from __future__ import annotations
 

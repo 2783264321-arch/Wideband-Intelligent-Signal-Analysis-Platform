@@ -1,10 +1,10 @@
-"""Runner ``work`` lazy wiring tests (Task 12F-B Task 6).
+"""Runner ``work`` lazy wiring tests.
 
 ``_cli_work`` must lazily build ``RemoteWorkerContext`` from env, load the
-frozen batch from ``job_root/request.json``, construct the production
-``ZoomSpecRemoteItemExecutor``, and delegate to ``run_work`` (which remains the
-lifecycle/write-once/status owner). Importing runner / zoomspec_executor stays
-GPU-library-free. No GPU.
+frozen batch from ``job_root/request.json``, construct the production generic
+``PluginItemExecutor`` (via ``_build_work_executor``), and delegate to
+``run_work`` (which remains the lifecycle/write-once/status owner). Importing
+runner stays GPU-library-free. No GPU.
 """
 from __future__ import annotations
 
