@@ -1,0 +1,9 @@
+{
+  "pipeline_id": "cpn_bandwidth_tier",
+  "pipeline_version": "1.0.0",
+  "assets": {
+    "detector_checkpoint": "eba4fa4b112a0e61cc1013e96f99d1ae82b845f4be1e8b1f80bd2089d1f82311",
+    "ls_stft_normalization": "9b994655a279352b835b96cb00cefde89410fc6130458665dca7070de146d72f"
+  },
+  "asset_manifest_sha256": "7ab8a6a4f5f93247d3997fcf88c4b05d1099361fa8db1555fc8daeeaf7fc55bb"
+}

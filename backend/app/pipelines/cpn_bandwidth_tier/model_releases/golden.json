@@ -1,0 +1,7 @@
+{
+  "plugin_id": "cpn_bandwidth_tier",
+  "plugin_version": "1.0.0",
+  "model_release_id": "golden",
+  "asset_manifest_path": "asset_manifest.json",
+  "asset_manifest_sha256": "7ab8a6a4f5f93247d3997fcf88c4b05d1099361fa8db1555fc8daeeaf7fc55bb"
+}

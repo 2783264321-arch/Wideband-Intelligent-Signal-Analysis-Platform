@@ -1,0 +1,9 @@
+{
+  "id": "cpn_bandwidth_tier_v1",
+  "version": 1,
+  "classes": [
+    {"id": 0, "name": "Narrow"},
+    {"id": 1, "name": "Mid"},
+    {"id": 2, "name": "Wide"}
+  ]
+}

@@ -1,5 +1,8 @@
 {
   "defaults": {
+    "cpn_bandwidth_tier": {
+      "1.0.0": "golden"
+    },
     "zoomspec_yolo26n_aug_combined_frn_v3": {
       "1.0.0": "golden"
     }

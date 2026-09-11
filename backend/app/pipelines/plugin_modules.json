@@ -2,6 +2,7 @@
   "modules": [
     "app.pipelines.dummy",
     "app.pipelines.stft_energy.pipeline",
+    "app.pipelines.cpn_bandwidth_tier.plugin",
     "app.pipelines.zoomspec_yolo26n_aug_combined_frn_v3.plugin"
   ]
 }
