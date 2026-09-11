@@ -631,6 +631,61 @@ def _cli_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pipelines_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "pipelines"
+
+
+def _build_model_release_store():
+    from app.remote_execution.model_release import ModelReleaseStore, load_model_release_defaults
+
+    plugins_root = _pipelines_root()
+    return ModelReleaseStore(
+        plugins_root,
+        load_model_release_defaults(plugins_root / "model_release_defaults.json"),
+    )
+
+
+def _build_certificate_store():
+    from app.remote_execution.runtime import (
+        ExecutionCertificateStore,
+        load_execution_certificates,
+    )
+
+    return ExecutionCertificateStore(
+        load_execution_certificates(_pipelines_root() / "execution_certificates.json")
+    )
+
+
+def _build_work_executor(batch: RemoteExecutionBatchV1, worker) -> ItemExecutor:
+    """Construct the deployment-owned generic executor for a frozen batch.
+
+    ZoomSpec is just one registered plugin implementation here; no plugin-id
+    branches or ZoomSpec constants exist on this path.
+    """
+    from app.datasets.adapter import SpaceNetDatasetAdapter, create_dataset_adapter_registry
+    from app.pipelines.plugin_registry import create_plugin_registry
+    from app.remote_execution.package_publisher import publish_package
+    from app.remote_execution.plugin_executor import PluginItemExecutor
+
+    plugin_registry = create_plugin_registry()
+    model_release_store = _build_model_release_store()
+    adapter_registry = create_dataset_adapter_registry(
+        [SpaceNetDatasetAdapter(worker.dataset_root_space_net)]
+    )
+    certificate_store = _build_certificate_store()
+    return PluginItemExecutor(
+        batch=batch,
+        worker=worker,
+        plugin_registry=plugin_registry,
+        adapter_registry=adapter_registry,
+        model_release_store=model_release_store,
+        certificate_store=certificate_store,
+        runtime_descriptor=worker.runtime_descriptor(),
+        trusted_assets_resolver=worker.resolve_assets,
+        package_publisher=publish_package,
+    )
+
+
 def _cli_work(args: argparse.Namespace) -> int:
     batch_id = args.batch_id
     job_root = _require_absolute_safe_path(args.job_root, "job root", "REMOTE_EXECUTOR_UNAVAILABLE")
@@ -639,13 +694,13 @@ def _cli_work(args: argparse.Namespace) -> int:
         raise PlatformError("REMOTE_EXECUTOR_UNAVAILABLE", "job-root name must equal batch-id.")
 
     # Lazy imports stay INSIDE this handler so importing runner.py remains
-    # GPU-library-free. run_work stays the lifecycle/write-once/status owner;
-    # ZoomSpecRemoteItemExecutor owns scientific execution + result creation.
+    # GPU-library-free. run_work stays the lifecycle/write-once/status owner; the
+    # generic PluginItemExecutor owns plugin dispatch/execution + result creation.
     from app.remote_execution.worker_context import RemoteWorkerContext
-    from app.remote_execution.zoomspec_executor import ZoomSpecRemoteItemExecutor
+
     batch = _load_batch(job_root)
     worker = RemoteWorkerContext.from_env()
-    executor = ZoomSpecRemoteItemExecutor(batch=batch, worker=worker)
+    executor = _build_work_executor(batch, worker)
     run_work(batch.batch_id, job_root, executor)
     return 0
 

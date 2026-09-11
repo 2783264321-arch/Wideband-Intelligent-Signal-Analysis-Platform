@@ -18,6 +18,8 @@ import pytest
 
 from app.remote_execution import runner as runner_module
 from app.remote_execution.canonical import compute_request_sha256
+from app.remote_execution.package_publisher import publish_package
+from app.remote_execution.plugin_executor import PluginItemExecutor
 from app.remote_execution.runner import create_or_attach
 from app.remote_execution.schema import (
     RemoteExecutionBatchV1,
@@ -25,7 +27,6 @@ from app.remote_execution.schema import (
     RemoteRecordingRefV1,
 )
 from app.remote_execution.worker_context import RemoteWorkerContext
-from app.remote_execution.zoomspec_executor import ZoomSpecRemoteItemExecutor
 
 ORCHESTRATOR_COMMIT = "9a6f0feac0b0e6e2ac8ecd65d2e4383479e09f7c"
 RUNTIME_COMMIT = "68b1464842d0fb366fc211f53436d0ba49e3fbef"
@@ -98,9 +99,13 @@ def test_cli_work_wires_production_executor(tmp_path, monkeypatch):
     assert rc == 0
     assert captured["batch_id"] == batch.batch_id
     assert captured["root"] == job_root
-    assert isinstance(captured["executor"], ZoomSpecRemoteItemExecutor)
-    assert captured["executor"]._batch == batch
-    assert isinstance(captured["executor"]._worker, RemoteWorkerContext)
+    executor = captured["executor"]
+    assert isinstance(executor, PluginItemExecutor)
+    assert executor._batch == batch
+    assert isinstance(executor._worker, RemoteWorkerContext)
+    assert executor._trusted_assets_resolver == executor._worker.resolve_assets
+    assert executor._runtime_descriptor == executor._worker.runtime_descriptor()
+    assert executor._package_publisher is publish_package
 
 
 def test_cli_work_fails_closed_on_missing_worker_env(tmp_path, monkeypatch):

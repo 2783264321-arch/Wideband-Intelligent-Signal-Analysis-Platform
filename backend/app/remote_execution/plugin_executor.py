@@ -54,7 +54,24 @@ class PluginItemExecutor:
         self._trusted_assets_resolver = trusted_assets_resolver
         self._package_publisher = package_publisher
 
+    def _require_item_in_batch(self, item: RemoteExecutionItemV1) -> None:
+        """Defense-in-depth (D3B): the dispatched item must be the exact frozen
+        batch item. A caller cannot inject an arbitrary item into a batch context."""
+        for candidate in self._batch.items:
+            if candidate.item_key == item.item_key:
+                if candidate != item:
+                    raise PlatformError(
+                        "REMOTE_REQUEST_INVALID",
+                        "Dispatched item does not match the frozen batch item.",
+                    )
+                return
+        raise PlatformError(
+            "REMOTE_REQUEST_INVALID",
+            "Dispatched item is not a member of the frozen batch.",
+        )
+
     def execute(self, item: RemoteExecutionItemV1, job_root: Path) -> None:
+        self._require_item_in_batch(item)
         remote_started_at = datetime.now(timezone.utc)
         batch = self._batch
 

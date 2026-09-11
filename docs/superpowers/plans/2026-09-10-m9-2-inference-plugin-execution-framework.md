@@ -1471,6 +1471,19 @@ remote production path remains the active path.
   path; the ZoomSpec remote run now flows through the generic executor unchanged
   scientifically.
 
+**D3B cutover facts (implemented):** `runner._cli_work` now builds
+`PluginItemExecutor` from `create_plugin_registry()` / `ModelReleaseStore` /
+`DatasetAdapterRegistry` / `ExecutionCertificateStore` + `worker.resolve_assets`,
+`worker.runtime_descriptor()` and `publish_package`; `runner.py` has zero
+ZoomSpec/spacenet_14/legacy-asset/cuda:0 literals. `ZoomSpecRemoteItemExecutor`
+is retained but **legacy / non-dispatched** (E1 supplies its runtime factory).
+`PluginItemExecutor` closes the deferred D3A Minor with an item-in-frozen-batch
+binding. Legacy worker-context scalar env fields remain **post-cutover cleanup
+debt** (not read by generic execution). Generic-only remote production is
+**BLOCKED** by the legacy transport preflight (four flat assets still required):
+`D3B_BLOCKED_BY_LEGACY_TRANSPORT_PREFLIGHT`. Release-less remote stays
+fail-closed.
+
 **Post-cutover cleanup boundary:** D3B is the cutover point. Retiring the legacy
 ZoomSpec worker-context scalar env vars/fields (`required_worker_env_vars`
 semantics) is a **post-D3B cleanup/migration only**; D4/D5 must preserve them so

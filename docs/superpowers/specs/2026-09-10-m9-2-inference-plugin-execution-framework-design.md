@@ -816,6 +816,23 @@ PluginItemExecutor (generic; injected seams; no ZoomSpec constants)
 - D3A and D4/D5 MUST NOT pre-implement each other; D3A and D4/D5 MUST NOT switch
   the runner (only D3B does).
 
+**D3B cutover facts (implemented).** The production runner now constructs the
+deployment-owned generic dependencies (`PluginRegistry`, `ModelReleaseStore`,
+`DatasetAdapterRegistry`, `ExecutionCertificateStore`) plus
+`worker.resolve_assets`, `worker.runtime_descriptor()` and the D5 package
+publisher, and dispatches every free item through `PluginItemExecutor`; no
+plugin-id/ZoomSpec constants remain in `runner.py`. `ZoomSpecRemoteItemExecutor`
+is retained but is **legacy / no longer on the production dispatch path** (its
+plugin runtime factory is supplied by E1). `PluginItemExecutor` enforces an
+item-must-belong-to-the-frozen-batch binding at the generic boundary. The legacy
+worker-context scalar env fields (`required_worker_env_vars` + the four ZoomSpec
+asset scalars) are retained as **post-cutover cleanup debt** and are not read by
+generic execution. Generic-only remote **production deployment remains blocked**
+by the legacy transport preflight (`SshRunner.validate_runner_environment`
+still requires the four flat assets): `D3B_BLOCKED_BY_LEGACY_TRANSPORT_PREFLIGHT`;
+generic-only operation awaits the post-D3B legacy retirement. Release-less remote
+execution stays fail-closed (unchanged).
+
 The generic executor owns verification/orchestration; the plugin owns science.
 ZoomSpec becomes one registered plugin, not a special case. GroundTruth never
 reaches inference; request-controlled filesystem paths are never accepted. Remote
