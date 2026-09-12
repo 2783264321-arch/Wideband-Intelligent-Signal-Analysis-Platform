@@ -320,140 +320,20 @@ class AnalysisService:
         parameters: dict,
         model_release_id: str | None = None,
     ) -> AnalysisRunModel:
-        recording = self.session.get(RecordingModel, recording_id)
-        if recording is None:
-            raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
-        pipeline = self.registry.get(pipeline_id)
-        definition = pipeline.definition
+        """Legacy Single-Recording path.
 
-        # The plugin's own parameter schema decides validity; no plugin-specific
-        # parameter branch lives in the control plane.
-        validate_plugin_parameters(definition, parameters)
-
-        if self.executor_registry is None:
-            raise PlatformError(
-                "EXECUTION_CAPABILITY_UNAVAILABLE", "Executor registry is not configured."
-            )
-        resolved_release = self._resolve_release(definition, model_release_id)
-
-        # Exact requested-executor availability: capability + exact certificate +
-        # provider probe. The platform never substitutes a different executor.
-        availability = self.executor_registry.availability_for(
-            definition, resolved_release, recording, executor
-        )
-        if not availability.available:
-            raise PlatformError(
-                availability.reason_code or "EXECUTOR_UNAVAILABLE",
-                availability.reason_message or "The requested executor is unavailable.",
-            )
-        provider = self.executor_registry.provider(executor)
-
-        if executor == "remote_gpu":
-            return self._create_remote_run(
-                recording, definition, parameters, resolved_release, provider, availability
-            )
-        return self._create_local_run(recording, definition, parameters, resolved_release, provider)
-
-    def _create_local_run(self, recording, definition, parameters, resolved_release, provider) -> AnalysisRunModel:
-        run_id = f"run_{uuid4().hex}"
-        metadata = {"runtime_descriptor": provider.runtime_descriptor().to_metadata()}
-        if resolved_release is not None:
-            metadata["model_release_id"] = resolved_release.release.model_release_id
-            metadata["asset_manifest_sha256"] = resolved_release.manifest.asset_manifest_sha256
-
-        run = AnalysisRunModel(
-            id=run_id,
-            recording_id=recording.id,
-            pipeline_id=definition.id,
-            pipeline_version=definition.version,
-            executor=provider.name,
-            status="pending",
-            parameters_json=dict(parameters),
-            execution_metadata_json=metadata,
-        )
-        self.session.add(run)
-        self.session.commit()
-        self.session.refresh(run)
-
-        try:
-            run.worker_pid = provider.launch(run.id, coordinator_token=None)
-            self.session.commit()
-            self.session.refresh(run)
-        except Exception as exc:
-            run.status = "failed"
-            run.error_type = "ANALYSIS_FAILED"
-            run.error_message = str(exc)[:1000]
-            self.session.commit()
-            raise PlatformError("ANALYSIS_FAILED", "Unable to launch local inference worker.") from exc
-        return run
-
-    def _create_remote_run(
-        self, recording, definition, parameters, resolved_release, provider, availability
-    ) -> AnalysisRunModel:
-        from app.remote_execution.request_builder import freeze_request_provenance
-        from app.remote_execution.startup import build_coordinator_metadata
-
-        if resolved_release is None:
-            raise PlatformError(
-                "MODEL_RELEASE_MISMATCH", "Remote execution requires a ModelRelease."
-            )
-        run_id = f"run_{uuid4().hex}"
-        if self.identity_resolver is None or self.orchestrator_commit_resolver is None:
-            raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote provenance configuration is incomplete.")
-        if not self.runtime_commit_config:
-            raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote runtime commit is not configured.")
-
-        frozen_model_release_id = resolved_release.release.model_release_id
-        asset_manifest_sha256 = resolved_release.manifest.asset_manifest_sha256
-
-        identity = self.identity_resolver(self.session, recording, self.data_root, run_id)
-        orchestrator_commit = self.orchestrator_commit_resolver(self.project_root)
-
-        frozen_metadata = freeze_request_provenance(
-            local_run_id=run_id,
-            recording_fingerprint=identity.recording_fingerprint,
-            source_data_sha256=identity.source_data_sha256,
-            dataset_name=identity.dataset_name,
-            dataset_split=identity.dataset_split,
-            dataset_key=identity.dataset_key,
-            label_space=identity.label_space,
-            pipeline_id=definition.id,
-            pipeline_version=definition.version,
-            required_remote_runtime_commit=self.runtime_commit_config,
-            orchestrator_commit=orchestrator_commit,
-            asset_manifest_sha256=asset_manifest_sha256,
-            remote_profile=availability.remote_profile or "remote",
-            model_release_id=frozen_model_release_id,
+        Composes the caller-owned prepare seam with a service-owned preparation
+        commit and the physical launch primitive, preserving current public
+        behavior exactly.
+        """
+        run = self.prepare_run(
+            recording_id=recording_id,
+            pipeline_id=pipeline_id,
+            executor=executor,
             parameters=parameters,
+            model_release_id=model_release_id,
         )
-        # runtime_descriptor is internal execution metadata OUTSIDE the canonical
-        # request payload; request_sha256 and recovery reconstruction are unchanged.
-        frozen_metadata["runtime_descriptor"] = provider.runtime_descriptor().to_metadata()
-        final_metadata = build_coordinator_metadata(frozen_metadata)
-        coordinator_token = final_metadata["coordinator_token"]
-
-        run = AnalysisRunModel(
-            id=run_id,
-            recording_id=recording.id,
-            pipeline_id=definition.id,
-            pipeline_version=definition.version,
-            executor=provider.name,
-            status="pending",
-            parameters_json=dict(parameters),
-            execution_metadata_json=final_metadata,
-        )
-        self.session.add(run)
         self.session.commit()
         self.session.refresh(run)
+        return self.launch_prepared_run(run.id)
 
-        try:
-            run.worker_pid = provider.launch(run.id, coordinator_token=coordinator_token)
-            self.session.commit()
-            self.session.refresh(run)
-        except Exception as exc:
-            run.status = "failed"
-            run.error_type = "ANALYSIS_FAILED"
-            run.error_message = str(exc)[:1000]
-            self.session.commit()
-            raise PlatformError("ANALYSIS_FAILED", "Unable to launch remote coordinator.") from exc
-        return run
