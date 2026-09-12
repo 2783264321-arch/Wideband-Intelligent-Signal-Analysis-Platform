@@ -950,8 +950,12 @@ Verify:
 - prepare performs no commit and no worker launch
 - single-Recording create_run keeps current behavior (prepare -> caller/service
   commit -> launch)
-- dataset orchestration binds prepared Run + Attempt + Item ownership transition
-  in ONE transaction and commits before launch
+- Transaction A atomically persists the prepared AnalysisRun, the
+  DatasetExperimentAttempt binding, and the Item ownership/`running` transition
+- Transaction A commits before launch intent
+- Transaction B separately persists `Attempt.launch_requested_at = now`
+- Transaction B commits before any physical/provider launch
+- no physical launch occurs before the durable Transaction B commit
 - no committed AnalysisRun can exist without a committed Attempt owner
 - launch launches exactly the already-persisted prepared run
 - launch failure preserves existing error semantics
