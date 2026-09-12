@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.benchmarks.service import DatasetBenchmarkService, resolve_protocol_config
@@ -19,6 +20,9 @@ from app.dataset_experiments.schema import (
 )
 from app.pipelines.plugin import validate_plugin_parameters
 from app.recordings.model import RecordingModel
+
+if TYPE_CHECKING:
+    from app.analysis.service import AnalysisService
 
 _ITEM_STATUSES = ("queued", "running", "completed", "failed")
 
@@ -407,3 +411,112 @@ class DatasetExperimentService:
                 "Frozen Item membership/order is inconsistent with the frozen manifest.",
                 409,
             )
+
+    # ---------- Transaction A: durable execution ownership (G3-A) ----------
+
+    def start_item_attempt(self, *, experiment_id, item_id, analysis_service):
+        """G3-A Transaction A: durably bind one queued Item to a newly prepared Run.
+
+        Requires the Experiment to already be ``running`` (G3-C owns
+        ``pending -> running``). Revalidates frozen identity, stages a pending
+        AnalysisRun through the G2 AnalysisService.prepare_run seam on the SAME
+        Session (all external I/O happens here, before any write lock), acquires
+        the Item with a conditional queued->running CAS, then derives the next
+        attempt number from Attempt history under that claim, persists the
+        Attempt, and commits exactly once. Never writes launch_requested_at and
+        never launches.
+        """
+        if analysis_service is None or getattr(analysis_service, "session", None) is not self.session:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "AnalysisService must share the DatasetExperimentService Session.",
+                409,
+            )
+
+        experiment = self.revalidate_frozen_identity(experiment_id)
+
+        if experiment.status != "running":
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Experiment is not running; G3-A only schedules a running experiment.",
+                409,
+            )
+
+        item = self.session.get(DatasetExperimentItemModel, item_id)
+        if item is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ITEM_NOT_FOUND", "Dataset experiment item was not found.", 404
+            )
+        if item.experiment_id != experiment.id:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Item does not belong to the frozen experiment.",
+                409,
+            )
+        if item.status != "queued":
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Only a queued item can start a new attempt.",
+                409,
+            )
+        recording_id = item.recording_id
+
+        try:
+            # All external I/O (availability/probe/identity/source hash) happens
+            # here, before any write lock is acquired below.
+            run = analysis_service.prepare_run(
+                recording_id=recording_id,
+                pipeline_id=experiment.plugin_id,
+                executor=experiment.executor,
+                parameters=dict(experiment.parameters_json or {}),
+                model_release_id=experiment.model_release_id,
+            )
+
+            with self.session.no_autoflush:
+                # 1. Acquire ownership: conditional queued->running CAS.
+                claimed = self._claim_queued_item(item_id=item_id, experiment_id=experiment.id)
+                if claimed != 1:
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                        "Item is no longer queued; another start won or it is not eligible.",
+                        409,
+                    )
+                # 2. Derive the next attempt number under the acquired claim.
+                attempt_number = self._next_attempt_number(item_id)
+                attempt = DatasetExperimentAttemptModel(
+                    id=f"expattempt_{uuid4().hex}",
+                    experiment_item_id=item_id,
+                    attempt_number=attempt_number,
+                    analysis_run_id=run.id,
+                )
+                self.session.add(attempt)
+                self.session.expire(item)
+
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+
+        self.session.refresh(attempt)
+        return attempt
+
+    def _claim_queued_item(self, *, item_id, experiment_id):
+        result = self.session.execute(
+            update(DatasetExperimentItemModel)
+            .where(
+                DatasetExperimentItemModel.id == item_id,
+                DatasetExperimentItemModel.experiment_id == experiment_id,
+                DatasetExperimentItemModel.status == "queued",
+            )
+            .values(status="running")
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)
+
+    def _next_attempt_number(self, item_id):
+        current = self.session.scalar(
+            select(func.max(DatasetExperimentAttemptModel.attempt_number)).where(
+                DatasetExperimentAttemptModel.experiment_item_id == item_id
+            )
+        )
+        return int(current or 0) + 1
