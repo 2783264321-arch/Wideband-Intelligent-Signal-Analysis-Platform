@@ -28,7 +28,20 @@ def upgrade_m9_1_provenance(engine) -> None:
             connection.execute(text("ALTER TABLE analysis_runs ADD COLUMN execution_metadata_json JSON"))
 
 
+def upgrade_dataset_experiments(engine) -> None:
+    from app.dataset_experiments.model import (
+        DatasetExperimentAttemptModel,
+        DatasetExperimentItemModel,
+        DatasetExperimentModel,
+    )
+
+    DatasetExperimentModel.__table__.create(engine, checkfirst=True)
+    DatasetExperimentItemModel.__table__.create(engine, checkfirst=True)
+    DatasetExperimentAttemptModel.__table__.create(engine, checkfirst=True)
+
+
 def run_additive_migrations(engine) -> None:
     upgrade_recording_external(engine)
     upgrade_dataset_benchmarks(engine)
     upgrade_m9_1_provenance(engine)
+    upgrade_dataset_experiments(engine)
