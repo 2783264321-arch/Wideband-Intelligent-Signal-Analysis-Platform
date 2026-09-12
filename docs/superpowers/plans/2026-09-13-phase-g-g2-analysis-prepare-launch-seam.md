@@ -71,7 +71,12 @@ escalate condition.
    fencing, no DatasetEvaluation, no REST, no frontend.
 10. **No science changes:** no plugin runtime, ZoomSpec, CPN, STFT Energy,
     detection payload, or benchmark metric change.
-11. **One production file only:** `backend/app/analysis/service.py`.
+11. **Production scope:** G2 touches exactly three production files —
+    `backend/app/analysis/service.py`, `backend/app/remote_execution/source_hash.py`,
+    and `backend/app/remote_execution/identity.py`. The latter two exist solely to
+    make the existing remote identity dependency transaction-neutral so the
+    caller-owned prepare contract actually holds (see the transitive transaction
+    audit below). No dataset-experiment, schema, migration, or science change.
 
 ---
 
@@ -113,6 +118,33 @@ escalate condition.
   commit and the launch-result commit.
 - `Database.session_factory` uses `expire_on_commit=False` (`db/session.py:13`),
   so the returned Run keeps its attributes after commit.
+
+### Transitive transaction audit of the prepare call graph (verified)
+
+Every production collaborator reachable from `prepare_run` was inspected for
+`Session.commit()` / `Session.rollback()` / `Session.flush()`:
+
+| Collaborator | Path | Transaction ownership |
+|---|---|---|
+| `RecordingModel` load | `session.get` | read only |
+| `PipelineRegistry.get` | `pipelines/registry.py:72` | pure |
+| `validate_plugin_parameters` | `pipelines/plugin.py:71` | pure |
+| `_resolve_release` | `analysis/service.py:91` | delegates to `ModelReleaseStore.resolve` (file I/O only) |
+| `ModelReleaseStore.resolve` | `remote_execution/model_release.py:146` | `load_pipeline_asset_manifest` file read only; no session ops |
+| `ExecutorRegistry.availability_for` | `remote_execution/runtime.py:315` | certification lookups; no session ops |
+| `provider.availability` | `local_executor.py:94` / `executor.py:73` | subprocess/SSH probe; no session ops |
+| `identity_resolver` | `remote_execution/identity.py:39` | **owns a hidden `session.commit()` via `resolve_source_data_sha256`** |
+| `resolve_source_data_sha256` | `remote_execution/source_hash.py:45` | **`recording.source_data_sha256 = value; session.commit()` at `:61`–`:62`** |
+| `orchestrator_commit_resolver` | `remote_execution/identity.py:75` | `git rev-parse` subprocess; no session ops |
+| `freeze_request_provenance` | `remote_execution/request_builder.py:103` | pure |
+| `build_coordinator_metadata` | `remote_execution/startup.py:13` | pure |
+| `provider.runtime_descriptor()` | `runtime.py`/`local_executor.py` | pure |
+
+Finding: `resolve_source_data_sha256` is the ONLY prepare-path dependency that
+commits the caller's Session. Because `resolve_remote_recording_identity`
+(`identity.py:51`) calls it before the GroundTruth `SELECT` (`:52`), an uncached
+Recording also leaves a dirty ORM value that the later query may autoflush.
+G2 MUST remove that ownership and reorder the query (Correction 1).
 
 ### Relevant test owners (must remain green, unchanged)
 
@@ -181,6 +213,17 @@ for a Run that is still staged/unflushed in the current `Session`.
 - **Recovery:** `remote_execution/recovery.py` is not modified and keeps using
   the launcher directly.
 - **Schema:** `AnalysisRunModel` and migrations are untouched.
+- **Deliberate internal side-effect timing correction (source-hash cache):**
+  previously an uncached `source_data_sha256` could be committed by the
+  low-level resolver before `AnalysisRun` preparation completed. After G2, the
+  source-hash cache mutation and the prepared `AnalysisRun` are owned by the
+  caller's preparation transaction. For a successful legacy `create_run()`, the
+  existing preparation commit still persists BOTH before physical launch, so the
+  public successful `create_run` contract is unchanged. If remote preparation
+  fails before the caller commit, the newly computed hash cache is no longer
+  independently committed. This is INTENTIONAL and required by the Phase G
+  caller-owned transaction invariant. It is not a canonical request/hash/science
+  change.
 
 ---
 
@@ -193,8 +236,15 @@ precedes its remote RED tests.
 
 **Files:**
 - Modify: `backend/app/analysis/service.py` (add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run`, `_freeze_remote_provenance`).
+- Modify: `backend/app/remote_execution/source_hash.py` (make `resolve_source_data_sha256` transaction-neutral).
+- Modify: `backend/app/remote_execution/identity.py` (query GroundTruth before staging the source-hash cache).
 - Create: `backend/tests/test_analysis_prepare_local.py`.
 - Create: `backend/tests/test_analysis_prepare_remote.py`.
+- Modify: `backend/tests/test_remote_source_hash.py` (replace implicit-commit expectations with caller-owned transaction tests).
+
+The source-hash and identity changes are required solely to make the existing
+remote identity dependency obey the caller-owned prepare contract; they change
+no scientific/provenance semantics.
 
 **Interfaces:**
 - Consumes: `RecordingModel`, `PipelineRegistry.get`, `validate_plugin_parameters`, `_resolve_release`, `ExecutorRegistry.availability_for` / `.provider`, `provider.runtime_descriptor()`, `provider.name`, `freeze_request_provenance`, `build_coordinator_metadata`, `identity_resolver`, `orchestrator_commit_resolver`, `runtime_commit_config`.
@@ -346,6 +396,87 @@ precedes its remote RED tests.
         frozen_metadata["runtime_descriptor"] = provider.runtime_descriptor().to_metadata()
         return build_coordinator_metadata(frozen_metadata)
 ```
+
+### Exact production code — transaction-neutral source hash (`backend/app/remote_execution/source_hash.py`)
+
+Replace `resolve_source_data_sha256` so it stages the cache value and returns it
+without owning the transaction:
+
+```python
+def resolve_source_data_sha256(
+    session: Session,
+    recording: RecordingModel,
+    data_root: Path,
+) -> str:
+    if recording.source_data_sha256:
+        return recording.source_data_sha256
+
+    path = _resolve_recording_source_path(recording, data_root)
+
+    if not path.exists():
+        raise PlatformError("SOURCE_DATA_NOT_FOUND", "Recording source data file was not found.")
+    if not path.is_file():
+        raise PlatformError("SOURCE_DATA_NOT_FILE", "Recording source data path is not a regular file.")
+
+    value = compute_file_sha256(path)
+    # Transaction-neutral: stage the cache on the caller's Session and return.
+    # The caller owns commit/rollback/flush. This is what lets DatasetExperiment
+    # Transaction A persist the source-hash cache together with the prepared Run.
+    recording.source_data_sha256 = value
+    return value
+```
+
+The `session` parameter is retained for signature/caller compatibility even
+though the function no longer commits. No commit-as-default flag is added; the
+helper itself is transaction-neutral.
+
+### Exact production code — query order (`backend/app/remote_execution/identity.py`)
+
+Reorder `resolve_remote_recording_identity` so the GroundTruth `SELECT` happens
+BEFORE the source-hash cache is staged, and no DB query follows that staging:
+
+```python
+def resolve_remote_recording_identity(
+    session: Session,
+    recording: RecordingModel,
+    data_root: Path,
+    local_run_id: str,
+) -> RemoteRecordingIdentity:
+    """Resolve the double identity + SpaceNet logical identity for one Recording.
+
+    The GroundTruth SELECT is intentionally performed BEFORE
+    ``resolve_source_data_sha256`` stages the source-hash cache: once the cache is
+    a dirty ORM value, any later query could autoflush it, and prepare_run has
+    deliberately chosen not to flush. The GroundTruth query does not depend on
+    the source hash, so this reorder changes no scientific/provenance semantics.
+    """
+    gt_rows = list(
+        session.scalars(
+            select(GroundTruthModel).where(GroundTruthModel.recording_id == recording.id)
+        ).all()
+    )
+    source = resolve_source_data_sha256(session, recording, data_root)
+    manifest_recording = manifest_recording_for(recording, gt_rows)
+    fingerprint = build_recording_fingerprint(
+        recording.dataset_name,
+        recording.dataset_split,
+        recording.label_space,
+        manifest_recording,
+    ).sha256
+    return RemoteRecordingIdentity(
+        recording_fingerprint=fingerprint,
+        source_data_sha256=source,
+        dataset_name=recording.dataset_name,
+        dataset_split=recording.dataset_split,
+        dataset_key=recording.name,
+        label_space=recording.label_space,
+        local_run_id=local_run_id,
+    )
+```
+
+After the source-hash staging, the only remaining operations are the pure
+`manifest_recording_for` / `build_recording_fingerprint` / dataclass
+construction, so no autoflush is possible.
 
 `_create_local_run` / `_create_remote_run` / `create_run` remain unchanged in
 this task (transient duplication is removed in Task 3). None of the new methods
@@ -754,17 +885,151 @@ def test_freeze_remote_provenance_helper_is_the_single_seam(client):
     assert metadata["runtime_descriptor"]["executor"] == "remote_gpu"
 ```
 
+### Additions to `backend/tests/test_analysis_prepare_remote.py` — real production resolver (no hidden commit)
+
+These tests use the REAL `resolve_remote_recording_identity` (not the fake
+`_identity_resolver`) with an uncached Recording and an existing source file.
+
+```python
+def _add_real_source_recording(client, tmp_path, *, recording_id="rec_real"):
+    data_root = tmp_path / "data"
+    data_root.mkdir(parents=True, exist_ok=True)
+    raw = data_root / recording_id / "raw.iq"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"\x00\x01\x02\x03" * 256)
+    with client.app.state.database.session_factory() as session:
+        session.add(RecordingModel(
+            id=recording_id, name="0", data_path=f"{recording_id}/raw.iq",
+            data_format="complex64_le", sample_rate_hz=1e6, center_frequency_hz=0.0,
+            frequency_low_hz=-5e5, frequency_high_hz=5e5, num_samples=1024,
+            duration_s=0.001, dataset_name="SpaceNet", dataset_split="test",
+            label_space="spacenet_14", source_data_sha256=None,
+        ))
+        session.commit()
+    return data_root
+
+
+def _service_remote_real_identity(client, *, data_root):
+    from app.remote_execution.identity import resolve_remote_recording_identity
+    session = client.app.state.database.session_factory()
+    launcher = FakeLauncher()
+    service = AnalysisService(
+        session,
+        PipelineRegistry([RemoteCapablePipeline()]),
+        client.app.state.job_manager,
+        remote_coordinator_launcher=launcher,
+        identity_resolver=resolve_remote_recording_identity,
+        orchestrator_commit_resolver=_orch_commit_resolver,
+        model_release_store=FakeModelReleaseStore(),
+        runtime_commit_config=RUN,
+        project_root=Path("/tmp"),
+        data_root=data_root,
+        executor_registry=FakeRegistry(
+            {"remote_gpu": FakeProvider("remote_gpu", probe=FakeProbe(), launcher=launcher)}
+        ),
+    )
+    return service, launcher
+
+
+def test_prepare_run_remote_real_identity_has_no_hidden_commit(client, tmp_path):
+    data_root = _add_real_source_recording(client, tmp_path)
+    service, launcher = _service_remote_real_identity(client, data_root=data_root)
+
+    run = service.prepare_run(recording_id="rec_real", pipeline_id="remote_test",
+                              executor="remote_gpu", parameters={})
+    recording = service.session.get(RecordingModel, "rec_real")
+    assert run.status == "pending"
+    assert run in service.session.new
+    assert recording.source_data_sha256 is not None  # staged in memory
+    assert launcher.launches == []
+
+    # Caller rollback must discard BOTH the Run and the source-hash cache.
+    service.session.rollback()
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(AnalysisRunModel, run.id) is None
+        assert fresh.get(RecordingModel, "rec_real").source_data_sha256 is None
+
+
+def test_prepare_run_remote_real_identity_caller_commit_persists_both(client, tmp_path):
+    data_root = _add_real_source_recording(client, tmp_path)
+    service, launcher = _service_remote_real_identity(client, data_root=data_root)
+
+    run = service.prepare_run(recording_id="rec_real", pipeline_id="remote_test",
+                              executor="remote_gpu", parameters={})
+    service.session.commit()
+    assert launcher.launches == []  # preparation commit did not launch
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(AnalysisRunModel, run.id) is not None
+        assert fresh.get(RecordingModel, "rec_real").source_data_sha256 is not None
+```
+
+### Modify `backend/tests/test_remote_source_hash.py` — caller-owned transaction semantics
+
+Replace the implicit-commit expectation and adapt the cache test:
+
+```python
+def test_computation_is_staged_but_not_committed(session, tmp_path):
+    blob = b"\x00\x01\x02\x03" * 10000
+    data_root = tmp_path / "data"
+    data_root.mkdir(parents=True)
+    (data_root / "raw.iq").write_bytes(blob)
+    recording = _add_recording(session, data_path="raw.iq", external_path=None)
+
+    value = resolve_source_data_sha256(session, recording, data_root)
+    assert value == hashlib.sha256(blob).hexdigest()
+    assert recording.source_data_sha256 == value  # staged in memory
+
+    session.rollback()
+    reloaded = session.get(RecordingModel, recording.id)
+    assert reloaded.source_data_sha256 is None  # resolver did not commit
+
+
+def test_caller_commit_persists_cache(session, tmp_path):
+    blob = b"\x00\x01\x02\x03" * 10000
+    data_root = tmp_path / "data"
+    data_root.mkdir(parents=True)
+    (data_root / "raw.iq").write_bytes(blob)
+    recording = _add_recording(session, data_path="raw.iq", external_path=None)
+
+    value = resolve_source_data_sha256(session, recording, data_root)
+    session.commit()  # caller owns durability
+    session.expire(recording)
+    reloaded = session.get(RecordingModel, recording.id)
+    assert reloaded.source_data_sha256 == value
+```
+
+And in `test_cached_value_means_no_second_file_read`, insert a caller commit
+before the reload so the cross-session cache-hit contract is still tested:
+
+```python
+    first = resolve_source_data_sha256(session, recording, data_root)
+    assert first == hashlib.sha256(blob).hexdigest()
+    assert len(calls) == 1
+
+    session.commit()
+    session.expire(recording)
+    recording = session.get(RecordingModel, recording.id)
+    second = resolve_source_data_sha256(session, recording, data_root)
+    assert second == first
+    assert len(calls) == 1  # cache hit must not re-read the file
+```
+
+`test_missing_source_file_fails_before_cache_mutation` and
+`test_directory_not_accepted_as_source_data` are unchanged (a failed resolve
+still stages no cache mutation, so the reload stays `None`).
+
 ### Steps
 
-- [ ] **Write failing tests:** create BOTH `backend/tests/test_analysis_prepare_local.py` and `backend/tests/test_analysis_prepare_remote.py` exactly as above. Neither imports the other.
-- [ ] **Run exact RED command (both files together, before any production code):**
+- [ ] **Write failing tests:** create BOTH `backend/tests/test_analysis_prepare_local.py` and `backend/tests/test_analysis_prepare_remote.py` exactly as above (including the real-identity tests), and modify `backend/tests/test_remote_source_hash.py` per the caller-owned transaction tests above. None imports another.
+- [ ] **Run exact RED command (all three files together, before any production code):**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
   backend/tests/test_analysis_prepare_local.py \
-  backend/tests/test_analysis_prepare_remote.py -v
+  backend/tests/test_analysis_prepare_remote.py \
+  backend/tests/test_remote_source_hash.py -v
 ```
-Expected RED: `AttributeError: 'AnalysisService' object has no attribute 'prepare_run'` (local + remote tests), plus `AttributeError: ... '_freeze_remote_provenance'` for the helper test.
-- [ ] **Implement minimal code:** add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run`, `_freeze_remote_provenance` exactly as above; do not touch `create_run` or the old `_create_*` methods.
+Expected RED: `AttributeError: 'AnalysisService' object has no attribute 'prepare_run'` (local + remote tests), `AttributeError: ... '_freeze_remote_provenance'` for the helper test, and `test_computation_is_staged_but_not_committed` failing because the current resolver commits (rollback then reload still returns the committed value).
+- [ ] **Implement minimal code:** add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run`, `_freeze_remote_provenance`; make `resolve_source_data_sha256` transaction-neutral; reorder `resolve_remote_recording_identity` to query GroundTruth before staging the source hash. Do not touch `create_run` or the old `_create_*` methods.
 - [ ] **Run exact GREEN command:** same pytest invocation. Expected: all pass.
 - [ ] **Focused regressions:**
 ```bash
@@ -773,11 +1038,13 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
   backend/tests/test_remote_create_run.py \
   backend/tests/test_request_release_provenance.py \
   backend/tests/test_remote_execution_canonical.py \
+  backend/tests/test_remote_request_freeze.py \
   backend/tests/test_release_wiring.py \
   backend/tests/test_input_output_label_space.py \
   backend/tests/test_plugin_parameters_freeze.py -q
 ```
-- [ ] **Commit checkpoint:** `feat: add local and remote analysis run prepare seam`
+- [ ] **Run transitive transaction audit (self-review step):** confirm every collaborator listed in "Transitive transaction audit of the prepare call graph" still has no `commit`/`rollback`/`flush` after the changes; grep the three production files for `.commit(`, `.rollback(`, `.flush(` and require the only matches to be in `launch_prepared_run`/`create_run` (post-Task-3) and `test`-only code. If any other prepare-path dependency is found, STOP and document it.
+- [ ] **Commit checkpoint:** `feat: add transaction-neutral local and remote analysis run prepare seam`
 
 ---
 
@@ -1153,17 +1420,28 @@ def test_create_run_composes_prepare_commit_launch(client, monkeypatch):
     run = service.create_run(recording_id="rec_x", pipeline_id="prepare_local",
                              executor="local_cpu", parameters={})
 
-    assert [event[0] for event in events] == ["prepare", "commit", "launch"]
-    assert events[0][1] == run.id
-    assert events[2][1] == run.id
+    # prepare -> preparation commit -> launch -> launch-result commit
+    assert [event[0] for event in events] == ["prepare", "commit", "launch", "commit"]
+    assert [event[1] for event in events] == [run.id, None, run.id, None]
     assert provider.launches == [(run.id, None)]
 ```
+
+Event semantics:
+
+- event 0 `("prepare", run.id)` — `prepare_run` staged the Run.
+- event 1 `("commit", None)` — the preparation commit that makes the Run durable.
+- event 2 `("launch", run.id)` — `launch_prepared_run` invoked with the prepared Run id.
+- event 3 `("commit", None)` — `launch_prepared_run`'s launch-result commit (`worker_pid`).
+
+This pins: exactly one `prepare_run`, exactly one `launch_prepared_run`, launch
+receives the prepared Run id, the first commit precedes launch, and the second
+commit occurs only through launch-result persistence.
 
 On the current legacy code the `prepare_run`/`launch_prepared_run` spies are
 never invoked; only the internal `_create_local_run` commits fire the commit
 spy. The ordered event list therefore does not equal
-`["prepare", "commit", "launch"]`, so this test fails before the refactor and
-passes after it.
+`["prepare", "commit", "launch", "commit"]`, so this test fails before the
+refactor and passes after it.
 
 **Compatibility regressions** (must pass before and after; the commit-failure
 case is a regression, not the RED):
@@ -1412,24 +1690,28 @@ Require 0 failed / 0 errors (the current sealed baseline is `1400 passed, 28 ski
 ## Plan Self-Review
 
 1. `prepare_run` never commits/rolls back/flushes/launches — enforced by Task 1 code + tests.
-2. `launch_prepared_run` does not claim `Session.new` proves commit durability — durability is an explicit caller precondition; the guard is defensive and pre-query.
-3. The pending/unflushed guard runs before any `self.get`/query that could autoflush.
-4. Durable ordering remains caller-owned: `Transaction A COMMIT -> Transaction B COMMIT -> physical launch`.
-5. No remote prepare production behavior precedes its remote RED tests — Task 1 writes both RED test files first, then implements.
-6. The prepare seam is one coherent, independently reviewable deliverable (Task 1).
-7. The `create_run` refactor has a real failing delegation test (`test_create_run_composes_prepare_commit_launch`).
-8. The commit-failure test is classified as a compatibility regression, not a fake RED.
-9. No test module imports another test module — Task 4 defines its fixture locally and runs `test_request_release_provenance.py` directly.
-10. Failure-message semantics match current `AnalysisService` exactly (fixed raised message; raw text in `error_message`).
-11. `AnalysisRun` schema untouched — pinned by Task 4 guard.
-12. Canonical remote request behavior unchanged — pinned by `LEGACY_REQUEST_SHA256` + parity tests.
-13. Launch does not rebuild remote provenance.
-14. No automatic retry added.
-15. No `launch_requested_at` behavior added (G4 owns it).
-16. No G3/G4/G5 behavior enters G2 (boundary section).
-17. Legacy `create_run` remains compatible (Task 3 tests + existing suites).
-18. Every task has exact files, interfaces, tests, commands, and checkpoints.
-19. No TODO/TBD/XXX/hand-wavy placeholders.
+2. Every production collaborator reachable from `prepare_run` was audited for `commit`/`rollback`/`flush`; the only offender (`resolve_source_data_sha256`) is made transaction-neutral, and `resolve_remote_recording_identity` is reordered so no query/autoflush can follow the staged source-hash cache.
+3. Remote `prepare_run` with an uncached source hash is rollback-safe: `test_prepare_run_remote_real_identity_has_no_hidden_commit` proves neither the Run nor the hash survives a caller rollback.
+4. A caller commit persists the source-hash cache and the prepared Run together (`test_prepare_run_remote_real_identity_caller_commit_persists_both`, `test_caller_commit_persists_cache`).
+5. `launch_prepared_run` does not claim `Session.new` proves commit durability — durability is an explicit caller precondition; the guard is defensive and pre-query.
+6. The pending/unflushed guard runs before any `self.get`/query that could autoflush.
+7. Durable ordering remains caller-owned: `Transaction A COMMIT -> Transaction B COMMIT -> physical launch`.
+8. No remote prepare production behavior precedes its remote RED tests — Task 1 writes all RED test files first, then implements.
+9. The prepare seam is one coherent, independently reviewable deliverable (Task 1).
+10. The `create_run` refactor has a real failing delegation test (`test_create_run_composes_prepare_commit_launch`).
+11. The composition test expects the real four-event sequence `prepare -> commit -> launch -> commit` (preparation durability, then launch-result persistence).
+12. The commit-failure test is classified as a compatibility regression, not a fake RED.
+13. No test module imports another test module — Task 4 defines its fixture locally and runs `test_request_release_provenance.py` directly.
+14. Failure-message semantics match current `AnalysisService` exactly (fixed raised message; raw text in `error_message`).
+15. `AnalysisRun` schema untouched — pinned by Task 4 guard.
+16. Canonical remote request behavior unchanged — pinned by `LEGACY_REQUEST_SHA256` + parity tests.
+17. Launch does not rebuild remote provenance.
+18. No automatic retry added.
+19. No `launch_requested_at` behavior added (G4 owns it).
+20. No G3/G4/G5 behavior enters G2 (boundary section).
+21. Legacy `create_run` remains compatible (Task 3 tests + existing suites).
+22. Every task has exact files, interfaces, tests, commands, and checkpoints.
+23. No TODO/TBD/XXX/hand-wavy placeholders.
 
 ---
 
