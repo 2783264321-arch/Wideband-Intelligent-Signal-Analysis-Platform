@@ -274,9 +274,16 @@ class DatasetExperimentService:
             ) from exc
 
         # 1. Frozen dataset membership hash.
-        manifest = self._manifest_preview(
-            experiment.dataset_name, experiment.dataset_split, experiment.dataset_label_space
-        )
+        try:
+            manifest = self._manifest_preview(
+                experiment.dataset_name, experiment.dataset_split, experiment.dataset_label_space
+            )
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen dataset manifest can no longer be resolved.",
+                409,
+            ) from exc
         if manifest.recording_manifest_hash != experiment.recording_manifest_hash:
             raise PlatformError(
                 "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",

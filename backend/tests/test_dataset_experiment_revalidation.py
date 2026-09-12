@@ -13,6 +13,7 @@ from app.dataset_experiments.model import (
 from app.dataset_experiments.service import DatasetExperimentService
 from app.pipelines.base import ExecutionCapability, Pipeline, PipelineDefinition, PipelineOutput
 from app.pipelines.registry import PipelineRegistry
+from app.recordings.model import RecordingModel
 from app.remote_execution.model_release import ResolvedModelRelease
 from app.remote_execution.runtime import (
     ExecutionCertificate,
@@ -178,6 +179,19 @@ def test_manifest_hash_drift_fails(client):
     with pytest.raises(PlatformError) as exc:
         service.revalidate_frozen_identity(experiment.id)
     assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+
+
+def test_dataset_snapshot_no_longer_resolves_as_identity_changed(client):
+    database = _seed_dataset(client)
+    experiment = _create(_service(client))
+    with database.session_factory() as session:
+        for recording in session.query(RecordingModel).all():
+            recording.has_ground_truth = False
+        session.commit()
+    with pytest.raises(PlatformError) as exc:
+        _service(client).revalidate_frozen_identity(experiment.id)
+    assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+    assert exc.value.status_code == 409
 
 
 def test_item_membership_corruption_fails(client):
