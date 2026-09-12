@@ -222,8 +222,6 @@ Recommended fields:
 
     status
 
-    attempt_count
-
     last_error_type nullable
     last_error_message nullable
 
@@ -245,6 +243,19 @@ States:
 Do NOT persist a second current_analysis_run_id source of truth.
 
 Current execution is derived from the latest Attempt.
+
+Do NOT persist an `attempt_count` column.
+
+Attempt history authority is the set of DatasetExperimentAttempt rows for the
+Item. The next `attempt_number` is derived safely from the existing Attempts as:
+
+    max(attempt_number) + 1
+
+computed under the Item's transaction/concurrency protection (the same
+transaction that binds a new Attempt), so a duplicate counter can never drift.
+
+If an API later exposes `attempt_count`, it is a derived read-model value only,
+never persisted authority.
 
 ### 4.3 DatasetExperimentAttemptModel
 
@@ -298,6 +309,11 @@ Nominal transitions:
 
     evaluating -> completed
     evaluating -> failed
+
+The `evaluating` transitions are owned exclusively by the coordinator
+evaluating-state reconciliation (section 9), which observes the linked
+DatasetEvaluation until it reaches a terminal state. There is no other path that
+moves an Experiment out of `evaluating`.
 
 A failed Experiment whose inference is already 100% complete may return to
 evaluation only through explicit evaluation retry.
@@ -376,28 +392,53 @@ Phase G requires an INTERNAL split:
     prepare_run(...)
     launch_prepared_run(...)
 
-Existing public Single Recording behavior remains:
+Transaction ownership is the core of the seam and MUST be implemented exactly.
+
+### prepare_run(...)
+
+prepare_run(...):
+
+- performs validation/resolution
+- constructs and adds the AnalysisRun to the CALLER'S SQLAlchemy Session
+- may flush if identity/PK visibility is required
+- MUST NOT commit
+- MUST NOT launch
+- never owns the transaction
+
+### launch_prepared_run(...)
+
+launch_prepared_run(...) launches exactly the already-persisted prepared Run.
+It must never create or re-prepare a Run.
+
+### Existing public Single Recording behavior remains
 
     create_run(...)
       ==
     prepare_run(...)
-      -> durable persistence
+      -> caller/service commit
       -> launch_prepared_run(...)
 
-Dataset orchestration uses:
+### DatasetExperiment orchestration
 
-    prepare AnalysisRun
+Dataset orchestration uses ONE transaction to persist, together:
 
-      -> durably bind:
-           ExperimentItem
-           Attempt
-           AnalysisRun
+- the prepared AnalysisRun
+- the DatasetExperimentAttempt binding
+- the ExperimentItem ownership/`running` transition
 
-      -> commit
+then commits that single transaction BEFORE launch:
 
-      -> mark launch requested
+    prepare_run(...)                      # no commit, no launch
+      -> add DatasetExperimentAttempt     # binds Item -> AnalysisRun
+      -> Item.status = running
+      -> commit                           # ONE transaction
+      -> mark launch_requested_at
+      -> launch_prepared_run(...)
 
-      -> launch prepared AnalysisRun
+There MUST NOT be a durable committed AnalysisRun that has no durable
+DatasetExperimentAttempt ownership. A crash after `prepare_run()` but before the
+single commit must leave NO committed AnalysisRun and NO committed Attempt; the
+Item remains `queued`/retryable and the whole unit is re-prepared cleanly.
 
 The purpose is reliable ownership before process launch.
 
@@ -504,19 +545,64 @@ Each iteration:
    if all completed:
        create/start DatasetEvaluation
        Experiment -> evaluating
+       (do not exit; continue to evaluation reconciliation)
 
-6. If Experiment is running:
+6. If Experiment.status == evaluating:
+   reconcile the linked DatasetEvaluation as specified in
+   "Evaluating-state reconciliation" below.
+   Never schedule inference in this state.
+
+7. If Experiment.status == running:
 
        free_slots =
            max_concurrency - active_item_count
 
-7. Select queued Items deterministically by manifest_order.
+8. Select queued Items deterministically by manifest_order.
 
-8. Start at most free_slots Items.
+9. Start at most free_slots Items.
 
-9. Sleep a small bounded polling interval.
+10. Sleep a small bounded polling interval.
 
-10. Repeat.
+11. Repeat.
+
+### Evaluating-state reconciliation
+
+When `Experiment.status == evaluating`, each coordinator iteration MUST run the
+following and MUST NOT schedule inference.
+
+1. `dataset_evaluation_id` MUST exist.
+   A missing id is an invariant violation: Experiment -> failed, exit.
+
+2. Load the linked DatasetEvaluation.
+
+3. `evaluation.status` in {`pending`, `running`}:
+   keep waiting; continue bounded polling.
+
+4. `evaluation.status == completed`:
+   Experiment -> completed
+   Experiment.completed_at = now
+   coordinator exits.
+
+5. `evaluation.status == interrupted`:
+   use the existing DatasetBenchmarkService retry semantics to transition the
+   evaluation back to `pending` and start it again.
+   No AnalysisRun is created.
+   Continue polling.
+
+6. `evaluation.status == failed`:
+   Experiment -> failed
+   preserve all inference results
+   do NOT automatically retry
+   coordinator exits
+   explicit Retry Evaluation may later resume evaluation only.
+
+7. Any missing, corrupt, or mismatched linked DatasetEvaluation:
+   fail closed as a DatasetExperiment invariant/orchestration failure
+   (section 14.2).
+
+Startup recovery for evaluating Experiments relies on this same logic; the
+restarted coordinator re-enters the `evaluating` branch and continues from the
+current DatasetEvaluation status.
 
 V1 uses database polling.
 
@@ -587,6 +673,9 @@ DatasetExperiment recovery:
 - rotates fresh coordinator_token
 - restarts coordinator for non-terminal running/evaluating Experiments
 - reconciles Item state from real AnalysisRun state
+- for an `evaluating` Experiment, the restarted coordinator re-enters the
+  section 9 evaluating-state reconciliation; it does not require, and must not
+  perform, fresh inference.
 
 Old coordinator sees token mismatch and exits.
 
@@ -630,6 +719,14 @@ The existing benchmark subsystem remains responsible for:
 - coverage/comparability
 
 Phase G does NOT reimplement metrics.
+
+The coordinator observes the linked DatasetEvaluation through the
+evaluating-state reconciliation in section 9. The transitions
+`evaluating -> completed` and `evaluating -> failed` are owned by that
+reconciliation; there is no separate transition path. A completed
+DatasetEvaluation is never left with an evaluating Experiment: the same
+coordinator iteration that observes `evaluation.status == completed` sets
+`Experiment.status = completed`.
 
 ### Evaluation interruption
 
@@ -813,12 +910,18 @@ Verify:
 
 Verify:
 
-- prepare persists exact identity without launching
-- launch launches exactly the prepared run
-- existing create_run behavior remains unchanged
+- prepare stages/adds the exact AnalysisRun in the caller-owned transaction
+  without commit or launch
+- prepare performs no commit and no worker launch
+- single-Recording create_run keeps current behavior (prepare -> caller/service
+  commit -> launch)
+- dataset orchestration binds prepared Run + Attempt + Item ownership transition
+  in ONE transaction and commits before launch
+- no committed AnalysisRun can exist without a committed Attempt owner
+- launch launches exactly the already-persisted prepared run
+- launch failure preserves existing error semantics
 - local and remote provenance remains unchanged
 - release/certificate/runtime identity remains exact
-- launch failure preserves existing error semantics
 
 ### 18.3 State machine
 
@@ -829,6 +932,12 @@ Verify:
 - best-effort execution
 - failed terminal set -> completed_with_failures
 - 100% success -> evaluating
+- evaluating + completed evaluation -> Experiment completed
+- evaluating + running evaluation -> remain evaluating
+- evaluating + interrupted evaluation -> retry evaluation only
+- evaluating + failed evaluation -> Experiment failed
+- evaluating + missing evaluation -> fail closed
+- none of the evaluating paths create new AnalysisRuns
 - partial success never creates formal evaluation
 
 ### 18.4 Retry / recovery
@@ -850,6 +959,7 @@ Verify:
 - exact 100% membership
 - final successful Attempt chosen
 - allow_incomplete=False
+- evaluating never schedules inference
 - interrupted evaluation can recover without inference rerun
 - failed evaluation retry creates no new AnalysisRuns
 
