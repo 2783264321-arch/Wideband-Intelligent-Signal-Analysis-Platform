@@ -29,6 +29,16 @@
       "precision": "float32",
       "runtime_ref": "local:autodl_primary:cpu:a1237f8faae7",
       "evidence_ref": "m9_2_local_cpu_acceptance"
+    },
+    {
+      "plugin_id": "cpn_bandwidth_tier",
+      "plugin_version": "1.0.0",
+      "model_release_id": "golden",
+      "executor": "local_cpu",
+      "device_type": "cpu",
+      "precision": "float32",
+      "runtime_ref": "local:autodl_primary:cpu:a1237f8faae7",
+      "evidence_ref": "m9_2_fa2_cpn_local_cpu_acceptance"
     }
   ]
 }
