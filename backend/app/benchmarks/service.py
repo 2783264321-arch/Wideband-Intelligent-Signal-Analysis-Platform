@@ -62,6 +62,15 @@ def _protocol_config_for(protocol: str) -> dict:
     raise PlatformError("UNSUPPORTED_EVALUATION_PROTOCOL", f"Unsupported evaluation protocol: {protocol}", 422)
 
 
+def resolve_protocol_config(evaluation_protocol: str) -> dict:
+    """Public read seam over the frozen supported evaluation-protocol set.
+
+    Reuses ``_protocol_config_for`` so the supported-protocol authority stays
+    singular; raises ``UNSUPPORTED_EVALUATION_PROTOCOL`` for unknown values.
+    """
+    return _protocol_config_for(evaluation_protocol)
+
+
 @dataclass(frozen=True)
 class RunResolutionPreview:
     recording_manifest_hash: str
