@@ -4,13 +4,14 @@
 > superpowers:test-driven-development while implementing each behavior task and
 > superpowers:verification-before-completion before claiming a gate complete.
 
-**Goal:** Implement Phase G **DatasetExperiment Transaction A — durable
-execution ownership**. For one eligible queued `DatasetExperimentItem`, atomically
-commit a prepared `AnalysisRun` (via the sealed G2 `AnalysisService.prepare_run`),
-a new `DatasetExperimentAttempt` binding that Item to that exact Run, and the
-Item `queued -> running` transition, in one caller-owned transaction. G3 stops at
-that commit: it never writes `launch_requested_at`, never launches, and never
-starts a coordinator/worker.
+**Goal (G3-A sub-gate):** Implement the first sub-gate of the approved Phase G
+**G3 — Orchestrator Core**: **G3-A — Transaction A Ownership**. For one eligible
+queued `DatasetExperimentItem` belonging to a `running` `DatasetExperiment`,
+atomically commit a prepared `AnalysisRun` (via the sealed G2
+`AnalysisService.prepare_run`), a new `DatasetExperimentAttempt` binding that Item
+to that exact Run, and the Item `queued -> running` transition, in one
+caller-owned transaction. G3-A stops at that commit: it never writes
+`launch_requested_at`, never launches, and never starts a coordinator/worker.
 
 **Architecture:** A single additive method on the sealed G1
 `DatasetExperimentService` (`start_item_attempt`) plus two small private helpers
@@ -20,7 +21,8 @@ the same SQLAlchemy `Session`. It adds no table, column, migration, or schema; i
 does not launch. Concurrency safety is provided by a conditional (`queued ->
 running`) `UPDATE` compare-and-swap on the Item, serialized by SQLite's
 single-writer model, with the existing
-`UNIQUE(experiment_item_id, attempt_number)` constraint as a backstop.
+`UNIQUE(experiment_item_id, attempt_number)` constraint as a backstop. The next
+attempt number is derived only after the CAS succeeds.
 
 **Tech Stack:** Python 3.12 (`/root/autodl-tmp/WISA-m9-2-implementation/.venv`),
 SQLAlchemy 2.x, SQLite (rollback-journal, default engine, no WAL/busy_timeout
@@ -40,11 +42,38 @@ families, §15 invariants, §20 G3).
 
 ---
 
+## Phase G Gate Structure (authoritative spec §20, refined into sub-gates)
+
+The approved design (§20) defines **G3 — Orchestrator Core** as: Attempt
+creation; coordinator worker/job manager; bounded concurrency; reconciliation;
+best-effort execution. **G4 — Retry and Recovery** owns Retry Failed, launch
+ambiguity fencing/recovery, coordinator tokens, restart recovery, and
+duplicate-active-Attempt protection.
+
+To keep delivery incremental without renumbering the approved gates, G3 is
+implemented as three internal sub-gates. Together **G3-A + G3-B + G3-C complete the
+approved G3 Orchestrator Core**; none of them is a substitute for the others.
+
+| Sub-gate | Scope | Status |
+|---|---|---|
+| **G3-A — Transaction A Ownership** (this plan) | revalidate frozen identity; `prepare_run`; create Attempt; Item `queued->running`; one atomic commit; no launch | this document |
+| **G3-B — Durable First Launch** | Transaction B (`Attempt.launch_requested_at` commit), then `AnalysisService.launch_prepared_run`; normal first-launch path only; no ambiguity/recovery handling | future plan |
+| **G3-C — Coordinator Core** | `DatasetExperiment` worker/job manager; Experiment `pending->running` ownership path; bounded `max_concurrency`; deterministic queued-item scheduling; reconciliation from `AnalysisRun` authority; best-effort continuation after individual failures | future plan |
+
+**G4 — Retry and Recovery** remains reserved for: explicit Retry Failed; local
+launch ambiguity recovery/fail-closed; coordinator-token fencing and restart
+recovery; duplicate-active-Attempt recovery/protection.
+
+This plan (G3-A) MUST NOT implement any G3-B, G3-C, or G4 behavior. References
+below to "G3" mean the Transaction A sub-gate unless explicitly labeled G3-B/G3-C.
+
+---
+
 ## Global Constraints
 
-1. **G3 ends at Transaction A COMMIT.** No `launch_requested_at`, no
-   `launch_prepared_run`, no provider `.launch`, no worker, no coordinator, no
-   retry policy, no evaluation, no REST/frontend.
+1. **G3-A ends at Transaction A COMMIT.** No `launch_requested_at`, no
+   `launch_prepared_run`, no provider `.launch`, no worker, no coordinator
+   (`job_manager`), no retry policy, no evaluation, no REST/frontend.
 2. **Single transaction.** prepared `AnalysisRun` + new `DatasetExperimentAttempt`
    + Item `running` (+ any newly staged source-data hash cache) become durable
    together or not at all, in one `Session.commit()`.
@@ -55,16 +84,21 @@ families, §15 invariants, §20 G3).
    `revalidate_frozen_identity` seam; run construction uses the G2
    `AnalysisService.prepare_run` seam. No independent provenance reconstruction.
 5. **No persisted counter.** `attempt_number = max(existing) + 1` derived from
-   authoritative Attempt rows under the Item claim.
-6. **Item precondition is `queued`.** Completed items are never restarted;
-   `failed -> queued` is explicit Retry Failed behavior (G4), not implicit G3.
+   authoritative Attempt rows **after** the Item claim is acquired.
+6. **Precondition is Item `queued` AND Experiment `running`.** Completed items are
+   never restarted, and a `pending` Experiment may not create a `running` Item;
+   `failed -> queued` and `pending -> running` are explicit Retry/Coordinator
+   behavior (G4 / G3-C), not implicit in G3-A.
 7. **No schema change.** `backend/app/dataset_experiments/model.py`, migrations,
    `analysis_runs` schema, canonical hashing, fingerprinting, AssetManifest V1,
    ModelRelease authority, and certificate semantics are untouched.
 8. **Production scope is one file:** `backend/app/dataset_experiments/service.py`.
-9. **Same-session autoflush discipline.** The item claim is issued inside
-   `Session.no_autoflush` so no staged Run/Attempt/hash is flushed before the
-   compare-and-swap; prepare performs no commit/flush/rollback/launch (G2).
+9. **Same-session autoflush discipline.** The Item claim (conditional UPDATE) is
+   issued inside `Session.no_autoflush`; `attempt_number` and the Attempt are
+   derived/added only after the claim succeeds; no staged Run/Attempt/hash is
+   flushed before the compare-and-swap; prepare performs no
+   commit/flush/rollback/launch (G2). No external I/O occurs after the CAS and
+   before commit.
 
 ---
 
@@ -97,7 +131,7 @@ families, §15 invariants, §20 G3).
     commit/rollback/flush/launch. Run id is `run_<uuid4>` (`:163`/`:183`).
   - `_prepare_local_run` (`:162`), `_prepare_remote_run` (`:182`),
     `_freeze_remote_provenance` (`:206`).
-  - `launch_prepared_run` (`:249`) — G4 only; G3 must not call it.
+  - `launch_prepared_run` (`:249`) — G3-B/G4 only; G3-A must not call it.
 - `backend/app/remote_execution/source_hash.py` — G2 made
   `resolve_source_data_sha256` transaction-neutral (`:45`); it stages
   `recording.source_data_sha256` and returns.
@@ -125,9 +159,11 @@ families, §15 invariants, §20 G3).
 | Layer | Owns commit/rollback? | Owns physical launch? |
 |---|---|---|
 | `AnalysisService.prepare_run` (G2) | **No** | **No** |
-| `DatasetExperimentService.start_item_attempt` (G3) | **Yes — Transaction A only** | **No** |
+| `DatasetExperimentService.start_item_attempt` (G3-A) | **Yes — Transaction A only** | **No** |
 | `DatasetExperimentService.create_experiment` (G1) | Yes (creation) | No |
-| G4 (`launch_requested_at` + `launch_prepared_run`) | Yes — Transaction B | Yes |
+| G3-B (`Attempt.launch_requested_at` + `launch_prepared_run`) | Yes — Transaction B | Yes (normal first launch) |
+| G3-C (coordinator: Experiment `pending->running`, scheduling, reconciliation) | Owns coordinator iterations/transactions | No (delegates to G3-B primitive) |
+| G4 (Retry Failed, ambiguity/recovery, fencing, duplicate-Attempt recovery) | Yes | Yes (retry path) |
 
 `start_item_attempt` is the "caller" of `prepare_run`: it is the orchestration
 layer that owns and commits Transaction A. A failure anywhere inside Transaction A
@@ -141,14 +177,17 @@ claim.
 
 | Object | From | To | Guard | Owner |
 |---|---|---|---|---|
-| Experiment | `pending`/`running` | unchanged | must be in `{pending, running}` else invariant violation | G3 |
-| Item | `queued` | `running` | conditional CAS `UPDATE ... WHERE status='queued'`, rowcount == 1 | G3 |
-| Item | `failed` | `queued` | not in G3 | G4 Retry Failed |
-| Item | `running`/`completed` | (reject) | `start_item_attempt` raises invariant violation | G3 |
-| Attempt | (absent) | new row, `launch_requested_at = NULL` | `attempt_number = max+1`, unique | G3 |
-| Attempt | `launch_requested_at NULL` | `now()` | not in G3 | G4 |
-| AnalysisRun | (absent) | `pending` | via G2 `prepare_run` | G2 (staged) / G3 (commit) |
-| AnalysisRun | `pending` | `running`/terminal | not in G3 | G4 + worker |
+| Experiment | `pending` | `running` | coordinator start/ownership path | G3-C |
+| Experiment | `running` | unchanged | `start_item_attempt` requires `status == "running"` else invariant violation | G3-A |
+| Experiment | terminal/`evaluating`/`completed_with_failures` | (reject) | not schedulable | G3-A / G3-C |
+| Item | `queued` | `running` | conditional CAS `UPDATE ... WHERE status='queued'`, rowcount == 1 | G3-A |
+| Item | `failed` | `queued` | explicit Retry Failed | G4 |
+| Item | `running`/`completed` | (reject) | `start_item_attempt` raises invariant violation | G3-A |
+| Attempt | (absent) | new row, `launch_requested_at = NULL` | `attempt_number = max+1` after CAS; unique | G3-A |
+| Attempt | `launch_requested_at NULL` | `now()` | durable launch-intent fence | G3-B |
+| AnalysisRun | (absent) | `pending` | via G2 `prepare_run` | G2 (staged) / G3-A (commit) |
+| AnalysisRun | `pending` | `running`/terminal | physical provider launch / worker | G3-B + worker |
+| AnalysisRun | terminal | (reject relaunch) | terminal immutability; retry creates new Run | G4 |
 
 ---
 
@@ -160,30 +199,44 @@ time; a write statement acquires the reserved lock and serializes against other
 writers. There is no `SELECT ... FOR UPDATE`.
 
 **Chosen V1 mechanism (no new counter).**
-1. A transactional compare-and-swap claims the Item:
+1. `prepare_run(...)` executes first. It performs all external I/O (identity
+   resolution, source-hash file read/cache staging, availability/probe,
+   certificate checks) and stages the pending `AnalysisRun` with **no SQL write**,
+   so no SQLite write lock is held during I/O.
+2. Enter `Session.no_autoflush` and acquire ownership with the conditional CAS:
    `UPDATE dataset_experiment_items SET status='running'
     WHERE id=:item_id AND experiment_id=:experiment_id AND status='queued'`;
-   the method requires `rowcount == 1`.
-2. `attempt_number = max(existing attempt_number for this item) + 1` is derived
-   **after** the claim, inside the same transaction/no-autoflush block.
-3. The existing `UNIQUE(experiment_item_id, attempt_number)` and
+   the method requires `rowcount == 1`. This is the Item `queued -> running`
+   transition and the concurrency claim.
+3. **Only after the CAS succeeds**, derive
+   `attempt_number = max(existing attempt_number for this item) + 1` from
+   authoritative Attempt rows.
+4. Construct and `session.add(...)` the new `DatasetExperimentAttempt`, expire the
+   Item ORM state so it reflects the claim, leave `no_autoflush`, then perform the
+   single `Session.commit()`.
+5. The existing `UNIQUE(experiment_item_id, attempt_number)` and
    `UNIQUE(analysis_run_id)` constraints are defense-in-depth backstops.
 
-**Why this prevents double-start.** Two concurrent transactions that both read
-the Item as `queued` can both stage a Run (no writes) but only one can win the
-CAS: the first acquires the SQLite write lock and updates the row; the second
-blocks on the write lock and, on resume, matches zero rows (`status` is now
-`running`), so it raises `DATASET_EXPERIMENT_INVARIANT_VIOLATION` and rolls back.
-Because the winner holds the Item write claim for the rest of Transaction A, no
-second claimer can derive an `attempt_number` for the same Item concurrently, so
-`max+1` cannot collide in normal operation; the unique constraint would reject a
-collision if one somehow occurred.
+There is no explicit `flush()`, and no external I/O occurs after the CAS and
+before commit (step 4 only builds/flushes Python-side objects and commits).
 
-**Deliberate reordering note.** The spec's Transaction A logical order is
-`prepare_run -> add Attempt -> Item.status=running -> COMMIT`. G3 expresses the
-Item transition as the conditional CAS and issues it after staging the Attempt,
-inside the same single transaction. The committed content is identical
-(Run + Attempt + Item running); the CAS is only the concurrency guard.
+**Why this prevents double-start.** Two concurrent transactions can both read the
+Item as `queued` and both run `prepare_run` (which performs no writes), but only
+one can win the CAS: the first acquires the SQLite write lock and updates the row;
+the second blocks on the write lock and, on resume, matches zero rows (`status` is
+now `running`), so it raises `DATASET_EXPERIMENT_INVARIANT_VIOLATION` and rolls
+back. Because `attempt_number` is derived strictly **after** the winning
+transaction has acquired the Item claim and holds the write lock through commit,
+no second claimer can derive an `attempt_number` for the same Item concurrently,
+so `max+1` is genuinely computed under the Item's transaction protection; the
+unique constraint rejects a collision if one somehow occurred.
+
+**Deliberate ordering note.** The spec's Transaction A logical content is
+`prepare_run -> Attempt -> Item.status=running -> COMMIT`. G3-A issues the CAS
+(the Item transition) before deriving `attempt_number` and before staging the
+Attempt, inside the same single transaction. The committed content is identical
+(`Run + Attempt + Item running`); the CAS is the ownership acquisition, and
+deriving the attempt number after it is what makes the concurrency proof sound.
 
 **Lock duration.** Availability probes (local interpreter check / remote SSH
 probe) run inside `prepare_run` **before** the CAS, so no SQLite write lock is
@@ -208,29 +261,39 @@ with `DATASET_EXPERIMENT_INVARIANT_VIOLATION`.
 |---|---|---|---|
 | `revalidate_frozen_identity` drift | nothing staged (read-only) | `queued` | none |
 | Item not `queued` / not found / wrong experiment | nothing staged | unchanged | none |
+| Experiment not `running` | nothing staged | `queued` | none |
 | `prepare_run` validation/availability/certificate failure | rollback discards any staged hash/Run | `queued` | none |
-| CAS `rowcount != 1` (lost race) | rollback discards staged hash/Run/Attempt | `queued` (winner sets `running`) | none |
-| `commit()` failure (incl. unique-constraint backstop) | rollback; nothing durable | `queued` | none |
-| process crash before commit | SQLite rolls back the open transaction | `queued` | none |
-| process crash after commit | Run `pending`, Attempt present, `launch_requested_at NULL`, Item `running` | `running` | none (G4 recovery owns first launch) |
+| CAS `rowcount != 1` (lost race) | loser contributes nothing durable: its staged hash/Run/Attempt are rolled back and it raises `DATASET_EXPERIMENT_INVARIANT_VIOLATION`. If another transaction won the CAS, the authoritative Item is already `running` and the winner's committed state is untouched. | unchanged by loser (winner may be `running`) | none |
+| `commit()` failure (incl. unique-constraint backstop) | rollback; nothing durable from this transaction | unchanged by this transaction | none |
+| process crash before commit | SQLite rolls back the open transaction | `queued` (or winner's state) | none |
+| process crash after commit | Run `pending`, Attempt present, `launch_requested_at NULL`, Item `running` | `running` | none (G3-B/G4 owns first launch/recovery) |
 
-Invariant: a committed `AnalysisRun` created by G3 always has a committed
+Invariant: a committed `AnalysisRun` created by G3-A always has a committed
 `DatasetExperimentAttempt` owner; a committed Attempt always binds an Item that is
-`running`; `launch_requested_at` is always `NULL` after G3.
+`running`; `launch_requested_at` is always `NULL` after G3-A. A lost CAS never
+undoes a winner's already-committed state; it only rolls back the loser's own
+uncommitted work.
 
 ---
 
-## G3 vs G4 Boundary
+## G3-A vs G3-B / G3-C / G4 Boundary
 
-- **G3 (this plan):** `prepare_run` + Attempt + Item `running` + source-hash cache,
-  one commit; `launch_requested_at` stays `NULL`.
-- **G4 (deferred):** Transaction B (`Attempt.launch_requested_at = now()` commit),
-  then `AnalysisService.launch_prepared_run(run_id)` physical launch, local
-  launch-ambiguity fail-closed, coordinator token fencing, restart recovery, Retry
-  Failed, duplicate-active-attempt recovery.
+- **G3-A (this plan):** `revalidate_frozen_identity` + `prepare_run` + Attempt +
+  Item `running` + source-hash cache, one commit; `launch_requested_at` stays
+  `NULL`; no launch, no coordinator.
+- **G3-B (deferred):** Transaction B (`Attempt.launch_requested_at = now()`
+  commit), then `AnalysisService.launch_prepared_run(run_id)` physical first
+  launch; normal first-launch path only; no ambiguity/recovery handling.
+- **G3-C (deferred):** `DatasetExperiment` worker/job manager; Experiment
+  `pending -> running` ownership; bounded `max_concurrency`; deterministic
+  queued-item scheduling (calls the G3-A seam); reconciliation from `AnalysisRun`
+  authority; best-effort continuation after individual failures.
+- **G4 — Retry and Recovery (deferred):** explicit Retry Failed; local launch
+  ambiguity fail-closed; coordinator-token fencing and restart recovery;
+  duplicate-active-Attempt recovery/protection.
 - **G5 (deferred):** DatasetEvaluation creation + evaluation lifecycle + REST.
-- G3 never calls `launch_prepared_run`, `provider.launch`, `job_manager.start`,
-  or the coordinator launcher.
+- G3-A never calls `launch_prepared_run`, `provider.launch`, `job_manager.start`,
+  or the coordinator launcher, and never changes Experiment status.
 
 ---
 
@@ -246,12 +309,15 @@ def start_item_attempt(
     item_id: str,
     analysis_service: "AnalysisService",
 ) -> DatasetExperimentAttemptModel:
-    """Transaction A: durably bind one queued Item to a newly prepared Run.
+    """G3-A Transaction A: durably bind one queued Item to a newly prepared Run.
 
-    Revalidates frozen identity, calls the G2 AnalysisService.prepare_run seam on
-    the SAME Session, derives the next attempt number from Attempt history,
-    claims the Item queued->running, persists the Attempt, and commits once.
-    Never writes launch_requested_at and never launches.
+    Requires the Experiment to already be ``running`` (G3-C owns
+    ``pending -> running``). Revalidates frozen identity, stages a pending
+    AnalysisRun through the G2 AnalysisService.prepare_run seam on the SAME
+    Session (all external I/O happens here, before any write lock), acquires the
+    Item via a conditional queued->running CAS, derives the next attempt number
+    from Attempt history, persists the Attempt, and commits exactly once. Never
+    writes launch_requested_at and never launches.
     """
 
 def _claim_queued_item(self, *, item_id: str, experiment_id: str) -> int:
@@ -301,13 +367,16 @@ Then, inside the `DatasetExperimentService` class body, add:
         item_id,
         analysis_service,
     ):
-        """Transaction A: durably bind one queued Item to a newly prepared Run.
+        """G3-A Transaction A: durably bind one queued Item to a newly prepared Run.
 
-        Revalidates frozen identity, stages a pending AnalysisRun through the G2
-        AnalysisService.prepare_run seam on the SAME Session, derives the next
-        attempt number from authoritative Attempt history, claims the Item
-        queued->running with a conditional UPDATE, persists the Attempt, and
-        commits exactly once. Never writes launch_requested_at and never launches.
+        Requires the Experiment to already be ``running`` (G3-C owns
+        ``pending -> running``). Revalidates frozen identity, stages a pending
+        AnalysisRun through the G2 AnalysisService.prepare_run seam on the SAME
+        Session (all external I/O happens here, before any write lock), acquires
+        the Item with a conditional queued->running CAS, then derives the next
+        attempt number from Attempt history under that claim, persists the
+        Attempt, and commits exactly once. Never writes launch_requested_at and
+        never launches.
         """
         if analysis_service is None or getattr(analysis_service, "session", None) is not self.session:
             raise PlatformError(
@@ -318,10 +387,10 @@ Then, inside the `DatasetExperimentService` class body, add:
 
         experiment = self.revalidate_frozen_identity(experiment_id)
 
-        if experiment.status not in {"pending", "running"}:
+        if experiment.status != "running":
             raise PlatformError(
                 "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
-                "Experiment is not in a schedulable state.",
+                "Experiment is not running; G3-A only schedules a running experiment.",
                 409,
             )
 
@@ -345,6 +414,8 @@ Then, inside the `DatasetExperimentService` class body, add:
         recording_id = item.recording_id
 
         try:
+            # All external I/O (availability/probe/identity/source hash) happens
+            # here, before any write lock is acquired below.
             run = analysis_service.prepare_run(
                 recording_id=recording_id,
                 pipeline_id=experiment.plugin_id,
@@ -354,6 +425,15 @@ Then, inside the `DatasetExperimentService` class body, add:
             )
 
             with self.session.no_autoflush:
+                # 1. Acquire ownership: conditional queued->running CAS.
+                claimed = self._claim_queued_item(item_id=item_id, experiment_id=experiment.id)
+                if claimed != 1:
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                        "Item is no longer queued; another start won or it is not eligible.",
+                        409,
+                    )
+                # 2. Derive the next attempt number under the acquired claim.
                 attempt_number = self._next_attempt_number(item_id)
                 attempt = DatasetExperimentAttemptModel(
                     id=f"expattempt_{uuid4().hex}",
@@ -362,14 +442,6 @@ Then, inside the `DatasetExperimentService` class body, add:
                     analysis_run_id=run.id,
                 )
                 self.session.add(attempt)
-
-                claimed = self._claim_queued_item(item_id=item_id, experiment_id=experiment.id)
-                if claimed != 1:
-                    raise PlatformError(
-                        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
-                        "Item is no longer queued; another start won or it is not eligible.",
-                        409,
-                    )
                 self.session.expire(item)
 
             self.session.commit()
@@ -470,13 +542,21 @@ def _services(client, *, provider=None):
     return session, ds, analysis, provider
 
 
-def _experiment(ds):
-    return ds.create_experiment(
+def _experiment(ds, *, status="running"):
+    """Create an experiment and explicitly transition it to the requested state.
+
+    G3-A only schedules a ``running`` experiment; G3-C owns ``pending -> running``.
+    """
+    experiment = ds.create_experiment(
         name="g3", dataset_name="SpaceNet", dataset_split="test",
         dataset_label_space="spacenet_14", plugin_id="g3_local", plugin_version="1.0",
         executor="local_cpu", parameters={},
         evaluation_protocol="physical_tf_detection_ap_v2", max_concurrency=1,
     )
+    if status != "pending":
+        experiment.status = status
+        ds.session.commit()
+    return experiment
 
 
 def _item(session, experiment_id, order=0):
@@ -569,14 +649,29 @@ def test_start_item_attempt_rejects_non_queued_item(client):
 def test_start_item_attempt_rejects_terminal_experiment(client):
     _seed_dataset(client)
     session, ds, analysis, provider = _services(client)
-    experiment = _experiment(ds)
+    experiment = _experiment(ds, status="completed")
     item = _item(session, experiment.id)
-    experiment.status = "completed"
-    session.commit()
 
     with pytest.raises(PlatformError) as exc:
         ds.start_item_attempt(experiment_id=experiment.id, item_id=item.id, analysis_service=analysis)
     assert exc.value.code == "DATASET_EXPERIMENT_INVARIANT_VIOLATION"
+
+
+def test_start_item_attempt_rejects_pending_experiment(client):
+    # G3-C owns Experiment.pending -> running; G3-A must not create a running
+    # Item under a pending Experiment.
+    _seed_dataset(client)
+    session, ds, analysis, provider = _services(client)
+    experiment = _experiment(ds, status="pending")
+    item = _item(session, experiment.id)
+
+    with pytest.raises(PlatformError) as exc:
+        ds.start_item_attempt(experiment_id=experiment.id, item_id=item.id, analysis_service=analysis)
+    assert exc.value.code == "DATASET_EXPERIMENT_INVARIANT_VIOLATION"
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(DatasetExperimentItemModel, item.id).status == "queued"
+        assert fresh.query(AnalysisRunModel).count() == 0
+        assert fresh.query(DatasetExperimentAttemptModel).count() == 0
 
 
 def test_start_item_attempt_missing_item_fails_closed(client):
@@ -780,13 +875,17 @@ def _services_remote(client, data_root):
 
 
 def _remote_experiment(ds):
-    return ds.create_experiment(
+    experiment = ds.create_experiment(
         name="g3r", dataset_name="SpaceNet", dataset_split="test",
         dataset_label_space="spacenet_14", plugin_id="g3_remote", plugin_version="1.0",
         executor="remote_gpu", parameters={},
         evaluation_protocol="physical_tf_detection_ap_v2", max_concurrency=1,
         model_release_id="golden",
     )
+    # G3-A only schedules a running experiment (G3-C owns pending -> running).
+    experiment.status = "running"
+    ds.session.commit()
+    return experiment
 
 
 def _queued_item(session, experiment_id):
@@ -868,7 +967,11 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 This file is self-contained. Re-declare the small helpers (`G3LocalPipeline`,
 `_seed_dataset`, `_services`, `_experiment`, `_item`) verbatim from Task 1; never
-import another test module. Then add:
+import another test module. It must include a **real database stale-session CAS
+race** (`test_start_item_attempt_real_stale_session_cas`) that exercises the real
+`_claim_queued_item` against two Sessions — not only a monkeypatched zero — plus
+the synthetic zero-rowcount rollback and the attempt-number/independence cases.
+Then add:
 
 ```python
 def test_next_attempt_number_is_max_plus_one(client):
@@ -917,7 +1020,36 @@ def test_claim_rejects_externally_started_item(client):
     assert ds._claim_queued_item(item_id=item.id, experiment_id=experiment.id) == 0
 
 
-def test_start_item_attempt_lost_claim_race_fails_closed(client, monkeypatch):
+def test_start_item_attempt_real_stale_session_cas(client):
+    _seed_dataset(client)
+    session, ds, analysis, provider = _services(client)
+    experiment = _experiment(ds)
+    item = _item(session, experiment.id)  # Session A: loaded queued
+
+    # Session B claims the same Item first and commits.
+    with client.app.state.database.session_factory() as winner:
+        winner.get(DatasetExperimentItemModel, item.id).status = "running"
+        winner.commit()
+
+    # Session A still has stale ORM state showing queued.
+    assert item.status == "queued"
+
+    with pytest.raises(PlatformError) as exc:
+        ds.start_item_attempt(experiment_id=experiment.id, item_id=item.id, analysis_service=analysis)
+    assert exc.value.code == "DATASET_EXPERIMENT_INVARIANT_VIOLATION"
+
+    # Winner's committed running state is intact; the loser leaves no
+    # Run/Attempt/source-hash and never launches.
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(DatasetExperimentItemModel, item.id).status == "running"
+        assert fresh.query(AnalysisRunModel).count() == 0
+        assert fresh.query(DatasetExperimentAttemptModel).count() == 0
+    assert provider.launches == []
+
+
+def test_start_item_attempt_synthetic_zero_rowcount_rolls_back(client, monkeypatch):
+    # Additional coverage: if the CAS reports zero rows, Transaction A rolls back
+    # its own staged work. (The real stale-session race is covered above.)
     _seed_dataset(client)
     session, ds, analysis, provider = _services(client)
     experiment = _experiment(ds)
@@ -931,6 +1063,7 @@ def test_start_item_attempt_lost_claim_race_fails_closed(client, monkeypatch):
         assert fresh.get(DatasetExperimentItemModel, item.id).status == "queued"
         assert fresh.query(AnalysisRunModel).count() == 0
         assert fresh.query(DatasetExperimentAttemptModel).count() == 0
+    assert provider.launches == []
 
 
 def test_attempt_numbers_are_independent_per_item(client):
@@ -953,7 +1086,7 @@ def test_attempt_numbers_are_independent_per_item(client):
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_dataset_experiment_attempt_concurrency.py -v
 ```
-Expected: PASS immediately after Task 1. This is a **verification task, not a TDD RED**; failure is a real defect — STOP and report.
+Expected: PASS immediately after Task 1. This is a **verification task, not a TDD RED**; failure is a real defect — STOP and report. The real stale-session test must exercise `_claim_queued_item` against the database (winner commits `running` in another Session; the loser's stale Session gets `rowcount == 0` and rolls back without touching the winner).
 - [ ] **Focused regressions:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
@@ -1049,7 +1182,7 @@ Require 0 failed / 0 errors (current sealed baseline: `1436 passed, 28 skipped`;
 |---|---|
 | `test_dataset_experiment_attempt.py` | Transaction A local ownership, guards, atomicity |
 | `test_dataset_experiment_attempt_remote.py` | source-hash + Run + Attempt + Item joint commit/rollback |
-| `test_dataset_experiment_attempt_concurrency.py` | `max+1`, single-use claim, lost-race fail-closed |
+| `test_dataset_experiment_attempt_concurrency.py` | `max+1`, single-use claim, real stale-session CAS, synthetic zero-rowcount |
 | `test_dataset_experiment_g3_regression.py` | no schema change / no persisted counter |
 | G1 suites | models/migration/read/creation/revalidation unchanged |
 | G2 suites | prepare/launch seam + canonical provenance unchanged |
@@ -1060,23 +1193,33 @@ Require 0 failed / 0 errors (current sealed baseline: `1436 passed, 28 skipped`;
 
 ## Self-Review
 
-1. `start_item_attempt` never writes `launch_requested_at`, never calls
+1. **Gate alignment:** this plan is **G3-A** inside the approved **G3 — Orchestrator
+   Core**; G3-B (durable first launch) and G3-C (coordinator core) are explicitly
+   named as the remaining G3 work, and G4 keeps Retry/Recovery. No approved gate is
+   renumbered and no coordinator-core work is left unassigned.
+2. `start_item_attempt` never writes `launch_requested_at`, never calls
    `launch_prepared_run`, `provider.launch`, `job_manager.start`, or a coordinator.
-2. Run + Attempt + Item `running` (+ source-hash cache) commit in one transaction;
+3. Run + Attempt + Item `running` (+ source-hash cache) commit in one transaction;
    any failure rolls back all of them.
-3. `AnalysisService` must share the exact Session; mismatch fails closed.
-4. `attempt_number = max(existing) + 1`; no persisted counter added.
-5. The Item precondition is `queued`; completed/running items are rejected; no
+4. `AnalysisService` must share the exact Session; mismatch fails closed.
+5. The Experiment precondition is exactly `running`; `pending -> running` belongs
+   to G3-C, so G3-A cannot create a `running` Item under a `pending` Experiment.
+6. The Item precondition is `queued`; completed/running items are rejected; no
    implicit `failed -> queued`.
-6. The concurrency claim is a conditional `queued -> running` UPDATE (rowcount must
-   be 1) issued under `no_autoflush`; the unique constraints are backstops.
-7. No explicit `flush()`; all referenced ids are Python strings and SQLAlchemy
+7. The conditional CAS is executed **before** `attempt_number` derivation and
+   Attempt staging (under `no_autoflush`); `max+1` is genuinely derived under the
+   acquired Item claim.
+8. No explicit `flush()`; all referenced ids are Python strings and SQLAlchemy
    orders FK inserts.
-8. G1/G2 seams are reused; no duplicated provenance or manifest logic.
-9. No DatasetExperiment schema/migration change; `AnalysisRun` schema unchanged.
-10. No G4/G5/G6 behavior enters G3.
-11. Every task has exact files, interfaces, tests, commands, and checkpoints.
-12. No TODO/TBD/XXX/hand-wavy placeholders.
+9. A **real two-Session stale-read CAS test** exercises the database
+   `_claim_queued_item`, not only a monkeypatched zero; lost-race wording is
+   precise (the loser rolls back only its own work; the winner's committed state is
+   untouched).
+10. G1/G2 seams are reused; no duplicated provenance or manifest logic.
+11. No DatasetExperiment schema/migration change; `AnalysisRun` schema unchanged.
+12. No G3-B/G3-C/G4 behavior enters G3-A.
+13. Every task has exact files, interfaces, tests, commands, and checkpoints.
+14. No TODO/TBD/XXX/hand-wavy placeholders.
 
 ---
 
@@ -1087,7 +1230,8 @@ Require 0 failed / 0 errors (current sealed baseline: `1436 passed, 28 skipped`;
   ModelRelease authority, certificate semantics, or any scientific code, STOP and
   report the blocker.
 - If `start_item_attempt` appears to need `launch_requested_at`,
-  `launch_prepared_run`, `provider.launch`, a worker, a coordinator, or an
-  automatic retry, STOP — that is G4+.
+  `launch_prepared_run`, `provider.launch`, a worker, a coordinator, an Experiment
+  `pending -> running` transition, or an automatic retry, STOP — that is
+  G3-B/G3-C/G4.
 - If atomicity appears impossible under SQLite with the existing schema/session
   architecture, STOP and report rather than redesigning.
