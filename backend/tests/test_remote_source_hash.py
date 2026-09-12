@@ -49,22 +49,34 @@ def test_compute_file_sha256_matches_manual_hash_with_small_chunk(tmp_path):
     assert compute_file_sha256(path, chunk_size=13) == hashlib.sha256(blob).hexdigest()
 
 
-def test_relative_data_path_resolution_and_persistence(session, tmp_path):
+def test_computation_is_staged_but_not_committed(session, tmp_path):
     blob = b"\x00\x01\x02\x03" * 10000
     data_root = tmp_path / "data"
     data_root.mkdir(parents=True)
-    raw_path = data_root / "raw.iq"
-    raw_path.write_bytes(blob)
+    (data_root / "raw.iq").write_bytes(blob)
     recording = _add_recording(session, data_path="raw.iq", external_path=None)
 
-    result = resolve_source_data_sha256(session, recording, data_root)
-    expected = hashlib.sha256(blob).hexdigest()
-    assert result == expected
-    assert recording.source_data_sha256 == expected
+    value = resolve_source_data_sha256(session, recording, data_root)
+    assert value == hashlib.sha256(blob).hexdigest()
+    assert recording.source_data_sha256 == value  # staged in memory
 
+    session.rollback()
+    reloaded = session.get(RecordingModel, recording.id)
+    assert reloaded.source_data_sha256 is None  # resolver did not commit
+
+
+def test_caller_commit_persists_cache(session, tmp_path):
+    blob = b"\x00\x01\x02\x03" * 10000
+    data_root = tmp_path / "data"
+    data_root.mkdir(parents=True)
+    (data_root / "raw.iq").write_bytes(blob)
+    recording = _add_recording(session, data_path="raw.iq", external_path=None)
+
+    value = resolve_source_data_sha256(session, recording, data_root)
+    session.commit()  # caller owns durability
     session.expire(recording)
     reloaded = session.get(RecordingModel, recording.id)
-    assert reloaded.source_data_sha256 == expected
+    assert reloaded.source_data_sha256 == value
 
 
 def test_cached_value_means_no_second_file_read(session, tmp_path, monkeypatch):
@@ -88,6 +100,7 @@ def test_cached_value_means_no_second_file_read(session, tmp_path, monkeypatch):
     assert first == hashlib.sha256(blob).hexdigest()
     assert len(calls) == 1
 
+    session.commit()
     session.expire(recording)
     recording = session.get(RecordingModel, recording.id)
     second = resolve_source_data_sha256(session, recording, data_root)

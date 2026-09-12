@@ -105,6 +105,145 @@ class AnalysisService:
             definition.plugin_id, definition.plugin_version, requested
         )
 
+    # ---------- preparation (caller-owned transaction) ----------
+
+    def prepare_run(
+        self,
+        *,
+        recording_id: str,
+        pipeline_id: str,
+        executor: str,
+        parameters: dict,
+        model_release_id: str | None = None,
+    ) -> AnalysisRunModel:
+        """Validate/resolve/freeze and stage a pending AnalysisRun.
+
+        Adds the Run to the CALLER'S Session. Never commits, rolls back,
+        flushes, or launches: the caller owns the transaction, which is what
+        lets DatasetExperiment Transaction A bind the Run, the Attempt, and the
+        Item atomically (G3).
+        """
+        recording = self.session.get(RecordingModel, recording_id)
+        if recording is None:
+            raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+        pipeline = self.registry.get(pipeline_id)
+        definition = pipeline.definition
+
+        # The plugin's own parameter schema decides validity; no plugin-specific
+        # parameter branch lives in the control plane.
+        validate_plugin_parameters(definition, parameters)
+
+        if self.executor_registry is None:
+            raise PlatformError(
+                "EXECUTION_CAPABILITY_UNAVAILABLE", "Executor registry is not configured."
+            )
+        resolved_release = self._resolve_release(definition, model_release_id)
+
+        # Exact requested-executor availability: capability + exact certificate +
+        # provider probe. The platform never substitutes a different executor.
+        availability = self.executor_registry.availability_for(
+            definition, resolved_release, recording, executor
+        )
+        if not availability.available:
+            raise PlatformError(
+                availability.reason_code or "EXECUTOR_UNAVAILABLE",
+                availability.reason_message or "The requested executor is unavailable.",
+            )
+        provider = self.executor_registry.provider(executor)
+
+        if executor == "remote_gpu":
+            return self._prepare_remote_run(
+                recording, definition, parameters, resolved_release, provider, availability
+            )
+        return self._prepare_local_run(
+            recording, definition, parameters, resolved_release, provider
+        )
+
+    def _prepare_local_run(self, recording, definition, parameters, resolved_release, provider) -> AnalysisRunModel:
+        run_id = f"run_{uuid4().hex}"
+        metadata = {"runtime_descriptor": provider.runtime_descriptor().to_metadata()}
+        if resolved_release is not None:
+            metadata["model_release_id"] = resolved_release.release.model_release_id
+            metadata["asset_manifest_sha256"] = resolved_release.manifest.asset_manifest_sha256
+
+        run = AnalysisRunModel(
+            id=run_id,
+            recording_id=recording.id,
+            pipeline_id=definition.id,
+            pipeline_version=definition.version,
+            executor=provider.name,
+            status="pending",
+            parameters_json=dict(parameters),
+            execution_metadata_json=metadata,
+        )
+        self.session.add(run)
+        return run
+
+    def _prepare_remote_run(self, recording, definition, parameters, resolved_release, provider, availability) -> AnalysisRunModel:
+        run_id = f"run_{uuid4().hex}"
+        final_metadata = self._freeze_remote_provenance(
+            run_id=run_id,
+            recording=recording,
+            definition=definition,
+            resolved_release=resolved_release,
+            provider=provider,
+            availability=availability,
+            parameters=parameters,
+        )
+        run = AnalysisRunModel(
+            id=run_id,
+            recording_id=recording.id,
+            pipeline_id=definition.id,
+            pipeline_version=definition.version,
+            executor=provider.name,
+            status="pending",
+            parameters_json=dict(parameters),
+            execution_metadata_json=final_metadata,
+        )
+        self.session.add(run)
+        return run
+
+    def _freeze_remote_provenance(self, *, run_id, recording, definition, resolved_release, provider, availability, parameters) -> dict:
+        from app.remote_execution.request_builder import freeze_request_provenance
+        from app.remote_execution.startup import build_coordinator_metadata
+
+        if resolved_release is None:
+            raise PlatformError(
+                "MODEL_RELEASE_MISMATCH", "Remote execution requires a ModelRelease."
+            )
+        if self.identity_resolver is None or self.orchestrator_commit_resolver is None:
+            raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote provenance configuration is incomplete.")
+        if not self.runtime_commit_config:
+            raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote runtime commit is not configured.")
+
+        frozen_model_release_id = resolved_release.release.model_release_id
+        asset_manifest_sha256 = resolved_release.manifest.asset_manifest_sha256
+
+        identity = self.identity_resolver(self.session, recording, self.data_root, run_id)
+        orchestrator_commit = self.orchestrator_commit_resolver(self.project_root)
+
+        frozen_metadata = freeze_request_provenance(
+            local_run_id=run_id,
+            recording_fingerprint=identity.recording_fingerprint,
+            source_data_sha256=identity.source_data_sha256,
+            dataset_name=identity.dataset_name,
+            dataset_split=identity.dataset_split,
+            dataset_key=identity.dataset_key,
+            label_space=identity.label_space,
+            pipeline_id=definition.id,
+            pipeline_version=definition.version,
+            required_remote_runtime_commit=self.runtime_commit_config,
+            orchestrator_commit=orchestrator_commit,
+            asset_manifest_sha256=asset_manifest_sha256,
+            remote_profile=availability.remote_profile or "remote",
+            model_release_id=frozen_model_release_id,
+            parameters=parameters,
+        )
+        # runtime_descriptor is internal execution metadata OUTSIDE the canonical
+        # request payload; request_sha256 and recovery reconstruction are unchanged.
+        frozen_metadata["runtime_descriptor"] = provider.runtime_descriptor().to_metadata()
+        return build_coordinator_metadata(frozen_metadata)
+
     def create_run(
         self,
         *,

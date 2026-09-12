@@ -58,6 +58,8 @@ def resolve_source_data_sha256(
         raise PlatformError("SOURCE_DATA_NOT_FILE", "Recording source data path is not a regular file.")
 
     value = compute_file_sha256(path)
+    # Transaction-neutral: stage the cache on the caller's Session and return.
+    # The caller owns commit/rollback/flush. This is what lets DatasetExperiment
+    # Transaction A persist the source-hash cache together with the prepared Run.
     recording.source_data_sha256 = value
-    session.commit()
     return value

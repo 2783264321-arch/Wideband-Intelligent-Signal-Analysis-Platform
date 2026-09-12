@@ -47,13 +47,19 @@ def resolve_remote_recording_identity(
     ``source_data_sha256`` is the exact raw-IQ byte hash;
     ``recording_fingerprint`` is the semantic identity built from the Recording
     metadata + GroundTruth via ``build_recording_fingerprint``.
+
+    The GroundTruth SELECT is intentionally performed BEFORE
+    ``resolve_source_data_sha256`` stages the source-hash cache: once the cache is
+    a dirty ORM value, any later query could autoflush it, and ``prepare_run`` has
+    deliberately chosen not to flush. The GroundTruth query does not depend on
+    the source hash, so this reorder changes no scientific/provenance semantics.
     """
-    source = resolve_source_data_sha256(session, recording, data_root)
     gt_rows = list(
         session.scalars(
             select(GroundTruthModel).where(GroundTruthModel.recording_id == recording.id)
         ).all()
     )
+    source = resolve_source_data_sha256(session, recording, data_root)
     manifest_recording = manifest_recording_for(recording, gt_rows)
     fingerprint = build_recording_fingerprint(
         recording.dataset_name,
