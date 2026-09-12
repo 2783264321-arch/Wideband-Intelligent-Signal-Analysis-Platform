@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.analysis.model import AnalysisRunModel
 from app.benchmarks.service import DatasetBenchmarkService, resolve_protocol_config
 from app.core.errors import PlatformError
 from app.dataset_experiments.model import (
@@ -520,3 +522,139 @@ class DatasetExperimentService:
             )
         )
         return int(current or 0) + 1
+
+    # ---------- Transaction B + durable first launch (G3-B) ----------
+
+    def launch_item_attempt(self, *, experiment_id, item_id, attempt_id, analysis_service):
+        """G3-B: durably claim first launch for ANY executor, then physically launch once.
+
+        Revalidates frozen identity, validates the complete ownership chain
+        Experiment -> Item -> Attempt -> AnalysisRun, then commits Transaction B
+        (Attempt.launch_requested_at = now) with a conditional CAS for ALL
+        executors. Only the CAS winner calls the sealed G2
+        AnalysisService.launch_prepared_run primitive. For remote_gpu the marker is
+        the first-launch claim / audit marker only; remote recovery continues to
+        use coordinator-token rotation/fencing and never reads it. Never
+        prepares/creates a Run, never retries, never recovers.
+        """
+        if analysis_service is None or getattr(analysis_service, "session", None) is not self.session:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "AnalysisService must share the DatasetExperimentService Session.",
+                409,
+            )
+
+        # Frozen identity is revalidated because Transaction A and Transaction B
+        # are distinct durable transactions; a first launch must not proceed if
+        # identity drifted between them. Read-only; before any write lock.
+        experiment = self.revalidate_frozen_identity(experiment_id)
+        if experiment.status != "running":
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Experiment is not running; G3-B only launches a running experiment.",
+                409,
+            )
+
+        item = self.session.get(DatasetExperimentItemModel, item_id)
+        if item is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ITEM_NOT_FOUND", "Dataset experiment item was not found.", 404
+            )
+        if item.experiment_id != experiment.id:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Item does not belong to the expected experiment.",
+                409,
+            )
+        if item.status != "running":
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Only a running item can first-launch an attempt.",
+                409,
+            )
+
+        attempt = self.session.get(DatasetExperimentAttemptModel, attempt_id)
+        if attempt is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ATTEMPT_NOT_FOUND",
+                "Dataset experiment attempt was not found.",
+                404,
+            )
+        if attempt.experiment_item_id != item.id:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Attempt does not belong to the expected item.",
+                409,
+            )
+
+        run = self.session.get(AnalysisRunModel, attempt.analysis_run_id)
+        if run is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Attempt does not reference a persisted analysis run.",
+                409,
+            )
+        if run.recording_id != item.recording_id:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "AnalysisRun does not match the attempt's recording.",
+                409,
+            )
+        if run.pipeline_id != experiment.plugin_id or run.pipeline_version != experiment.plugin_version:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "AnalysisRun pipeline identity does not match the frozen experiment.",
+                409,
+            )
+        if run.executor != experiment.executor:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "AnalysisRun executor does not match the frozen experiment.",
+                409,
+            )
+        if run.status != "pending":
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Only a pending analysis run can be first-launched.",
+                409,
+            )
+        if run.worker_pid is not None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Analysis run already has a worker; it cannot be first-launched.",
+                409,
+            )
+
+        now = datetime.now(timezone.utc)
+        try:
+            with self.session.no_autoflush:
+                claimed = self._claim_launch_intent(
+                    attempt_id=attempt_id, item_id=item_id, requested_at=now
+                )
+                if claimed != 1:
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                        "Launch intent is already recorded or the attempt is not eligible.",
+                        409,
+                    )
+            self.session.commit()  # Transaction B (all executors)
+        except Exception:
+            self.session.rollback()
+            raise
+
+        analysis_service.launch_prepared_run(run.id)
+        self.session.refresh(attempt)
+        return attempt
+
+    def _claim_launch_intent(self, *, attempt_id, item_id, requested_at):
+        result = self.session.execute(
+            update(DatasetExperimentAttemptModel)
+            .where(
+                DatasetExperimentAttemptModel.id == attempt_id,
+                DatasetExperimentAttemptModel.experiment_item_id == item_id,
+                DatasetExperimentAttemptModel.launch_requested_at.is_(None),
+            )
+            .values(launch_requested_at=requested_at)
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)
