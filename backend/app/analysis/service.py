@@ -244,6 +244,73 @@ class AnalysisService:
         frozen_metadata["runtime_descriptor"] = provider.runtime_descriptor().to_metadata()
         return build_coordinator_metadata(frozen_metadata)
 
+    # ---------- physical launch of an already-persisted prepared run ----------
+
+    def launch_prepared_run(self, run_id: str) -> AnalysisRunModel:
+        """Physically launch an already-persisted prepared AnalysisRun.
+
+        Durable commit ordering is a CALLER precondition:
+            G3 Transaction A COMMIT
+            G4 Transaction B COMMIT
+            launch_prepared_run(...)
+
+        This method does not prove transaction durability from ORM object state.
+        It only defensively rejects a Run that is still staged/unflushed in this
+        Session (checked BEFORE any query, so no autoflush can occur), then loads
+        the persisted Run and launches it. It never constructs a new Run, never
+        rebuilds remote provenance, and never regenerates the coordinator token.
+        """
+        # Defensive pre-query guard: a Run still staged in this Session has no
+        # durable row and must not be launched. Durable commit ordering itself is
+        # guaranteed by the caller contract, not by Session.new.
+        for pending in self.session.new:
+            if isinstance(pending, AnalysisRunModel) and pending.id == run_id:
+                raise PlatformError(
+                    "ANALYSIS_RUN_NOT_LAUNCHABLE",
+                    "Prepared analysis run is still staged in this session; the caller must commit before launch.",
+                    409,
+                )
+
+        run = self.get(run_id)  # raises ANALYSIS_RUN_NOT_FOUND (404)
+        if run.worker_pid is not None or run.status != "pending":
+            raise PlatformError(
+                "ANALYSIS_RUN_NOT_LAUNCHABLE",
+                "Only a pending, not-yet-launched prepared analysis run can be launched.",
+                409,
+            )
+        if self.executor_registry is None:
+            raise PlatformError(
+                "EXECUTION_CAPABILITY_UNAVAILABLE", "Executor registry is not configured."
+            )
+        provider = self.executor_registry.provider(run.executor)
+
+        coordinator_token = None
+        if run.executor == "remote_gpu":
+            coordinator_token = (run.execution_metadata_json or {}).get("coordinator_token")
+            if not coordinator_token:
+                raise PlatformError(
+                    "ANALYSIS_RUN_NOT_LAUNCHABLE",
+                    "Prepared remote run is missing its coordinator token.",
+                    409,
+                )
+        try:
+            run.worker_pid = provider.launch(run.id, coordinator_token=coordinator_token)
+            self.session.commit()
+            self.session.refresh(run)
+        except Exception as exc:
+            run.status = "failed"
+            run.error_type = "ANALYSIS_FAILED"
+            run.error_message = str(exc)[:1000]
+            self.session.commit()
+            if run.executor == "remote_gpu":
+                raise PlatformError(
+                    "ANALYSIS_FAILED", "Unable to launch remote coordinator."
+                ) from exc
+            raise PlatformError(
+                "ANALYSIS_FAILED", "Unable to launch local inference worker."
+            ) from exc
+        return run
+
     def create_run(
         self,
         *,
