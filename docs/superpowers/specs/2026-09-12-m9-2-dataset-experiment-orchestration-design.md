@@ -420,27 +420,37 @@ It must never create or re-prepare a Run.
 
 ### DatasetExperiment orchestration
 
-Dataset orchestration uses ONE transaction to persist, together:
+Dataset orchestration persists ownership and launch intent in two separate
+durable transactions, in this exact order.
 
-- the prepared AnalysisRun
-- the DatasetExperimentAttempt binding
-- the ExperimentItem ownership/`running` transition
-
-then commits that single transaction BEFORE launch:
+Transaction A — ownership (prepared Run + Attempt + Item transition):
 
     prepare_run(...)                      # no commit, no launch
       -> add DatasetExperimentAttempt     # binds Item -> AnalysisRun
       -> Item.status = running
-      -> commit                           # ONE transaction
-      -> mark launch_requested_at
-      -> launch_prepared_run(...)
+      -> COMMIT
+
+Transaction B — durable launch intent (only after Transaction A commits):
+
+    Attempt.launch_requested_at = now
+      -> COMMIT
+
+Then, and only then, the physical launch:
+
+    launch_prepared_run(...)
 
 There MUST NOT be a durable committed AnalysisRun that has no durable
 DatasetExperimentAttempt ownership. A crash after `prepare_run()` but before the
-single commit must leave NO committed AnalysisRun and NO committed Attempt; the
-Item remains `queued`/retryable and the whole unit is re-prepared cleanly.
+Transaction A commit must leave NO committed AnalysisRun and NO committed
+Attempt; the Item remains `queued`/retryable and the whole unit is re-prepared
+cleanly.
 
-The purpose is reliable ownership before process launch.
+There MUST also never be a physical launch before the Transaction B
+`launch_requested_at` commit. The launch-intent marker is the durable recovery
+fence; recovery reads the database marker, never in-memory state.
+
+The purpose is reliable ownership and durable launch intent before process
+launch.
 
 This seam MUST NOT change:
 
@@ -462,29 +472,51 @@ DatasetExperimentAttempt therefore carries:
 
     launch_requested_at
 
-### Local CPU
+### Local CPU — durable launch-intent fence
 
-Recovery case:
+Local launch MUST use this exact durable order:
 
-    launch_requested_at == NULL
-    AnalysisRun.status == pending
+    A. ownership transaction
+       prepare_run(...)                  # no commit / no launch
+         -> bind Attempt
+         -> Item.status = running
+         -> COMMIT
 
-First launch is still safe.
+    B. launch-intent transaction
+       Attempt.launch_requested_at = now
+         -> COMMIT                        # durable BEFORE any launch
 
-Recovery case:
+    C. physical launch
+       launch_prepared_run(...)
 
-    launch_requested_at != NULL
-    AnalysisRun.status == pending
+The launch-intent marker MUST be durably committed before the provider is
+invoked. There must never be a physical launch before the durable
+`launch_requested_at` commit, because recovery reads the database marker rather
+than in-memory state.
 
-Launch outcome is ambiguous.
+Crash semantics:
 
-V1 MUST fail closed rather than automatically launch the same AnalysisRun
-again.
+1. Crash after the ownership commit (A) but before the launch-intent commit (B):
 
-The Item may later be retried using:
+       launch_requested_at == NULL
+       AnalysisRun.status == pending
+       no launch has been attempted
 
-    new Attempt
-    new AnalysisRun
+   First launch is still safe; recovery may perform the first launch.
+
+2. Crash after the launch-intent commit (B) but before / during / after physical
+   launch (C):
+
+       launch_requested_at != NULL
+       AnalysisRun.status == pending
+       actual launch outcome may be unknowable
+
+   Launch outcome is ambiguous. local_cpu recovery MUST NOT automatically launch
+   the same AnalysisRun again. V1 fails closed and requires a NEW Attempt and a
+   NEW AnalysisRun via explicit Retry Failed.
+
+A conservative false ambiguity is acceptable. Duplicate execution of the same
+AnalysisRun is not.
 
 If the worker did actually start and already moved the Run to:
 
@@ -499,7 +531,8 @@ reconciliation respects the real AnalysisRun state.
 Do not invent a new recovery model.
 
 Reuse existing fenced remote recovery semantics for pending/running remote_gpu
-AnalysisRuns.
+AnalysisRuns. The durable launch-intent fence applies only to local launches and
+does not change remote_gpu recovery semantics.
 
 ## 9. DatasetExperiment Coordinator
 
@@ -827,6 +860,8 @@ The implementation and every review MUST preserve:
 
 7. One Active Attempt Per Item
    At most one non-terminal AnalysisRun per Item.
+   Local launch intent (`launch_requested_at`) is durably committed before the
+   physical launch; an ambiguous local launch is never automatically retried.
 
 8. Bounded Concurrency
    active Item count <= max_concurrency.
@@ -951,6 +986,19 @@ Verify:
 - ambiguous local launch fails closed
 - remote recovery delegates to existing fenced recovery
 - restart does not create duplicate active Attempts
+
+Verify the durable launch-intent fence explicitly:
+
+- `launch_requested_at` is durably committed before the local provider is
+  launched (commit-before-launch ordering)
+- crash before the durable launch-intent commit -> marker NULL -> safe first
+  launch
+- crash after the durable launch-intent commit with the Run still `pending` ->
+  ambiguous -> fail closed
+- ambiguous recovery never relaunches the same AnalysisRun
+- retry after ambiguity creates a NEW Attempt + NEW AnalysisRun
+- remote_gpu semantics remain delegated to existing fenced remote recovery and
+  are not altered by the local launch-intent fence
 
 ### 18.5 Evaluation integration
 
