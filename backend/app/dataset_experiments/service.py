@@ -258,3 +258,145 @@ class DatasetExperimentService:
             )
             for entry in entries
         ]
+
+    # ---------- frozen identity revalidation (G3+ seam) ----------
+
+    def revalidate_frozen_identity(self, experiment_id):
+        try:
+            experiment = self._get(experiment_id)
+        except PlatformError as exc:
+            if exc.code != "DATASET_EXPERIMENT_NOT_FOUND":
+                raise
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                "Frozen experiment no longer exists; cannot revalidate.",
+                409,
+            ) from exc
+
+        # 1. Frozen dataset membership hash.
+        manifest = self._manifest_preview(
+            experiment.dataset_name, experiment.dataset_split, experiment.dataset_label_space
+        )
+        if manifest.recording_manifest_hash != experiment.recording_manifest_hash:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen dataset manifest hash no longer matches the current manifest.",
+                409,
+            )
+
+        # 2. Item membership / order must equal the frozen manifest exactly.
+        self._assert_item_membership(experiment, manifest)
+
+        # 3. Exact plugin version identity.
+        try:
+            definition = self._resolve_definition(experiment.plugin_id, experiment.plugin_version)
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen plugin id/version no longer resolves exactly.",
+                409,
+            ) from exc
+
+        # 4. Frozen parameters must still validate against the exact plugin.
+        try:
+            validate_plugin_parameters(definition, experiment.parameters_json or {})
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen parameters are no longer valid for the frozen plugin identity.",
+                409,
+            ) from exc
+
+        # 5. Frozen evaluation protocol must remain within the supported set.
+        try:
+            resolve_protocol_config(experiment.evaluation_protocol)
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen evaluation protocol is no longer supported.",
+                409,
+            ) from exc
+
+        # 6. Frozen max_concurrency must remain structurally valid.
+        if experiment.max_concurrency < 1:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Frozen max_concurrency is invalid; it must be >= 1.",
+                409,
+            )
+
+        # 7. Release identity (id + AssetManifest SHA) through the single G1 seam.
+        frozen_release_id = experiment.model_release_id
+        frozen_asset_sha = experiment.asset_manifest_sha256
+        try:
+            resolved = self._resolve_release(definition, frozen_release_id)
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen model release identity can no longer be resolved.",
+                409,
+            ) from exc
+        if definition.model_release_required:
+            if (
+                resolved is None
+                or resolved.release.model_release_id != frozen_release_id
+                or resolved.manifest.asset_manifest_sha256 != frozen_asset_sha
+            ):
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                    "Frozen model release or asset manifest hash has changed.",
+                    409,
+                )
+        elif (
+            resolved is not None
+            or frozen_release_id is not None
+            or frozen_asset_sha is not None
+        ):
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "A release-less plugin carries a forbidden frozen release identity.",
+                409,
+            )
+
+        # 8. Executor capability + exact certificate + provider RuntimeDescriptor.
+        try:
+            provider = self.executor_registry.provider(experiment.executor)
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen executor is no longer technically supported.",
+                409,
+            ) from exc
+        if self.executor_registry.certified_capability(
+            definition, frozen_release_id, experiment.executor
+        ) is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Exact execution certificate no longer exists for the frozen identity.",
+                409,
+            )
+        if provider.runtime_descriptor().to_metadata() != (experiment.runtime_descriptor_json or {}):
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Provider RuntimeDescriptor no longer matches the frozen descriptor.",
+                409,
+            )
+
+        return experiment
+
+    def _assert_item_membership(self, experiment, manifest):
+        items = list(
+            self.session.scalars(
+                select(DatasetExperimentItemModel)
+                .where(DatasetExperimentItemModel.experiment_id == experiment.id)
+                .order_by(DatasetExperimentItemModel.manifest_order)
+            ).all()
+        )
+        expected = [(entry.manifest_order, entry.recording_id) for entry in manifest.entries]
+        actual = [(item.manifest_order, item.recording_id) for item in items]
+        if actual != expected:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Frozen Item membership/order is inconsistent with the frozen manifest.",
+                409,
+            )
