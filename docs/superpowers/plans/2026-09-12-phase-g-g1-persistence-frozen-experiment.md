@@ -479,7 +479,6 @@ Expected RED: collection failure (`ModuleNotFoundError: app.dataset_experiments`
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
   backend/tests/test_benchmark_models.py \
   backend/tests/test_m9_1_provenance_migrations.py \
-  backend/tests/test_m9_1_provenance_migrations.py \
   backend/tests/test_benchmark_manifest.py -q
 ```
 
@@ -1447,7 +1446,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 - Test: `backend/tests/test_dataset_experiment_revalidation.py`
 
 **Interfaces:**
-- Consumes: Task 3 creation; `_manifest_preview`; `_resolve_definition`; `validate_plugin_parameters`; `_resolve_release`; `ExecutorRegistry.provider` / `.certified_capability`; `provider.runtime_descriptor().to_metadata()`.
+- Consumes: Task 3 creation; `_manifest_preview`; `_resolve_definition`; `validate_plugin_parameters`; `resolve_protocol_config`; `_resolve_release`; `ExecutorRegistry.provider` / `.certified_capability`; `provider.runtime_descriptor().to_metadata()`.
 - Produces:
   - `DatasetExperimentService.revalidate_frozen_identity(experiment_id: str) -> DatasetExperimentModel`
   - `DatasetExperimentService._assert_item_membership(experiment, manifest) -> None`
@@ -1505,28 +1504,39 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
                 409,
             ) from exc
 
-        # 5. Release identity (id + AssetManifest SHA) via resolve() only.
+        # 5. Frozen evaluation protocol must remain within the supported set.
+        try:
+            resolve_protocol_config(experiment.evaluation_protocol)
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen evaluation protocol is no longer supported.",
+                409,
+            ) from exc
+
+        # 6. Frozen max_concurrency must remain structurally valid.
+        if experiment.max_concurrency < 1:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Frozen max_concurrency is invalid; it must be >= 1.",
+                409,
+            )
+
+        # 7. Release identity (id + AssetManifest SHA) through the single G1 seam.
         frozen_release_id = experiment.model_release_id
         frozen_asset_sha = experiment.asset_manifest_sha256
+        try:
+            resolved = self._resolve_release(definition, frozen_release_id)
+        except PlatformError as exc:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Frozen model release identity can no longer be resolved.",
+                409,
+            ) from exc
         if definition.model_release_required:
-            if frozen_release_id is None or frozen_asset_sha is None:
-                raise PlatformError(
-                    "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                    "Frozen release identity is incomplete for a release-bound plugin.",
-                    409,
-                )
-            try:
-                resolved = self.model_release_store.resolve(
-                    definition.plugin_id, definition.plugin_version, frozen_release_id
-                )
-            except PlatformError as exc:
-                raise PlatformError(
-                    "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                    "Frozen model release no longer resolves.",
-                    409,
-                ) from exc
             if (
-                resolved.release.model_release_id != frozen_release_id
+                resolved is None
+                or resolved.release.model_release_id != frozen_release_id
                 or resolved.manifest.asset_manifest_sha256 != frozen_asset_sha
             ):
                 raise PlatformError(
@@ -1534,14 +1544,18 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
                     "Frozen model release or asset manifest hash has changed.",
                     409,
                 )
-        elif frozen_release_id is not None or frozen_asset_sha is not None:
+        elif (
+            resolved is not None
+            or frozen_release_id is not None
+            or frozen_asset_sha is not None
+        ):
             raise PlatformError(
                 "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                "Plugin is no longer release-less but a frozen release identity exists.",
+                "A release-less plugin carries a forbidden frozen release identity.",
                 409,
             )
 
-        # 6. Executor capability + exact certificate + provider RuntimeDescriptor.
+        # 8. Executor capability + exact certificate + provider RuntimeDescriptor.
         try:
             provider = self.executor_registry.provider(experiment.executor)
         except PlatformError as exc:
@@ -1589,8 +1603,10 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 - Missing experiment row during revalidation → `DATASET_EXPERIMENT_ORCHESTRATION_FAILED` (fail closed). This is the only "not found" path inside revalidation; `_get` is shared with read models and raises `DATASET_EXPERIMENT_NOT_FOUND` there. `revalidate_frozen_identity` translates only the not-found case to `DATASET_EXPERIMENT_ORCHESTRATION_FAILED` (shown in the implementation above).
 
-- Any frozen drift (manifest hash, plugin identity, parameters, release id/SHA, executor, certificate, descriptor) → `DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED`.
-- Structural row corruption (Item membership/order) → `DATASET_EXPERIMENT_INVARIANT_VIOLATION`.
+- Any frozen drift (manifest hash, plugin identity, parameters, evaluation protocol, release id/SHA, executor, certificate, descriptor) → `DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED`.
+- Structural row corruption (Item membership/order, frozen `max_concurrency < 1`) → `DATASET_EXPERIMENT_INVARIANT_VIOLATION`.
+- The frozen evaluation protocol is validated through the same public authority (`resolve_protocol_config`) introduced in Task 3; revalidation does not maintain a second protocol allowlist.
+- Frozen release identity is resolved through the single Task 3 seam `_resolve_release(definition, requested)`; revalidation never calls `model_release_store.resolve` directly and never calls `resolve_by_manifest_sha`. Because `_resolve_release` raises a controlled `PlatformError` when the store is unconfigured, a missing `model_release_store` becomes `DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED` rather than a raw `AttributeError`.
 
 ### Steps
 
@@ -1708,12 +1724,15 @@ def _registry(*, release_required=False, certs=None, provider=None):
     return ExecutorRegistry({"local_cpu": provider}, ExecutionCertificateStore(list(certs)))
 
 
-def _service(client, *, pipeline=None, store=None, registry=None):
+_UNSET = object()
+
+
+def _service(client, *, pipeline=None, store=_UNSET, registry=None):
     session = client.app.state.database.session_factory()
     return DatasetExperimentService(
         session,
         PipelineRegistry([(pipeline or ExpTestPipeline())]),
-        store if store is not None else FakeReleaseStore(),
+        FakeReleaseStore() if store is _UNSET else store,
         registry or _registry(),
     )
 
@@ -1889,12 +1908,51 @@ def test_missing_experiment_fails_closed(client):
     assert exc.value.code == "DATASET_EXPERIMENT_ORCHESTRATION_FAILED"
 
 
+def test_evaluation_protocol_drift_fails(client):
+    _seed_dataset(client)
+    experiment = _create(_service(client))
+    _update_experiment(client, experiment.id, evaluation_protocol="retired_protocol_v9")
+    with pytest.raises(PlatformError) as exc:
+        _service(client).revalidate_frozen_identity(experiment.id)
+    assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+
+
+def test_invalid_frozen_max_concurrency_fails(client):
+    _seed_dataset(client)
+    experiment = _create(_service(client))
+    _update_experiment(client, experiment.id, max_concurrency=0)
+    with pytest.raises(PlatformError) as exc:
+        _service(client).revalidate_frozen_identity(experiment.id)
+    assert exc.value.code == "DATASET_EXPERIMENT_INVARIANT_VIOLATION"
+
+
+def test_missing_release_store_fails_closed(client):
+    _seed_dataset(client)
+    create_service = _service(
+        client, pipeline=ExpTestPipeline(release_required=True),
+        store=FakeReleaseStore(), registry=_registry(release_required=True),
+    )
+    experiment = _create(create_service, model_release_id="golden")
+    drifting = _service(
+        client, pipeline=ExpTestPipeline(release_required=True),
+        store=None, registry=_registry(release_required=True),
+    )
+    with pytest.raises(PlatformError) as exc:
+        drifting.revalidate_frozen_identity(experiment.id)
+    assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+
+
 def test_validation_never_mutates_frozen_identity(client):
     _seed_dataset(client)
     experiment = _create(_service(client))
+
+    # Deliberately corrupt one frozen field and durably commit the corruption.
+    _update_experiment(client, experiment.id, parameters_json={"unknown": 1})
+
+    # Snapshot the CORRUPTED persisted state, not the original valid state.
     with client.app.state.database.session_factory() as session:
         stored = session.get(DatasetExperimentModel, experiment.id)
-        snapshot = {
+        corrupted_snapshot = {
             "dataset_name": stored.dataset_name,
             "dataset_split": stored.dataset_split,
             "dataset_label_space": stored.dataset_label_space,
@@ -1910,12 +1968,16 @@ def test_validation_never_mutates_frozen_identity(client):
             "max_concurrency": stored.max_concurrency,
             "status": stored.status,
         }
-    _update_experiment(client, experiment.id, parameters_json={"unknown": 1})
-    with pytest.raises(PlatformError):
+    assert corrupted_snapshot["parameters_json"] == {"unknown": 1}
+
+    with pytest.raises(PlatformError) as exc:
         _service(client).revalidate_frozen_identity(experiment.id)
+    assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+
+    # Revalidation detected the drift but MUST NOT repair/mutate any frozen field.
     with client.app.state.database.session_factory() as session:
         stored = session.get(DatasetExperimentModel, experiment.id)
-        for key, value in snapshot.items():
+        for key, value in corrupted_snapshot.items():
             assert getattr(stored, key) == value, key
 ```
 
@@ -1944,7 +2006,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 ---
 
-# TASK 5 — G1 regression matrix, import isolation, full verification
+# TASK 5 — G1 regression matrix, import isolation, full verification (verification only)
 
 **Files:**
 - Create: `backend/tests/test_dataset_experiment_regression.py`
@@ -1960,7 +2022,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 ### Steps
 
-- [ ] **Write failing test** `backend/tests/test_dataset_experiment_regression.py`:
+- [ ] **Add regression/frozen-contract verification tests** `backend/tests/test_dataset_experiment_regression.py`:
 
 ```python
 import subprocess
@@ -1994,17 +2056,17 @@ def test_analysis_run_schema_has_no_dataset_experiment_columns():
     assert "launch_requested_at" not in columns
 ```
 
-- [ ] **Run exact RED command:**
+- [ ] **Run the verification tests (expected PASS):**
 
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_dataset_experiment_regression.py -v
 ```
 
-Expected RED: only if a prior task leaked a heavy import or touched
-`AnalysisRunModel`. Otherwise this file is expected to pass immediately after
-Task 4; if it passes on first run, record that as evidence that G1 did not
-leak (the TDD "RED" for this task is the frozen-contract assertion, which must
-be verified against the unchanged `AnalysisRunModel`).
+Task 5 introduces no production behavior, so these regression/frozen-contract
+tests are expected to PASS immediately after Tasks 1–4. A PASS here is the
+intended correct result: it proves G1 leaked no heavy imports and did not touch
+`AnalysisRunModel`. There is no TDD RED for Task 5; TDD RED/GREEN applies to
+Tasks 1–4, which introduce production behavior.
 
 - [ ] **Run focused G1 suite:**
 
@@ -2074,8 +2136,12 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests -q
   Items; freezes dataset hash, plugin identity, parameters, release id +
   AssetManifest SHA, executor, frozen `RuntimeDescriptor`, protocol, and
   `max_concurrency`).
-- `DatasetExperimentService.revalidate_frozen_identity` (fail-closed drift
-  detection; read-only).
+- `DatasetExperimentService.revalidate_frozen_identity` (fail-closed, read-only
+  drift detection for manifest hash, Item membership/order, plugin identity,
+  frozen parameters, frozen `evaluation_protocol`, structured
+  `max_concurrency >= 1`, release id + AssetManifest SHA through
+  `_resolve_release`, executor capability, exact certificate, and frozen
+  `RuntimeDescriptor`; never repairs/mutates).
 - Focused G1 tests: models/migration, schema/read models, creation/atomicity,
   revalidation, regression/import isolation.
 
@@ -2103,7 +2169,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests -q
    `AnalysisService` edit.
 3. **Source-of-truth scan:**
    - Manifest: only `DatasetBenchmarkService.prepare_manifest` (no second hash algorithm).
-   - Release: only `ModelReleaseStore.resolve` (no `resolve_by_manifest_sha`).
+   - Release: only `ModelReleaseStore.resolve` behind the single G1 seam `_resolve_release` (no second release path, no `resolve_by_manifest_sha`).
    - Certificate: only `ExecutorRegistry.certified_capability` / `.provider` (no parallel checker, no `availability_for`).
    - Plugin: only `PipelineRegistry.get` + `validate_plugin_parameters`.
    - Protocol: only `resolve_protocol_config` → `_protocol_config_for`.
