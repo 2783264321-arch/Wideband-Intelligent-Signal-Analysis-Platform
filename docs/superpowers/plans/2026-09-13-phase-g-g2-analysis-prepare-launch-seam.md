@@ -7,8 +7,8 @@
 **Goal:** Split the existing `AnalysisService` single-Recording lifecycle into a
 caller-owned `prepare_run(...)` seam that validates, resolves, freezes, and
 stages a `pending` `AnalysisRun` without committing or launching, and a
-`launch_prepared_run(...)` seam that physically launches an already-durably-
-persisted prepared `AnalysisRun`. Legacy `create_run(...)` keeps its exact
+`launch_prepared_run(...)` seam that physically launches an already-persisted
+prepared `AnalysisRun`. Legacy `create_run(...)` keeps its exact
 Single-Recording behavior by composing `prepare_run -> commit -> launch`.
 G3 then composes `prepare_run` into DatasetExperiment Transaction A.
 
@@ -29,7 +29,7 @@ FastAPI, SQLAlchemy 2.x, Pydantic v2, pytest 9. No GPU, no SSH, no torch.
 
 **Sealed G1:** `docs/superpowers/plans/2026-09-12-phase-g-g1-persistence-frozen-experiment.md`.
 
-**Base:** `feature/m9-2-implementation @ 3056e0e49839d4ba2ac637662604a3b4f416d33c`.
+**Base:** `feature/m9-2-implementation @ f6978e2521419fc9b7461e4b2336bfd98c2ab03b`.
 
 ---
 
@@ -46,31 +46,36 @@ escalate condition.
    caller's commit must leave zero committed `AnalysisRun` rows. This is what
    makes G3 Transaction A (`prepare_run` + Attempt + Item running + commit)
    possible.
-3. **`launch_prepared_run` launches only a persisted, pending, not-yet-launched
+3. **Durable launch ordering is a caller precondition.** The safety ordering is
+   `G3 Transaction A COMMIT -> G4 Transaction B COMMIT -> launch_prepared_run`.
+   `launch_prepared_run` defensively rejects a Run still staged/unflushed in
+   the current `Session`, but it does NOT claim to prove transaction durability
+   from ORM object state.
+4. **`launch_prepared_run` launches only a persisted, pending, not-yet-launched
    Run.** It never constructs a new `AnalysisRun`, never rebuilds remote
    provenance, and never regenerates a remote coordinator token.
-4. **Legacy `create_run` behavior is byte-for-byte semantically preserved**:
+5. **Legacy `create_run` behavior is byte-for-byte semantically preserved**:
    same observable status/worker_pid, same launch ordering, same error codes,
    same canonical remote provenance, same result-row set.
-5. **Canonical remote request identity is unchanged.** `freeze_request_provenance`,
+6. **Canonical remote request identity is unchanged.** `freeze_request_provenance`,
    `build_coordinator_metadata`, `build_batch`, `request_sha256`, and the
    `LEGACY_REQUEST_SHA256 = a96504b07998779d9053cc0ca472da3e5746c6740a765aaf7d1dde29b04ecc6c`
    contract are untouched.
-6. **No `AnalysisRun` schema change.** No new/removed/renamed columns in
+7. **No `AnalysisRun` schema change.** No new/removed/renamed columns in
    `backend/app/analysis/model.py`; no migration.
-7. **No DatasetExperiment coupling.** `backend/app/dataset_experiments/*` is
+8. **No DatasetExperiment coupling.** `backend/app/dataset_experiments/*` is
    not imported or modified by G2.
-8. **No G3/G4 behavior:** no `DatasetExperimentAttempt` creation, no Item
+9. **No G3/G4 behavior:** no `DatasetExperimentAttempt` creation, no Item
    status transition, no coordinator/scheduler, no `launch_requested_at`, no
    `launch_requested_at`-based recovery, no automatic retry, no heartbeat/token
    fencing, no DatasetEvaluation, no REST, no frontend.
-9. **No science changes:** no plugin runtime, ZoomSpec, CPN, STFT Energy,
-   detection payload, or benchmark metric change.
-10. **One production file only:** `backend/app/analysis/service.py`.
+10. **No science changes:** no plugin runtime, ZoomSpec, CPN, STFT Energy,
+    detection payload, or benchmark metric change.
+11. **One production file only:** `backend/app/analysis/service.py`.
 
 ---
 
-## Repository Mapping (verified against HEAD 3056e0e)
+## Repository Mapping (verified against HEAD f6978e2)
 
 ### Current `create_run` lifecycle (`backend/app/analysis/service.py`)
 
@@ -146,6 +151,10 @@ durable; G3 must be able to bind the Run, the Attempt, and the Item in one
 caller-owned transaction. `launch_prepared_run` remains the physical-launch
 primitive that G4 calls strictly after the launch-intent fence commit.
 
+Durability is therefore an explicit caller precondition, not something G2 proves
+from ORM state. `launch_prepared_run` only adds a defensive pre-query rejection
+for a Run that is still staged/unflushed in the current `Session`.
+
 ---
 
 ## Backward Compatibility
@@ -158,9 +167,12 @@ primitive that G4 calls strictly after the launch-intent fence commit.
   `runtime_descriptor`, and `coordinator_token`; the launcher is called exactly
   once with the frozen token; `request_sha256` is unchanged
   (`LEGACY_REQUEST_SHA256` pin).
-- **Failure:** `provider.launch` exception still marks the Run `failed` with
-  `error_type="ANALYSIS_FAILED"`, persists it, and raises
-  `PlatformError("ANALYSIS_FAILED", <original message>)`.
+- **Failure:** a `provider.launch` exception leaves `run.status="failed"`,
+  `run.error_type="ANALYSIS_FAILED"`, `run.error_message=str(exc)[:1000]`, and
+  persists the Run. The raised `PlatformError` has code `ANALYSIS_FAILED` and a
+  fixed message: `"Unable to launch remote coordinator."` for `remote_gpu`,
+  otherwise `"Unable to launch local inference worker."`. The raw exception text
+  is stored in `error_message`; it is NOT the raised `PlatformError` message.
 - **Availability/validation errors:** all pre-existing codes and ordering are
   preserved (`RECORDING_NOT_FOUND`, `PIPELINE_INCOMPATIBLE`,
   `PLUGIN_PARAMETERS_INVALID`, `MODEL_RELEASE_MISMATCH`,
@@ -172,18 +184,25 @@ primitive that G4 calls strictly after the launch-intent fence commit.
 
 ---
 
-# TASK 1 — Local prepare seam + transaction ownership
+# TASK 1 — Local + Remote Analysis Prepare Seam
+
+This task is one coherent, independently reviewable deliverable: the complete
+prepare seam for both local and remote execution. Both RED test files are
+written and run before any production code, so no remote production behavior
+precedes its remote RED tests.
 
 **Files:**
-- Modify: `backend/app/analysis/service.py` (add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run`).
+- Modify: `backend/app/analysis/service.py` (add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run`, `_freeze_remote_provenance`).
 - Create: `backend/tests/test_analysis_prepare_local.py`.
+- Create: `backend/tests/test_analysis_prepare_remote.py`.
 
 **Interfaces:**
-- Consumes: `RecordingModel`, `PipelineRegistry.get`, `validate_plugin_parameters`, `_resolve_release`, `ExecutorRegistry.availability_for` / `.provider`, `provider.runtime_descriptor()`, `provider.name`.
+- Consumes: `RecordingModel`, `PipelineRegistry.get`, `validate_plugin_parameters`, `_resolve_release`, `ExecutorRegistry.availability_for` / `.provider`, `provider.runtime_descriptor()`, `provider.name`, `freeze_request_provenance`, `build_coordinator_metadata`, `identity_resolver`, `orchestrator_commit_resolver`, `runtime_commit_config`.
 - Produces:
   - `AnalysisService.prepare_run(*, recording_id, pipeline_id, executor, parameters, model_release_id=None) -> AnalysisRunModel`
   - `AnalysisService._prepare_local_run(recording, definition, parameters, resolved_release, provider) -> AnalysisRunModel`
   - `AnalysisService._prepare_remote_run(recording, definition, parameters, resolved_release, provider, availability) -> AnalysisRunModel`
+  - `AnalysisService._freeze_remote_provenance(*, run_id, recording, definition, resolved_release, provider, availability, parameters) -> dict`
 
 ### Exact production code (add)
 
@@ -263,277 +282,6 @@ primitive that G4 calls strictly after the launch-intent fence commit.
         return run
 
     def _prepare_remote_run(self, recording, definition, parameters, resolved_release, provider, availability) -> AnalysisRunModel:
-        from app.remote_execution.request_builder import freeze_request_provenance
-        from app.remote_execution.startup import build_coordinator_metadata
-
-        if resolved_release is None:
-            raise PlatformError(
-                "MODEL_RELEASE_MISMATCH", "Remote execution requires a ModelRelease."
-            )
-        run_id = f"run_{uuid4().hex}"
-        if self.identity_resolver is None or self.orchestrator_commit_resolver is None:
-            raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote provenance configuration is incomplete.")
-        if not self.runtime_commit_config:
-            raise PlatformError("EXECUTOR_UNAVAILABLE", "Remote runtime commit is not configured.")
-
-        frozen_model_release_id = resolved_release.release.model_release_id
-        asset_manifest_sha256 = resolved_release.manifest.asset_manifest_sha256
-
-        identity = self.identity_resolver(self.session, recording, self.data_root, run_id)
-        orchestrator_commit = self.orchestrator_commit_resolver(self.project_root)
-
-        frozen_metadata = freeze_request_provenance(
-            local_run_id=run_id,
-            recording_fingerprint=identity.recording_fingerprint,
-            source_data_sha256=identity.source_data_sha256,
-            dataset_name=identity.dataset_name,
-            dataset_split=identity.dataset_split,
-            dataset_key=identity.dataset_key,
-            label_space=identity.label_space,
-            pipeline_id=definition.id,
-            pipeline_version=definition.version,
-            required_remote_runtime_commit=self.runtime_commit_config,
-            orchestrator_commit=orchestrator_commit,
-            asset_manifest_sha256=asset_manifest_sha256,
-            remote_profile=availability.remote_profile or "remote",
-            model_release_id=frozen_model_release_id,
-            parameters=parameters,
-        )
-        # runtime_descriptor is internal execution metadata OUTSIDE the canonical
-        # request payload; request_sha256 and recovery reconstruction are unchanged.
-        frozen_metadata["runtime_descriptor"] = provider.runtime_descriptor().to_metadata()
-        final_metadata = build_coordinator_metadata(frozen_metadata)
-
-        run = AnalysisRunModel(
-            id=run_id,
-            recording_id=recording.id,
-            pipeline_id=definition.id,
-            pipeline_version=definition.version,
-            executor=provider.name,
-            status="pending",
-            parameters_json=dict(parameters),
-            execution_metadata_json=final_metadata,
-        )
-        self.session.add(run)
-        return run
-```
-
-`_create_local_run` / `_create_remote_run` / `create_run` remain unchanged in
-Task 1 (transient duplication is removed in Task 4). `_prepare_remote_run`
-carries the remote freeze inline in Task 1; Task 2 extracts it as the reviewed
-single seam. The new `_prepare_*` methods contain no `commit`, `rollback`,
-`flush`, or `launch`.
-
-### Exact tests (`backend/tests/test_analysis_prepare_local.py`)
-
-```python
-from dataclasses import replace
-from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
-
-from app.analysis.model import AnalysisRunModel
-from app.analysis.service import AnalysisService
-from app.core.errors import PlatformError
-from app.detections.model import DetectionResultModel
-from app.pipelines.base import ExecutionCapability, Pipeline, PipelineDefinition, PipelineOutput
-from app.pipelines.registry import PipelineRegistry
-from app.recordings.model import RecordingModel
-from app.remote_execution.model_release import ResolvedModelRelease
-
-from executor_fixtures import FakeProvider, FakeRegistry
-
-MANIFEST_SHA = "b" * 64
-
-
-class PrepareLocalPipeline(Pipeline):
-    @property
-    def definition(self) -> PipelineDefinition:
-        return PipelineDefinition(
-            id="prepare_local", name="Prepare Local", version="1.0",
-            label_space="spacenet_14", recommended_device="CPU", cpu_supported=True,
-            stages=(), inspectable_stages=(), task_capability="classification",
-            executors_supported=("local_cpu",),
-            technical_execution_capabilities=(ExecutionCapability("local_cpu", "cpu", "float32"),),
-            parameter_schema={"type": "object", "additionalProperties": False,
-                              "properties": {"threshold": {"type": "number"}}},
-        )
-
-    def run(self, recording, parameters, workspace) -> PipelineOutput:
-        raise AssertionError("must not execute")
-
-
-class ReleaseBoundLocalPipeline(PrepareLocalPipeline):
-    @property
-    def definition(self) -> PipelineDefinition:
-        return replace(super().definition, model_release_required=True)
-
-
-class FakeReleaseStore:
-    def __init__(self) -> None:
-        self.resolve_calls = []
-
-    def resolve(self, plugin_id, plugin_version, requested):
-        self.resolve_calls.append((plugin_id, plugin_version, requested))
-        release = SimpleNamespace(
-            model_release_id=requested or "golden", asset_manifest_sha256=MANIFEST_SHA
-        )
-        manifest = SimpleNamespace(asset_manifest_sha256=MANIFEST_SHA)
-        return ResolvedModelRelease(release=release, manifest=manifest)
-
-
-def _add_recording(client, recording_id="rec_x"):
-    with client.app.state.database.session_factory() as session:
-        session.add(RecordingModel(
-            id=recording_id, name="0", data_path="recordings/0/raw.iq", data_format="complex64_le",
-            sample_rate_hz=1e6, center_frequency_hz=0.0, frequency_low_hz=-5e5, frequency_high_hz=5e5,
-            num_samples=1000, duration_s=0.001, dataset_name="SpaceNet", dataset_split="test",
-            label_space="spacenet_14", source_data_sha256="1" * 64,
-        ))
-        session.commit()
-
-
-def _service(client, *, pipeline=None, store=None, provider=None):
-    session = client.app.state.database.session_factory()
-    fake_provider = provider or FakeProvider("local_cpu")
-    registry = FakeRegistry({"local_cpu": fake_provider})
-    service = AnalysisService(
-        session,
-        PipelineRegistry([pipeline or PrepareLocalPipeline()]),
-        client.app.state.job_manager,
-        model_release_store=store,
-        executor_registry=registry,
-    )
-    return service, fake_provider, registry
-
-
-def _prepare(service, **overrides):
-    kwargs = dict(recording_id="rec_x", pipeline_id="prepare_local",
-                  executor="local_cpu", parameters={})
-    kwargs.update(overrides)
-    return service.prepare_run(**kwargs)
-
-
-def test_prepare_run_stages_pending_local_run_without_commit_or_launch(client):
-    _add_recording(client)
-    service, provider, _ = _service(client)
-    run = _prepare(service)
-    assert run.status == "pending"
-    assert run.worker_pid is None
-    assert run.executor == "local_cpu"
-    assert provider.launches == []
-    with client.app.state.database.session_factory() as fresh:
-        assert fresh.get(AnalysisRunModel, run.id) is None
-
-
-def test_prepare_run_freezes_parameters_and_runtime_descriptor(client):
-    _add_recording(client)
-    service, provider, _ = _service(client)
-    run = _prepare(service, parameters={"threshold": 0.5})
-    assert run.parameters_json == {"threshold": 0.5}
-    assert run.execution_metadata_json == {
-        "runtime_descriptor": provider.runtime_descriptor().to_metadata()
-    }
-
-
-def test_prepare_run_release_less_fields_remain_null(client):
-    _add_recording(client)
-    service, _, _ = _service(client)
-    run = _prepare(service)
-    assert "model_release_id" not in run.execution_metadata_json
-    assert "asset_manifest_sha256" not in run.execution_metadata_json
-
-
-def test_prepare_run_release_bound_freezes_id_and_manifest_sha(client):
-    _add_recording(client)
-    store = FakeReleaseStore()
-    service, _, _ = _service(client, pipeline=ReleaseBoundLocalPipeline(), store=store)
-    run = _prepare(service, model_release_id="golden")
-    assert run.execution_metadata_json["model_release_id"] == "golden"
-    assert run.execution_metadata_json["asset_manifest_sha256"] == MANIFEST_SHA
-    assert store.resolve_calls == [("prepare_local", "1.0", "golden")]
-
-
-def test_prepare_run_invokes_actual_availability(client):
-    _add_recording(client)
-    service, _, registry = _service(client)
-    _prepare(service)
-    assert registry.availability_calls == [("prepare_local", "local_cpu")]
-
-
-def test_prepare_run_rejects_invalid_parameters_without_side_effects(client):
-    _add_recording(client)
-    service, provider, _ = _service(client)
-    with pytest.raises(PlatformError) as exc:
-        _prepare(service, parameters={"unknown": 1})
-    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
-    assert provider.launches == []
-    with client.app.state.database.session_factory() as fresh:
-        assert fresh.query(AnalysisRunModel).count() == 0
-
-
-def test_caller_rollback_after_prepare_leaves_no_durable_run(client):
-    _add_recording(client)
-    service, provider, _ = _service(client)
-    run = _prepare(service)
-    run_id = run.id
-    service.session.rollback()
-    assert provider.launches == []
-    with client.app.state.database.session_factory() as fresh:
-        assert fresh.get(AnalysisRunModel, run_id) is None
-
-
-def test_caller_can_add_companion_row_in_same_transaction(client):
-    _add_recording(client)
-    service, provider, _ = _service(client)
-    run = _prepare(service)
-    service.session.add(DetectionResultModel(
-        id="det_companion", run_id=run.id, t_start_s=0.0, t_end_s=0.1,
-        f_low_hz=0.0, f_high_hz=1.0, class_id=0, class_name="x", confidence=0.5,
-    ))
-    service.session.commit()
-    assert provider.launches == []  # commit did not launch
-    with client.app.state.database.session_factory() as fresh:
-        assert fresh.get(AnalysisRunModel, run.id) is not None
-        assert fresh.get(DetectionResultModel, "det_companion") is not None
-```
-
-### Steps
-
-- [ ] **Write failing test** `backend/tests/test_analysis_prepare_local.py` exactly as above.
-- [ ] **Run exact RED command:**
-```bash
-PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_analysis_prepare_local.py -v
-```
-Expected RED: `AttributeError: 'AnalysisService' object has no attribute 'prepare_run'`.
-- [ ] **Implement minimal code:** add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run` exactly as above; do not touch `create_run` or the old `_create_*` methods.
-- [ ] **Run exact GREEN command:** same pytest invocation. Expected: all pass.
-- [ ] **Regression:**
-```bash
-PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
-  backend/tests/test_analysis_runs.py \
-  backend/tests/test_remote_create_run.py \
-  backend/tests/test_input_output_label_space.py -q
-```
-- [ ] **Commit checkpoint:** `feat: add analysis run prepare seam`
-
----
-
-# TASK 2 — Remote prepare seam extraction + provenance parity
-
-**Files:**
-- Modify: `backend/app/analysis/service.py` (extract `_freeze_remote_provenance`; `_prepare_remote_run` delegates to it).
-- Create: `backend/tests/test_analysis_prepare_remote.py`.
-
-**Interfaces:**
-- Consumes: `freeze_request_provenance`, `build_coordinator_metadata`, `identity_resolver`, `orchestrator_commit_resolver`, `runtime_commit_config`, `provider.runtime_descriptor()`.
-- Produces: `AnalysisService._freeze_remote_provenance(*, run_id, recording, definition, resolved_release, provider, availability, parameters) -> dict` (final local execution metadata).
-
-### Exact production code (refactor `_prepare_remote_run`)
-
-```python
-    def _prepare_remote_run(self, recording, definition, parameters, resolved_release, provider, availability) -> AnalysisRunModel:
         run_id = f"run_{uuid4().hex}"
         final_metadata = self._freeze_remote_provenance(
             run_id=run_id,
@@ -599,9 +347,185 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
         return build_coordinator_metadata(frozen_metadata)
 ```
 
-### Exact tests (`backend/tests/test_analysis_prepare_remote.py`)
+`_create_local_run` / `_create_remote_run` / `create_run` remain unchanged in
+this task (transient duplication is removed in Task 3). None of the new methods
+contains `commit`, `rollback`, `flush`, or `launch`.
 
-Mirror the remote scaffolding from `test_remote_create_run.py` (self-contained):
+### Exact tests — `backend/tests/test_analysis_prepare_local.py`
+
+```python
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from app.analysis.model import AnalysisRunModel
+from app.analysis.service import AnalysisService
+from app.core.errors import PlatformError
+from app.detections.model import DetectionResultModel
+from app.pipelines.base import ExecutionCapability, Pipeline, PipelineDefinition, PipelineOutput
+from app.pipelines.registry import PipelineRegistry
+from app.recordings.model import RecordingModel
+from app.remote_execution.model_release import ResolvedModelRelease
+
+from executor_fixtures import FakeProvider, FakeRegistry
+
+MANIFEST_SHA = "b" * 64
+
+
+class PrepareLocalPipeline(Pipeline):
+    @property
+    def definition(self) -> PipelineDefinition:
+        return PipelineDefinition(
+            id="prepare_local", name="Prepare Local", version="1.0",
+            label_space="spacenet_14", recommended_device="CPU", cpu_supported=True,
+            stages=(), inspectable_stages=(), task_capability="classification",
+            executors_supported=("local_cpu",),
+            technical_execution_capabilities=(ExecutionCapability("local_cpu", "cpu", "float32"),),
+            parameter_schema={"type": "object", "additionalProperties": False,
+                              "properties": {"threshold": {"type": "number"}}},
+        )
+
+    def run(self, recording, parameters, workspace) -> PipelineOutput:
+        raise AssertionError("must not execute")
+
+
+class ReleaseBoundLocalPipeline(PrepareLocalPipeline):
+    @property
+    def definition(self) -> PipelineDefinition:
+        return replace(super().definition, model_release_required=True)
+
+
+class FakeReleaseStore:
+    def __init__(self) -> None:
+        self.resolve_calls = []
+
+    def resolve(self, plugin_id, plugin_version, requested):
+        self.resolve_calls.append((plugin_id, plugin_version, requested))
+        release = SimpleNamespace(
+            model_release_id=requested or "golden", asset_manifest_sha256=MANIFEST_SHA
+        )
+        manifest = SimpleNamespace(asset_manifest_sha256=MANIFEST_SHA)
+        return ResolvedModelRelease(release=release, manifest=manifest)
+
+
+def _add_recording(client, recording_id="rec_x"):
+    with client.app.state.database.session_factory() as session:
+        session.add(RecordingModel(
+            id=recording_id, name="0", data_path="recordings/0/raw.iq", data_format="complex64_le",
+            sample_rate_hz=1e6, center_frequency_hz=0.0, frequency_low_hz=-5e5, frequency_high_hz=5e5,
+            num_samples=1000, duration_s=0.001, dataset_name="SpaceNet", dataset_split="test",
+            label_space="spacenet_14", source_data_sha256="1" * 64,
+        ))
+        session.commit()
+
+
+def _service_local(client, *, pipeline=None, store=None, provider=None):
+    session = client.app.state.database.session_factory()
+    fake_provider = provider or FakeProvider("local_cpu")
+    registry = FakeRegistry({"local_cpu": fake_provider})
+    service = AnalysisService(
+        session,
+        PipelineRegistry([pipeline or PrepareLocalPipeline()]),
+        client.app.state.job_manager,
+        model_release_store=store,
+        executor_registry=registry,
+    )
+    return service, fake_provider, registry
+
+
+def _prepare_local(service, **overrides):
+    kwargs = dict(recording_id="rec_x", pipeline_id="prepare_local",
+                  executor="local_cpu", parameters={})
+    kwargs.update(overrides)
+    return service.prepare_run(**kwargs)
+
+
+def test_prepare_run_stages_pending_local_run_without_commit_or_launch(client):
+    _add_recording(client)
+    service, provider, _ = _service_local(client)
+    run = _prepare_local(service)
+    assert run.status == "pending"
+    assert run.worker_pid is None
+    assert run.executor == "local_cpu"
+    assert provider.launches == []
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(AnalysisRunModel, run.id) is None
+
+
+def test_prepare_run_freezes_parameters_and_runtime_descriptor(client):
+    _add_recording(client)
+    service, provider, _ = _service_local(client)
+    run = _prepare_local(service, parameters={"threshold": 0.5})
+    assert run.parameters_json == {"threshold": 0.5}
+    assert run.execution_metadata_json == {
+        "runtime_descriptor": provider.runtime_descriptor().to_metadata()
+    }
+
+
+def test_prepare_run_release_less_fields_remain_null(client):
+    _add_recording(client)
+    service, _, _ = _service_local(client)
+    run = _prepare_local(service)
+    assert "model_release_id" not in run.execution_metadata_json
+    assert "asset_manifest_sha256" not in run.execution_metadata_json
+
+
+def test_prepare_run_release_bound_freezes_id_and_manifest_sha(client):
+    _add_recording(client)
+    store = FakeReleaseStore()
+    service, _, _ = _service_local(client, pipeline=ReleaseBoundLocalPipeline(), store=store)
+    run = _prepare_local(service, model_release_id="golden")
+    assert run.execution_metadata_json["model_release_id"] == "golden"
+    assert run.execution_metadata_json["asset_manifest_sha256"] == MANIFEST_SHA
+    assert store.resolve_calls == [("prepare_local", "1.0", "golden")]
+
+
+def test_prepare_run_invokes_actual_availability(client):
+    _add_recording(client)
+    service, _, registry = _service_local(client)
+    _prepare_local(service)
+    assert registry.availability_calls == [("prepare_local", "local_cpu")]
+
+
+def test_prepare_run_rejects_invalid_parameters_without_side_effects(client):
+    _add_recording(client)
+    service, provider, _ = _service_local(client)
+    with pytest.raises(PlatformError) as exc:
+        _prepare_local(service, parameters={"unknown": 1})
+    assert exc.value.code == "PLUGIN_PARAMETERS_INVALID"
+    assert provider.launches == []
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.query(AnalysisRunModel).count() == 0
+
+
+def test_caller_rollback_after_prepare_leaves_no_durable_run(client):
+    _add_recording(client)
+    service, provider, _ = _service_local(client)
+    run = _prepare_local(service)
+    run_id = run.id
+    service.session.rollback()
+    assert provider.launches == []
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(AnalysisRunModel, run_id) is None
+
+
+def test_caller_can_add_companion_row_in_same_transaction(client):
+    _add_recording(client)
+    service, provider, _ = _service_local(client)
+    run = _prepare_local(service)
+    service.session.add(DetectionResultModel(
+        id="det_companion", run_id=run.id, t_start_s=0.0, t_end_s=0.1,
+        f_low_hz=0.0, f_high_hz=1.0, class_id=0, class_name="x", confidence=0.5,
+    ))
+    service.session.commit()
+    assert provider.launches == []  # commit did not launch
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(AnalysisRunModel, run.id) is not None
+        assert fresh.get(DetectionResultModel, "det_companion") is not None
+```
+
+### Exact tests — `backend/tests/test_analysis_prepare_remote.py`
 
 ```python
 from pathlib import Path
@@ -707,7 +631,7 @@ def _add_recording(client, recording_id="rec_x", label_space="spacenet_14"):
         session.commit()
 
 
-def _service(client, *, probe=None, launcher=None, pipeline=None):
+def _service_remote(client, *, probe=None, launcher=None, pipeline=None):
     session = client.app.state.database.session_factory()
     probe = probe or FakeProbe()
     launcher = launcher or FakeLauncher()
@@ -739,7 +663,7 @@ def _prepare_remote(service, **overrides):
 
 def test_prepare_run_remote_stages_without_launch(client):
     _add_recording(client)
-    service, probe, launcher = _service(client)
+    service, probe, launcher = _service_remote(client)
     run = _prepare_remote(service)
     assert run.status == "pending"
     assert run.worker_pid is None
@@ -752,7 +676,7 @@ def test_prepare_run_remote_stages_without_launch(client):
 
 def test_prepare_run_remote_freezes_full_provenance_and_token_before_commit(client):
     _add_recording(client)
-    service, _, launcher = _service(client)
+    service, _, launcher = _service_remote(client)
     run = _prepare_remote(service)
     metadata = run.execution_metadata_json
     assert metadata["local_run_id"] == run.id
@@ -773,7 +697,7 @@ def test_prepare_run_remote_provenance_matches_legacy_request_identity(client):
     # request_sha256 is reconstructed purely from persisted metadata: launch must
     # never need to rebuild a scientifically different request.
     _add_recording(client)
-    service, _, _ = _service(client)
+    service, _, _ = _service_remote(client)
     run = _prepare_remote(service)
     metadata = dict(run.execution_metadata_json)
     assert build_batch(metadata).request_sha256 == metadata["request_sha256"]
@@ -786,7 +710,7 @@ def test_prepare_run_remote_rejects_missing_release(client):
         @property
         def definition(self):
             return replace(RemoteCapablePipeline().definition, model_release_required=False)
-    service, _, launcher = _service(client, pipeline=ReleaseLess())
+    service, _, launcher = _service_remote(client, pipeline=ReleaseLess())
     with pytest.raises(PlatformError) as exc:
         _prepare_remote(service)
     assert exc.value.code == "MODEL_RELEASE_MISMATCH"
@@ -795,8 +719,8 @@ def test_prepare_run_remote_rejects_missing_release(client):
 
 def test_prepare_run_remote_consults_probe_before_staging(client):
     _add_recording(client)
-    service, _, launcher = _service(client, probe=FakeProbe(available=False,
-                                                           reason_code="REMOTE_EXECUTOR_UNAVAILABLE"))
+    service, _, launcher = _service_remote(client, probe=FakeProbe(
+        available=False, reason_code="REMOTE_EXECUTOR_UNAVAILABLE"))
     with pytest.raises(PlatformError) as exc:
         _prepare_remote(service)
     assert exc.value.code == "REMOTE_EXECUTOR_UNAVAILABLE"
@@ -806,10 +730,8 @@ def test_prepare_run_remote_consults_probe_before_staging(client):
 
 
 def test_freeze_remote_provenance_helper_is_the_single_seam(client):
-    # Pins the extracted helper contract. Task 1 inlines this freeze inside
-    # _prepare_remote_run; Task 2 extracts it as the reviewed single seam.
     _add_recording(client)
-    service, _, _ = _service(client)
+    service, _, _ = _service_remote(client)
     recording = service.session.get(RecordingModel, "rec_x")
     definition = RemoteCapablePipeline().definition
     resolved = FakeModelReleaseStore().resolve("remote_test", "1.0", None)
@@ -834,27 +756,32 @@ def test_freeze_remote_provenance_helper_is_the_single_seam(client):
 
 ### Steps
 
-- [ ] **Write failing test** `backend/tests/test_analysis_prepare_remote.py` exactly as above.
-- [ ] **Run exact RED command:**
-```bash
-PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_analysis_prepare_remote.py -v
-```
-Expected RED: `AttributeError: 'AnalysisService' object has no attribute '_freeze_remote_provenance'` (from `test_freeze_remote_provenance_helper_is_the_single_seam`), because Task 1 keeps the freeze inline inside `_prepare_remote_run`.
-- [ ] **Implement minimal code:** extract `_freeze_remote_provenance` exactly as above and delegate from `_prepare_remote_run`.
-- [ ] **Run exact GREEN command:** same pytest invocation. Expected: all pass.
-- [ ] **Regression:**
+- [ ] **Write failing tests:** create BOTH `backend/tests/test_analysis_prepare_local.py` and `backend/tests/test_analysis_prepare_remote.py` exactly as above. Neither imports the other.
+- [ ] **Run exact RED command (both files together, before any production code):**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
+  backend/tests/test_analysis_prepare_local.py \
+  backend/tests/test_analysis_prepare_remote.py -v
+```
+Expected RED: `AttributeError: 'AnalysisService' object has no attribute 'prepare_run'` (local + remote tests), plus `AttributeError: ... '_freeze_remote_provenance'` for the helper test.
+- [ ] **Implement minimal code:** add `prepare_run`, `_prepare_local_run`, `_prepare_remote_run`, `_freeze_remote_provenance` exactly as above; do not touch `create_run` or the old `_create_*` methods.
+- [ ] **Run exact GREEN command:** same pytest invocation. Expected: all pass.
+- [ ] **Focused regressions:**
+```bash
+PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
+  backend/tests/test_analysis_runs.py \
   backend/tests/test_remote_create_run.py \
   backend/tests/test_request_release_provenance.py \
   backend/tests/test_remote_execution_canonical.py \
-  backend/tests/test_release_wiring.py -q
+  backend/tests/test_release_wiring.py \
+  backend/tests/test_input_output_label_space.py \
+  backend/tests/test_plugin_parameters_freeze.py -q
 ```
-- [ ] **Commit checkpoint:** `refactor: pin remote prepare provenance parity`
+- [ ] **Commit checkpoint:** `feat: add local and remote analysis run prepare seam`
 
 ---
 
-# TASK 3 — `launch_prepared_run` + failure/duplicate guards
+# TASK 2 — `launch_prepared_run` + failure/duplicate guards
 
 **Files:**
 - Modify: `backend/app/analysis/service.py` (add `launch_prepared_run`).
@@ -870,20 +797,31 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
     # ---------- physical launch of an already-persisted prepared run ----------
 
     def launch_prepared_run(self, run_id: str) -> AnalysisRunModel:
-        """Physically launch an already-durably-persisted prepared AnalysisRun.
+        """Physically launch an already-persisted prepared AnalysisRun.
 
-        Loads the Run by id; never constructs a new Run; never rebuilds remote
-        provenance or regenerates the coordinator token. Owns only the
-        post-launch result transaction (worker_pid, or the failed result).
-        G4 must commit its launch-intent fence before calling this.
+        Durable commit ordering is a CALLER precondition:
+            G3 Transaction A COMMIT
+            G4 Transaction B COMMIT
+            launch_prepared_run(...)
+
+        This method does not prove transaction durability from ORM object state.
+        It only defensively rejects a Run that is still staged/unflushed in this
+        Session (checked BEFORE any query, so no autoflush can occur), then loads
+        the persisted Run and launches it. It never constructs a new Run, never
+        rebuilds remote provenance, and never regenerates the coordinator token.
         """
+        # Defensive pre-query guard: a Run still staged in this Session has no
+        # durable row and must not be launched. Durable commit ordering itself is
+        # guaranteed by the caller contract, not by Session.new.
+        for pending in self.session.new:
+            if isinstance(pending, AnalysisRunModel) and pending.id == run_id:
+                raise PlatformError(
+                    "ANALYSIS_RUN_NOT_LAUNCHABLE",
+                    "Prepared analysis run is still staged in this session; the caller must commit before launch.",
+                    409,
+                )
+
         run = self.get(run_id)  # raises ANALYSIS_RUN_NOT_FOUND (404)
-        if run in self.session.new:
-            raise PlatformError(
-                "ANALYSIS_RUN_NOT_LAUNCHABLE",
-                "Prepared analysis run is not durably persisted.",
-                409,
-            )
         if run.worker_pid is not None or run.status != "pending":
             raise PlatformError(
                 "ANALYSIS_RUN_NOT_LAUNCHABLE",
@@ -928,23 +866,33 @@ Guard semantics (deliberate):
 
 | Condition | Result |
 |---|---|
-| Run id absent | `ANALYSIS_RUN_NOT_FOUND` (404), existing `get` behavior |
-| Run still in caller's unit of work (`session.new`) | `ANALYSIS_RUN_NOT_LAUNCHABLE` (409) |
+| A matching `AnalysisRunModel` is still staged/unflushed in `session.new` (checked before any query) | `ANALYSIS_RUN_NOT_LAUNCHABLE` (409) — defensive only; durable commit is the caller's precondition |
+| Run id absent from the database | `ANALYSIS_RUN_NOT_FOUND` (404), existing `get` behavior |
 | `status != "pending"` (running/completed/failed/interrupted) | `ANALYSIS_RUN_NOT_LAUNCHABLE` (409) |
 | `worker_pid is not None` | `ANALYSIS_RUN_NOT_LAUNCHABLE` (409) — prevents duplicate launch |
 | `executor_registry is None` | `EXECUTION_CAPABILITY_UNAVAILABLE` |
 | No registered provider for `run.executor` | `EXECUTION_CAPABILITY_UNAVAILABLE` |
 | `remote_gpu` without frozen `coordinator_token` | `ANALYSIS_RUN_NOT_LAUNCHABLE` (409) |
-| `provider.launch` raises | Run → failed (`ANALYSIS_FAILED`/message), committed; `PlatformError("ANALYSIS_FAILED", <original message>)` |
+| `provider.launch` raises | `run.status="failed"`, `run.error_type="ANALYSIS_FAILED"`, `run.error_message=str(exc)[:1000]`, committed; raised `PlatformError("ANALYSIS_FAILED", "Unable to launch remote coordinator." / "Unable to launch local inference worker.")` |
 
 `ANALYSIS_RUN_NOT_LAUNCHABLE` is a new, additive error code; it centralizes
 precondition failure and avoids conflating a rejected launch with a failed
 launch. No automatic retry is added.
 
+Note: a Run that a caller manually `flush()`es (leaving `session.new`) inside an
+uncommitted transaction is NOT distinguishable from a committed Run via ORM
+state. G2 does not attempt to detect that case; durable commit ordering remains
+the explicit caller precondition (Transaction A / Transaction B).
+
 ### Exact tests (`backend/tests/test_analysis_launch_prepared_run.py`)
 
-Reuse the local scaffolding from Task 1 and the remote scaffolding from Task 2
-(self-contained; do not import test modules across files). Key cases:
+**Scaffolding:** copy verbatim the module-level imports/classes/fixtures and the
+`_service_local` / `_prepare_local` helpers from
+`backend/tests/test_analysis_prepare_local.py`, and the `_service_remote` /
+`_prepare_remote` helpers from `backend/tests/test_analysis_prepare_remote.py`.
+Both test modules remain self-contained; never import one test module from
+another. `_service_local` returns `(service, provider, registry)`;
+`_service_remote` returns `(service, probe, launcher)`.
 
 ```python
 def test_launch_prepared_run_local_launches_existing_run_once(client):
@@ -960,6 +908,7 @@ def test_launch_prepared_run_local_launches_existing_run_once(client):
 
 
 def test_launch_prepared_run_remote_uses_frozen_coordinator_token(client):
+    _add_recording(client)
     service, _, launcher = _service_remote(client)
     run = _prepare_remote(service)
     frozen_token = run.execution_metadata_json["coordinator_token"]
@@ -992,14 +941,20 @@ def test_launch_prepared_run_missing_run_fails_closed(client):
     assert provider.launches == []
 
 
-def test_launch_prepared_run_rejects_uncommitted_run(client):
+def test_launch_prepared_run_rejects_staged_unflushed_run(client):
     _add_recording(client)
     service, provider, _ = _service_local(client)
     run = _prepare_local(service)
+    assert run in service.session.new  # staged/unflushed before the call
     with pytest.raises(PlatformError) as exc:
         service.launch_prepared_run(run.id)
     assert exc.value.code == "ANALYSIS_RUN_NOT_LAUNCHABLE"
     assert provider.launches == []
+    assert run in service.session.new  # the guard did not flush the Session
+    assert run.status == "pending"
+    assert run.worker_pid is None
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.query(AnalysisRunModel).count() == 0
 
 
 def test_launch_prepared_run_rejects_non_pending_status(client):
@@ -1072,6 +1027,7 @@ def test_launch_prepared_run_local_failure_marks_failed_and_persists(client):
     with pytest.raises(PlatformError) as exc:
         service.launch_prepared_run(run.id)
     assert exc.value.code == "ANALYSIS_FAILED"
+    assert exc.value.message == "Unable to launch local inference worker."
     with client.app.state.database.session_factory() as fresh:
         stored = fresh.get(AnalysisRunModel, run.id)
         assert stored.status == "failed"
@@ -1090,22 +1046,14 @@ def test_launch_prepared_run_remote_failure_uses_remote_message(client):
     with pytest.raises(PlatformError) as exc:
         service.launch_prepared_run(run.id)
     assert exc.value.code == "ANALYSIS_FAILED"
+    assert exc.value.message == "Unable to launch remote coordinator."
     with client.app.state.database.session_factory() as fresh:
         assert fresh.get(AnalysisRunModel, run.id).status == "failed"
 ```
 
-**Scaffolding:** copy verbatim the module-level imports/classes/fixtures from
-`backend/tests/test_analysis_prepare_local.py` (renaming its `_service` helper to
-`_service_local` and its `_prepare` helper to `_prepare_local`) and from
-`backend/tests/test_analysis_prepare_remote.py` (renaming its `_service` helper to
-`_service_remote`, keeping `_prepare_remote`). Both test modules remain
-self-contained; never import one test module from another. `_service_local`
-returns `(service, provider, registry)`; `_service_remote` returns
-`(service, probe, launcher)`.
-
 ### Steps
 
-- [ ] **Write failing test** `backend/tests/test_analysis_launch_prepared_run.py` with the scaffolding from Tasks 1–2 re-declared locally plus the cases above.
+- [ ] **Write failing test** `backend/tests/test_analysis_launch_prepared_run.py` with the scaffolding from Task 1 re-declared locally plus the cases above.
 - [ ] **Run exact RED command:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_analysis_launch_prepared_run.py -v
@@ -1113,7 +1061,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_a
 Expected RED: `AttributeError: 'AnalysisService' object has no attribute 'launch_prepared_run'`.
 - [ ] **Implement minimal code:** add `launch_prepared_run` exactly as above.
 - [ ] **Run exact GREEN command:** same pytest invocation. Expected: all pass.
-- [ ] **Regression:**
+- [ ] **Focused regressions:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
   backend/tests/test_analysis_prepare_local.py \
@@ -1123,7 +1071,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 ---
 
-# TASK 4 — Route legacy `create_run` through prepare / commit / launch
+# TASK 3 — Route legacy `create_run` through prepare / commit / launch
 
 **Files:**
 - Modify: `backend/app/analysis/service.py` (rewrite `create_run`; delete `_create_local_run` and `_create_remote_run`).
@@ -1165,7 +1113,60 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 ### Exact tests (`backend/tests/test_analysis_create_run_compat.py`)
 
-Reuse the Task 1 local scaffolding and Task 2 remote scaffolding locally. Cases:
+**Scaffolding:** copy verbatim the module-level imports/classes/fixtures and the
+`_service_local` / `_prepare_local` helpers from
+`backend/tests/test_analysis_prepare_local.py`, and the `_service_remote` /
+`_prepare_remote` helpers from `backend/tests/test_analysis_prepare_remote.py`.
+Both test modules remain self-contained; never import one test module from
+another.
+
+**Real refactor RED — delegation/composition contract** (fails on the current
+legacy `create_run`, passes only after the refactor):
+
+```python
+def test_create_run_composes_prepare_commit_launch(client, monkeypatch):
+    _add_recording(client)
+    service, provider, _ = _service_local(client)
+
+    events = []
+    real_prepare = AnalysisService.prepare_run
+    real_launch = AnalysisService.launch_prepared_run
+    real_commit = service.session.commit
+
+    def spy_prepare(self, **kwargs):
+        run = real_prepare(self, **kwargs)
+        events.append(("prepare", run.id))
+        return run
+
+    def spy_commit(*args, **kwargs):
+        events.append(("commit", None))
+        return real_commit(*args, **kwargs)
+
+    def spy_launch(self, run_id):
+        events.append(("launch", run_id))
+        return real_launch(self, run_id)
+
+    monkeypatch.setattr(AnalysisService, "prepare_run", spy_prepare)
+    monkeypatch.setattr(AnalysisService, "launch_prepared_run", spy_launch)
+    monkeypatch.setattr(service.session, "commit", spy_commit)
+
+    run = service.create_run(recording_id="rec_x", pipeline_id="prepare_local",
+                             executor="local_cpu", parameters={})
+
+    assert [event[0] for event in events] == ["prepare", "commit", "launch"]
+    assert events[0][1] == run.id
+    assert events[2][1] == run.id
+    assert provider.launches == [(run.id, None)]
+```
+
+On the current legacy code the `prepare_run`/`launch_prepared_run` spies are
+never invoked; only the internal `_create_local_run` commits fire the commit
+spy. The ordered event list therefore does not equal
+`["prepare", "commit", "launch"]`, so this test fails before the refactor and
+passes after it.
+
+**Compatibility regressions** (must pass before and after; the commit-failure
+case is a regression, not the RED):
 
 ```python
 def test_create_run_local_unchanged_observable_behavior(client):
@@ -1205,9 +1206,20 @@ def test_create_run_available_false_raises_before_staging(client):
         assert fresh.query(AnalysisRunModel).count() == 0
 
 
-def test_create_run_commit_failure_does_not_trigger_provider_launch(client, monkeypatch):
+def test_create_run_prepare_commit_failure_skips_launch(client, monkeypatch):
+    # Compatibility regression, not the refactor RED: current legacy behavior
+    # also commits before launching, so a failed preparation commit must never
+    # reach provider.launch.
     _add_recording(client)
     service, provider, _ = _service_local(client)
+    launched = []
+    real_launch = AnalysisService.launch_prepared_run
+
+    def spy_launch(self, run_id):
+        launched.append(run_id)
+        return real_launch(self, run_id)
+
+    monkeypatch.setattr(AnalysisService, "launch_prepared_run", spy_launch)
 
     def boom():
         raise RuntimeError("commit failed")
@@ -1216,6 +1228,7 @@ def test_create_run_commit_failure_does_not_trigger_provider_launch(client, monk
     with pytest.raises(RuntimeError):
         service.create_run(recording_id="rec_x", pipeline_id="prepare_local",
                            executor="local_cpu", parameters={})
+    assert launched == []
     assert provider.launches == []
     with client.app.state.database.session_factory() as fresh:
         assert fresh.query(AnalysisRunModel).count() == 0
@@ -1233,30 +1246,17 @@ def test_create_run_remote_failed_launch_marks_failed(client):
     assert exc.value.code == "ANALYSIS_FAILED"
 ```
 
-**Scaffolding:** copy verbatim the module-level imports/classes/fixtures and the
-`_service_local` / `_prepare_local` helpers from
-`backend/tests/test_analysis_prepare_local.py`, and the `_service_remote` /
-`_prepare_remote` helpers from `backend/tests/test_analysis_prepare_remote.py`.
-Both test modules remain self-contained; never import one test module from
-another.
-
 ### Steps
 
-- [ ] **Write failing test** `backend/tests/test_analysis_create_run_compat.py` (scaffolding locally re-declared).
+- [ ] **Write failing test** `backend/tests/test_analysis_create_run_compat.py` (scaffolding locally re-declared) including `test_create_run_composes_prepare_commit_launch`.
 - [ ] **Run exact RED command:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_analysis_create_run_compat.py -v
 ```
-Expected RED: `create_run` still owns prepare+launch directly; the commit-failure
-test fails because the legacy path commits inside `_create_local_run` and would
-still be launch-protected only after; specifically
-`test_create_run_commit_failure_does_not_trigger_provider_launch` fails while the
-old path eagerly commits twice. (If the legacy path happens to satisfy a case,
-the RED is the delegation contract: the new wrapper must be the single
-composition point.)
+Expected RED: `test_create_run_composes_prepare_commit_launch` fails because the current legacy `create_run` does not call `prepare_run`/`launch_prepared_run` (spy events list is empty). The observable-behavior and commit-failure compatibility tests pass.
 - [ ] **Implement minimal code:** replace `create_run` as above and delete `_create_local_run` / `_create_remote_run`.
 - [ ] **Run exact GREEN command:** same pytest invocation. Expected: all pass.
-- [ ] **Regression:**
+- [ ] **Focused regressions:**
 ```bash
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
   backend/tests/test_analysis_runs.py \
@@ -1271,28 +1271,49 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 
 ---
 
-# TASK 5 — Regression matrix + full verification (verification only)
+# TASK 4 — Regression matrix + full verification (verification only)
 
 **Files:**
 - Create: `backend/tests/test_analysis_seam_regression.py`.
 - No production change.
 
-**Interfaces:** consumes everything from Tasks 1–4.
+**Interfaces:** consumes everything from Tasks 1–3.
 
-### Exact regression guards
+### Exact regression guards (self-contained; no cross-test import)
 
 ```python
 from app.analysis.model import AnalysisRunModel
 from app.remote_execution.canonical import compute_request_sha256
 from app.remote_execution.request_builder import build_batch
 
-LEGACY_REQUEST_SHA256 = "a96504b07998779d9053cc0ca472da3e5746c6740a765aaf7d1dde29b04ecc6c"
-
 _ANALYSIS_RUN_COLUMNS = {
     "id", "recording_id", "pipeline_id", "pipeline_version", "executor", "status",
     "parameters_json", "execution_metadata_json", "hardware_info_json", "started_at",
     "finished_at", "error_type", "error_message", "worker_pid", "created_at",
 }
+
+# Complete minimal legacy fixture defined locally (do not import another test
+# module). Mirrors the frozen Task-B3 fixture with deterministic ids.
+_LEGACY_FIXTURE_METADATA = {
+    "request_id": "id_fixture",
+    "batch_id": "id_fixture",
+    "item_key": "id_fixture",
+    "local_run_id": "run_fixture",
+    "orchestrator_commit": "d" * 40,
+    "required_remote_runtime_commit": "5bb5be4b04d04a071bc9d8f4f61172595ecee037",
+    "asset_manifest_sha256": "16cc0534ed61603a84142da8a04af6642f9e7661848835fe5473199bec38ac08",
+    "pipeline_id": "zoomspec_yolo26n_aug_combined_frn_v3",
+    "pipeline_version": "1.0.0",
+    "remote_profile": "remote",
+    "recording_fingerprint": "a" * 64,
+    "source_data_sha256": "b" * 64,
+    "dataset_name": "SpaceNet",
+    "dataset_split": "test",
+    "dataset_key": "0",
+    "label_space": "spacenet_14",
+    "parameters": {},
+}
+_LEGACY_REQUEST_SHA256 = "a96504b07998779d9053cc0ca472da3e5746c6740a765aaf7d1dde29b04ecc6c"
 
 
 def test_analysis_run_schema_unchanged_by_g2():
@@ -1302,11 +1323,14 @@ def test_analysis_run_schema_unchanged_by_g2():
 
 
 def test_legacy_request_hash_byte_exact_after_g2():
-    from test_request_release_provenance import LEGACY_FIXTURE_METADATA
-    batch = build_batch(LEGACY_FIXTURE_METADATA)
-    assert batch.request_sha256 == LEGACY_REQUEST_SHA256
-    assert compute_request_sha256(batch) == LEGACY_REQUEST_SHA256
+    batch = build_batch(_LEGACY_FIXTURE_METADATA)
+    assert batch.request_sha256 == _LEGACY_REQUEST_SHA256
+    assert compute_request_sha256(batch) == _LEGACY_REQUEST_SHA256
 ```
+
+The existing `backend/tests/test_request_release_provenance.py` is also run
+mandatorily as the frozen-contract regression (Step below); the local fixture in
+this file is not an import of that module.
 
 ### Steps
 
@@ -1356,7 +1380,7 @@ Require 0 failed / 0 errors (the current sealed baseline is `1400 passed, 28 ski
 **G2 implements:**
 - `AnalysisService.prepare_run(...)` (caller-owned staged `pending` Run; no commit/rollback/flush/launch).
 - `AnalysisService._prepare_local_run(...)` / `_prepare_remote_run(...)` / `_freeze_remote_provenance(...)`.
-- `AnalysisService.launch_prepared_run(run_id)` (guarded physical launch of a persisted prepared Run; owns only its result transaction).
+- `AnalysisService.launch_prepared_run(run_id)` (guarded physical launch of a persisted prepared Run; owns only its result transaction; durability is a caller precondition).
 - `create_run(...)` refactored to `prepare_run -> commit -> launch_prepared_run`, with `_create_local_run`/`_create_remote_run` deleted.
 - Focused TDD tests for prepare/launch/transaction ownership and compat regressions.
 
@@ -1375,11 +1399,11 @@ Require 0 failed / 0 errors (the current sealed baseline is `1400 passed, 28 ski
 1. **prepare vs launch split.** `prepare_run` takes lines `service.py:117`–`:149` plus the *construction* halves of `_create_local_run`/`_create_remote_run` (through `session.add`). `launch_prepared_run` takes the *launch halves* (`provider.launch(...)`, worker_pid assignment, result commit, failure handling). Legacy `create_run` keeps the preparation commit between them.
 2. **`session.flush()` in prepare?** No. `run_id` is generated explicitly and passed to `identity_resolver`, and `AnalysisRunModel.id` is assigned before `session.add`; G3's dependent `DatasetExperimentAttempt` FK ordering is handled by SQLAlchemy's unit-of-work topological insert order. `prepare_run` calls no flush.
 3. **Remote token retrieval at launch.** `run.execution_metadata_json["coordinator_token"]`, frozen by `build_coordinator_metadata` inside `_freeze_remote_provenance`. `launch_prepared_run` reads it; it never calls `find_or_new_coordinator_token` or `build_coordinator_metadata`.
-4. **Canonical parity guarantee.** The `freeze_request_provenance` call arguments are moved verbatim; nothing at launch recomputes them. `request_sha256` is derived from persisted metadata via `build_batch`, pinned by `LEGACY_REQUEST_SHA256` (`test_request_release_provenance.py:20`) and the new `test_prepare_run_remote_provenance_matches_legacy_request_identity`.
-5. **Relaunch preconditions.** `run in session.new`; `status != "pending"`; `worker_pid is not None`. Any is `ANALYSIS_RUN_NOT_LAUNCHABLE` (409).
-6. **`provider.launch` raises.** Run → `failed`, `error_type="ANALYSIS_FAILED"`, `error_message=str(exc)[:1000]`, committed; `PlatformError("ANALYSIS_FAILED", <original message>)` raised. Messages: local `"Unable to launch local inference worker."`, remote `"Unable to launch remote coordinator."` (matches current `service.py:181,252`).
-7. **Commit after prepare fails in legacy `create_run`.** Exception propagates; `launch_prepared_run` is never called; no durable Run (covered by `test_create_run_commit_failure_does_not_trigger_provider_launch`). No rollback is added, matching current behavior.
-8. **Launch-result transaction owner.** `launch_prepared_run` owns only its post-launch commit (worker_pid or failed result). Legacy `create_run` owns the preparation commit. G3 Transaction A is caller-owned before launch. G4 Transaction B is caller-owned before launch. No conflict.
+4. **Canonical parity guarantee.** The `freeze_request_provenance` call arguments are moved verbatim; nothing at launch recomputes them. `request_sha256` is derived from persisted metadata via `build_batch`, pinned by `LEGACY_REQUEST_SHA256` (`test_request_release_provenance.py:20`), the Task 4 local fixture, and `test_prepare_run_remote_provenance_matches_legacy_request_identity`.
+5. **Relaunch preconditions.** A matching staged/unflushed `AnalysisRunModel` found by scanning `session.new` (checked before any query), `status != "pending"`, or `worker_pid is not None` → `ANALYSIS_RUN_NOT_LAUNCHABLE` (409). Durable commit ordering is a caller precondition.
+6. **`provider.launch` raises.** `run.status="failed"`, `run.error_type="ANALYSIS_FAILED"`, `run.error_message=str(exc)[:1000]`, committed; raised `PlatformError` code `ANALYSIS_FAILED` with fixed message: `"Unable to launch remote coordinator."` (remote) or `"Unable to launch local inference worker."` (local). The raw exception text is not the raised message.
+7. **Commit after prepare fails in legacy `create_run`.** Exception propagates; `launch_prepared_run` is never called; no durable Run (covered by the compatibility regression `test_create_run_prepare_commit_failure_skips_launch`). No rollback is added, matching current behavior.
+8. **Launch-result transaction owner.** `launch_prepared_run` owns only its post-launch commit (worker_pid or failed result). Legacy `create_run` owns the preparation commit. G3 Transaction A and G4 Transaction B are caller-owned before launch. No conflict.
 9. **Pinning tests.** `test_remote_create_run.py`, `test_analysis_runs.py`, `test_input_output_label_space.py`, `test_plugin_parameters_freeze.py`, `test_release_wiring.py`, `test_request_release_provenance.py`, `test_remote_execution_canonical.py`, `test_remote_request_freeze.py`, `test_remote_startup_recovery.py`, `test_local_worker_provider.py`, `test_executor_registry.py`, `test_execution_certificate.py`, `test_model_release.py`, `test_local_cpu_acceptance.py`, `test_cpn_local_cpu_acceptance.py`.
 10. **AnalysisRun schema change?** No. Required answer is YES (no change), confirmed by `test_analysis_run_schema_unchanged_by_g2` and the absence of any model/migration edit.
 
@@ -1388,16 +1412,24 @@ Require 0 failed / 0 errors (the current sealed baseline is `1400 passed, 28 ski
 ## Plan Self-Review
 
 1. `prepare_run` never commits/rolls back/flushes/launches — enforced by Task 1 code + tests.
-2. `backend/app/dataset_experiments/*` untouched — enforced by the one-file production scope.
-3. `AnalysisRun` schema untouched — pinned by Task 5 guard.
-4. Canonical remote request behavior unchanged — pinned by `LEGACY_REQUEST_SHA256` + parity tests.
-5. Launch does not rebuild remote provenance — token and request metadata are read from the persisted Run only.
-6. No automatic retry added.
-7. No `launch_requested_at` behavior added (G4 owns it).
-8. No G3/G4/G5 behavior enters G2 (boundary section).
-9. Legacy `create_run` remains compatible (Task 4 tests + existing suites).
-10. Every task has exact files, interfaces, tests, commands, and checkpoints.
-11. No TODO/TBD/XXX/hand-wavy placeholders.
+2. `launch_prepared_run` does not claim `Session.new` proves commit durability — durability is an explicit caller precondition; the guard is defensive and pre-query.
+3. The pending/unflushed guard runs before any `self.get`/query that could autoflush.
+4. Durable ordering remains caller-owned: `Transaction A COMMIT -> Transaction B COMMIT -> physical launch`.
+5. No remote prepare production behavior precedes its remote RED tests — Task 1 writes both RED test files first, then implements.
+6. The prepare seam is one coherent, independently reviewable deliverable (Task 1).
+7. The `create_run` refactor has a real failing delegation test (`test_create_run_composes_prepare_commit_launch`).
+8. The commit-failure test is classified as a compatibility regression, not a fake RED.
+9. No test module imports another test module — Task 4 defines its fixture locally and runs `test_request_release_provenance.py` directly.
+10. Failure-message semantics match current `AnalysisService` exactly (fixed raised message; raw text in `error_message`).
+11. `AnalysisRun` schema untouched — pinned by Task 4 guard.
+12. Canonical remote request behavior unchanged — pinned by `LEGACY_REQUEST_SHA256` + parity tests.
+13. Launch does not rebuild remote provenance.
+14. No automatic retry added.
+15. No `launch_requested_at` behavior added (G4 owns it).
+16. No G3/G4/G5 behavior enters G2 (boundary section).
+17. Legacy `create_run` remains compatible (Task 3 tests + existing suites).
+18. Every task has exact files, interfaces, tests, commands, and checkpoints.
+19. No TODO/TBD/XXX/hand-wavy placeholders.
 
 ---
 
