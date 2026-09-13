@@ -49,6 +49,7 @@ class DatasetExperimentItemRead(BaseModel):
     last_error_message: str | None
     created_at: datetime
     updated_at: datetime
+    latest_analysis_run_id: str | None = None
 
 
 class DatasetExperimentAttemptRead(BaseModel):

@@ -9,6 +9,7 @@ from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session
 
 from app.analysis.model import AnalysisRunModel
+from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
 from app.benchmarks.service import DatasetBenchmarkService, resolve_protocol_config
 from app.core.errors import PlatformError
 from app.dataset_experiments.model import (
@@ -65,6 +66,8 @@ class DatasetExperimentService:
             .where(DatasetExperimentItemModel.experiment_id == experiment_id)
             .order_by(DatasetExperimentItemModel.manifest_order)
         ).all()
+        items = [item for item, _ in rows]
+        attempts_by_item = self._load_attempts_by_item([item.id for item in items])
         return [
             DatasetExperimentItemRead(
                 id=item.id,
@@ -77,13 +80,17 @@ class DatasetExperimentService:
                 last_error_message=item.last_error_message,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
+                latest_analysis_run_id=(
+                    attempts_by_item[item.id][-1].analysis_run_id
+                    if attempts_by_item.get(item.id) else None
+                ),
             )
             for item, recording_name in rows
         ]
 
-    def list_attempts(self, item_id: str) -> list[DatasetExperimentAttemptRead]:
+    def list_attempts(self, item_id: str, *, experiment_id: str | None = None) -> list[DatasetExperimentAttemptRead]:
         item = self.session.get(DatasetExperimentItemModel, item_id)
-        if item is None:
+        if item is None or (experiment_id is not None and item.experiment_id != experiment_id):
             raise PlatformError("DATASET_EXPERIMENT_ITEM_NOT_FOUND", "Dataset experiment item was not found.", 404)
         rows = self.session.scalars(
             select(DatasetExperimentAttemptModel)
@@ -997,7 +1004,8 @@ class DatasetExperimentService:
         self.session.expire_all()
         return self.session.get(DatasetExperimentModel, experiment_id)
 
-    def refresh_coordinator_heartbeat(self, experiment_id, coordinator_token):
+    def refresh_coordinator_heartbeat(self, experiment_id, coordinator_token,
+                                      *, expected_status="running"):
         try:
             with self.session.no_autoflush:
                 result = self.session.execute(
@@ -1005,7 +1013,7 @@ class DatasetExperimentService:
                     .where(
                         DatasetExperimentModel.id == experiment_id,
                         DatasetExperimentModel.coordinator_token == coordinator_token,
-                        DatasetExperimentModel.status == "running",
+                        DatasetExperimentModel.status == expected_status,
                     )
                     .values(heartbeat_at=datetime.now(timezone.utc))
                     .execution_options(synchronize_session=False)
@@ -1264,7 +1272,8 @@ class DatasetExperimentService:
             raise
         return True
 
-    def _fail_experiment(self, experiment_id, coordinator_token, error_type, error_message):
+    def _fail_experiment(self, experiment_id, coordinator_token, error_type,
+                         error_message, *, expected_status="running"):
         try:
             with self.session.no_autoflush:
                 result = self.session.execute(
@@ -1272,7 +1281,7 @@ class DatasetExperimentService:
                     .where(
                         DatasetExperimentModel.id == experiment_id,
                         DatasetExperimentModel.coordinator_token == coordinator_token,
-                        DatasetExperimentModel.status == "running",
+                        DatasetExperimentModel.status == expected_status,
                     )
                     .values(
                         status="failed", error_type=error_type,
@@ -1342,3 +1351,458 @@ class DatasetExperimentService:
             "Item cannot be marked failed from its current state.",
             409,
         )
+
+    # ---------- G5 evaluation ownership ----------
+
+    def mark_experiment_completed(self, experiment_id, coordinator_token):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "evaluating",
+                    )
+                    .values(status="completed",
+                            completed_at=datetime.now(timezone.utc),
+                            error_type=None, error_message=None)
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
+    def link_evaluation(self, experiment_id, evaluation_id, coordinator_token):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "running",
+                        DatasetExperimentModel.dataset_evaluation_id.is_(None),
+                    )
+                    .values(dataset_evaluation_id=evaluation_id, status="evaluating")
+                    .execution_options(synchronize_session=False)
+                )
+            rowcount = int(result.rowcount or 0)
+            if rowcount != 1:
+                self.session.rollback()
+                return False
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return True
+
+    def build_evaluation_membership(self, experiment_id):
+        experiment = self._get(experiment_id)
+        items = list(self.session.scalars(
+            select(DatasetExperimentItemModel)
+            .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+            .order_by(DatasetExperimentItemModel.manifest_order)
+        ).all())
+        if not items:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Experiment has no items.", 409)
+        attempts_by_item = self._load_attempts_by_item([item.id for item in items])
+        run_ids = {
+            attempt.analysis_run_id
+            for attempts in attempts_by_item.values() for attempt in attempts
+        }
+        runs_by_id = self._load_runs_by_id(run_ids)
+        membership = []
+        for item in items:
+            if item.status != "completed":
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Evaluation requires every item completed.", 409)
+            attempts = attempts_by_item.get(item.id, [])
+            if not attempts:
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Completed item has no attempt.", 409)
+            latest = attempts[-1]
+            run = runs_by_id.get(latest.analysis_run_id)
+            if run is None or run.status != "completed":
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Latest attempt has no completed AnalysisRun.", 409)
+            if run.recording_id != item.recording_id:
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "AnalysisRun recording mismatch.", 409)
+            if (run.pipeline_id != experiment.plugin_id
+                    or run.pipeline_version != experiment.plugin_version
+                    or run.executor != experiment.executor):
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "AnalysisRun identity does not match the frozen experiment.", 409)
+            membership.append({"recording_id": item.recording_id,
+                               "analysis_run_id": run.id})
+        return membership
+
+    def validate_evaluation_linkage(self, experiment_id):
+        experiment = self._get(experiment_id)
+        evaluation_id = experiment.dataset_evaluation_id
+        if evaluation_id is None:
+            raise PlatformError("DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                                "Experiment has no linked DatasetEvaluation.", 409)
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked DatasetEvaluation is missing.", 409)
+        if evaluation.recording_manifest_hash != experiment.recording_manifest_hash:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation manifest hash mismatch.", 409)
+        if (evaluation.dataset_name != experiment.dataset_name
+                or evaluation.dataset_split != experiment.dataset_split
+                or evaluation.label_space != experiment.dataset_label_space):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation dataset identity mismatch.", 409)
+        if evaluation.evaluation_protocol != experiment.evaluation_protocol:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation protocol mismatch.", 409)
+        if (evaluation.pipeline_id != experiment.plugin_id
+                or evaluation.pipeline_version != experiment.plugin_version):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation pipeline identity mismatch.", 409)
+        experiment_items = list(self.session.scalars(
+            select(DatasetExperimentItemModel)
+            .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+            .order_by(DatasetExperimentItemModel.manifest_order)
+        ).all())
+        evaluation_items = list(self.session.scalars(
+            select(DatasetEvaluationItemModel)
+            .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
+            .order_by(DatasetEvaluationItemModel.manifest_order)
+        ).all())
+        membership = self.build_evaluation_membership(experiment_id)
+        if (len(evaluation_items) != len(experiment_items)
+                or len(membership) != len(experiment_items)):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation membership size mismatch.", 409)
+        experiment_order = [item.manifest_order for item in experiment_items]
+        evaluation_order = [item.manifest_order for item in evaluation_items]
+        if evaluation_order != experiment_order:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation manifest order mismatch.", 409)
+        for experiment_item, evaluation_item, expected in zip(
+                experiment_items, evaluation_items, membership):
+            if (evaluation_item.manifest_order != experiment_item.manifest_order
+                    or evaluation_item.recording_id != expected["recording_id"]
+                    or evaluation_item.analysis_run_id != expected["analysis_run_id"]):
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Linked evaluation membership mismatch.", 409)
+            if evaluation_item.status != "included":
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Linked evaluation item is not fully included.", 409)
+        if (evaluation.expected_recordings != len(experiment_items)
+                or evaluation.missing_recordings != 0
+                or evaluation.coverage != 1.0):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation is not complete.", 409)
+        return experiment, evaluation
+
+    def reset_interrupted_evaluation(self, experiment_id, evaluation_id,
+                                     coordinator_token):
+        """Generation-fenced metrics-only reset of an interrupted linked evaluation."""
+        try:
+            with self.session.no_autoflush:
+                fence = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "evaluating",
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                    )
+                    .values(heartbeat_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session=False)
+                )
+                if int(fence.rowcount or 0) != 1:
+                    self.session.rollback()
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_FENCE_LOST",
+                        "Coordinator generation no longer owns the experiment.", 409)
+                DatasetBenchmarkService(self.session).prepare_retry_evaluation(evaluation_id)
+            self.session.commit()
+        except PlatformError:
+            self.session.rollback()
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+        return True
+
+    def start_linked_evaluation(self, experiment_id, evaluation_id,
+                                coordinator_token, benchmark_job_manager):
+        """Generation-fenced + uniquely-claimed automatic evaluation start."""
+        try:
+            with self.session.no_autoflush:
+                claim = self.session.execute(
+                    update(DatasetEvaluationModel)
+                    .where(
+                        DatasetEvaluationModel.id == evaluation_id,
+                        DatasetEvaluationModel.status == "pending",
+                        DatasetEvaluationModel.worker_pid.is_(None),
+                        exists().where(
+                            DatasetExperimentModel.id == experiment_id,
+                            DatasetExperimentModel.status == "evaluating",
+                            DatasetExperimentModel.coordinator_token == coordinator_token,
+                            DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                        ),
+                    )
+                    .values(status="running", started_at=datetime.now(timezone.utc),
+                            error_type=None, error_message=None)
+                    .execution_options(synchronize_session=False)
+                )
+            if int(claim.rowcount or 0) != 1:
+                self.session.rollback()
+                result = self._diagnose_start_claim_miss(
+                    experiment_id, evaluation_id, coordinator_token)
+                self.session.rollback()
+                return result
+            self.session.commit()
+        except PlatformError:
+            self.session.rollback()
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+
+        self.session.rollback()
+
+        try:
+            worker_pid = benchmark_job_manager.start(evaluation_id)
+        except Exception as exc:
+            try:
+                with self.session.no_autoflush:
+                    failed = self.session.execute(
+                        update(DatasetEvaluationModel)
+                        .where(
+                            DatasetEvaluationModel.id == evaluation_id,
+                            DatasetEvaluationModel.status == "running",
+                            DatasetEvaluationModel.worker_pid.is_(None),
+                            exists().where(
+                                DatasetExperimentModel.id == experiment_id,
+                                DatasetExperimentModel.status == "evaluating",
+                                DatasetExperimentModel.coordinator_token == coordinator_token,
+                                DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                            ),
+                        )
+                        .values(status="failed", error_type="BENCHMARK_FAILED",
+                                error_message=str(exc)[:1000],
+                                completed_at=datetime.now(timezone.utc))
+                        .execution_options(synchronize_session=False)
+                    )
+                if int(failed.rowcount or 0) != 1:
+                    self.session.rollback()
+                    raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                        "Evaluation failure write lost its generation.", 409)
+                self.session.commit()
+            except PlatformError:
+                self.session.rollback()
+                raise
+            except Exception:
+                self.session.rollback()
+                raise
+            raise PlatformError("DATASET_EXPERIMENT_EVALUATION_FAILED",
+                                "Unable to start formal DatasetEvaluation.") from exc
+
+        try:
+            with self.session.no_autoflush:
+                persisted = self.session.execute(
+                    update(DatasetEvaluationModel)
+                    .where(
+                        DatasetEvaluationModel.id == evaluation_id,
+                        exists().where(
+                            DatasetExperimentModel.id == experiment_id,
+                            DatasetExperimentModel.status == "evaluating",
+                            DatasetExperimentModel.coordinator_token == coordinator_token,
+                            DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                        ),
+                    )
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            if int(persisted.rowcount or 0) != 1:
+                self.session.rollback()
+                raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                    "Evaluation PID persist lost its generation.", 409)
+            self.session.commit()
+        except PlatformError:
+            self.session.rollback()
+            raise
+        except Exception:
+            self.session.rollback()
+            return "uncertain"
+        return "started"
+
+    def _diagnose_start_claim_miss(self, experiment_id, evaluation_id,
+                                   coordinator_token):
+        generation = self.session.execute(
+            select(DatasetExperimentModel.status,
+                   DatasetExperimentModel.coordinator_token,
+                   DatasetExperimentModel.dataset_evaluation_id)
+            .where(DatasetExperimentModel.id == experiment_id)
+        ).one_or_none()
+        if (generation is None or generation[0] != "evaluating"
+                or generation[1] != coordinator_token
+                or generation[2] != evaluation_id):
+            raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                "Coordinator generation no longer owns the experiment.", 409)
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked DatasetEvaluation is missing.", 409)
+        if (evaluation.status in {"running", "completed", "failed"}
+                or (evaluation.status == "pending" and evaluation.worker_pid is not None)):
+            return "already_started"
+        raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Evaluation start claim missed in an impossible state.", 409)
+
+    def list_experiments(self):
+        experiments = list(self.session.scalars(
+            select(DatasetExperimentModel)
+            .order_by(DatasetExperimentModel.created_at, DatasetExperimentModel.id)
+        ).all())
+        return [self._to_read(experiment) for experiment in experiments]
+
+    def retry_evaluation(self, experiment_id, job_manager):
+        experiment = self._get(experiment_id)
+        if experiment.status != "failed":
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Only a failed experiment can retry evaluation.", 409)
+        if experiment.dataset_evaluation_id is None:
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Experiment has no linked evaluation to retry.", 409)
+        items = list(self.session.scalars(
+            select(DatasetExperimentItemModel)
+            .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+        ).all())
+        if not items:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Experiment has no items.", 409)
+        counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0}
+        for item in items:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        if (counts["completed"] != len(items) or counts["failed"] or
+                counts["queued"] or counts["running"]):
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Retry Evaluation requires complete inference.", 409)
+
+        experiment, evaluation = self.validate_evaluation_linkage(experiment_id)
+        if evaluation.status not in {"failed", "interrupted"}:
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Linked evaluation is not retryable.", 409)
+
+        experiment_snapshot = {
+            "status": experiment.status,
+            "completed_at": experiment.completed_at,
+            "heartbeat_at": experiment.heartbeat_at,
+            "coordinator_token": experiment.coordinator_token,
+            "worker_pid": experiment.worker_pid,
+            "error_type": experiment.error_type,
+            "error_message": experiment.error_message,
+            "dataset_evaluation_id": experiment.dataset_evaluation_id,
+        }
+        benchmarks = DatasetBenchmarkService(self.session)
+        evaluation_snapshot = benchmarks.snapshot_retry_evaluation(evaluation.id)
+        token = f"coord_{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        try:
+            benchmarks.prepare_retry_evaluation(evaluation.id)
+            claimed = self.session.execute(
+                update(DatasetExperimentModel)
+                .where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.status == "failed",
+                    DatasetExperimentModel.dataset_evaluation_id == evaluation.id,
+                )
+                .values(status="evaluating", coordinator_token=token, worker_pid=None,
+                        heartbeat_at=now, completed_at=None,
+                        error_type=None, error_message=None)
+                .execution_options(synchronize_session=False)
+            )
+            if int(claimed.rowcount or 0) != 1:
+                self.session.rollback()
+                raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                    "Retry Evaluation lost its ownership CAS.", 409)
+            self.session.commit()
+        except PlatformError:
+            self.session.rollback()
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+
+        try:
+            worker_pid = job_manager.start(experiment_id, token)
+        except Exception as exc:
+            restored = self._restore_retry_evaluation(
+                experiment_id, token, evaluation.id,
+                experiment_snapshot, evaluation_snapshot)
+            if not restored:
+                raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                    "Retry Evaluation lost its generation; no evaluation "
+                                    "was mutated.", 409) from exc
+            raise PlatformError("DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                                "Unable to start DatasetExperiment coordinator for "
+                                "evaluation retry.") from exc
+
+        try:
+            with self.session.no_autoflush:
+                persisted = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == token,
+                        DatasetExperimentModel.status == "evaluating",
+                    )
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            if int(persisted.rowcount or 0) != 1:
+                self.session.rollback()
+                raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                    "A newer generation owns the experiment.", 409)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        self.session.expire_all()
+        return self.session.get(DatasetExperimentModel, experiment_id)
+
+    def _restore_retry_evaluation(self, experiment_id, retry_token, evaluation_id,
+                                  experiment_snapshot, evaluation_snapshot):
+        try:
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "evaluating",
+                        DatasetExperimentModel.coordinator_token == retry_token,
+                        DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                    )
+                    .values(
+                        status=experiment_snapshot["status"],
+                        completed_at=experiment_snapshot["completed_at"],
+                        heartbeat_at=experiment_snapshot["heartbeat_at"],
+                        coordinator_token=experiment_snapshot["coordinator_token"],
+                        worker_pid=experiment_snapshot["worker_pid"],
+                        error_type=experiment_snapshot["error_type"],
+                        error_message=experiment_snapshot["error_message"],
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if int(claimed.rowcount or 0) != 1:
+                    self.session.rollback()
+                    return False
+                DatasetBenchmarkService(self.session).restore_retry_evaluation(
+                    evaluation_id, evaluation_snapshot)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return True
