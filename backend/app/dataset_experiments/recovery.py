@@ -8,6 +8,7 @@ from sqlalchemy import exists, or_, select, update
 
 from app.analysis.model import AnalysisRunModel
 from app.analysis.service import AnalysisService
+from app.benchmarks.model import DatasetEvaluationModel
 from app.core.errors import PlatformError
 from app.dataset_experiments.model import (
     DatasetExperimentAttemptModel,
@@ -28,7 +29,7 @@ class RecoveryReport:
     spawn_failures: int = 0
 
 
-_ACTIVE_RECOVERY_STATUSES = ("running",)
+_ACTIVE_RECOVERY_STATUSES = ("running", "evaluating")
 _AMBIGUOUS_ERROR_TYPE = "ANALYSIS_LAUNCH_AMBIGUOUS"
 _AMBIGUOUS_ERROR_MESSAGE = (
     "Local launch intent is durable but the run is still pending after platform "
@@ -42,8 +43,9 @@ def _now():
 
 
 def claim_experiment_generation(session, experiment_id, expected_token,
-                                startup_recovery_cutoff):
-    """Durably take ownership of a running Experiment under a fresh token."""
+                                startup_recovery_cutoff,
+                                statuses=("running", "evaluating")):
+    """Durably take ownership of an active Experiment under a fresh token."""
     fresh_token = f"coord_{uuid4().hex}"
     cutoff_predicate = or_(
         DatasetExperimentModel.heartbeat_at.is_(None),
@@ -53,7 +55,7 @@ def claim_experiment_generation(session, experiment_id, expected_token,
         update(DatasetExperimentModel)
         .where(
             DatasetExperimentModel.id == experiment_id,
-            DatasetExperimentModel.status == "running",
+            DatasetExperimentModel.status.in_(statuses),
             cutoff_predicate,
         )
         .values(
@@ -213,9 +215,10 @@ def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
 
 
 def start_recovered_coordinator(session, experiment_id, coordinator_token,
-                                job_manager):
+                                job_manager,
+                                statuses=("running", "evaluating")):
     """Spawn the recovered coordinator outside any transaction, then persist the
-    PID guarded by the fresh token and ``status == running``.
+    PID guarded by the fresh token and an active status.
 
     Precondition: the CALLER has no open SQLAlchemy transaction when
     ``job_manager.start()`` is invoked. ``recover_dataset_experiments``
@@ -223,7 +226,7 @@ def start_recovered_coordinator(session, experiment_id, coordinator_token,
     function itself opens NO SELECT/read transaction before spawning; it spawns
     outside a transaction and only then opens the PID-persistence transaction.
 
-    On spawn failure the Experiment is left ``running`` with the fresh token and
+    On spawn failure the Experiment is left with the fresh token and
     ``worker_pid NULL`` so the next startup recovery can retry. Returns the PID,
     or ``None`` on spawn failure.
     """
@@ -238,7 +241,7 @@ def start_recovered_coordinator(session, experiment_id, coordinator_token,
                 .where(
                     DatasetExperimentModel.id == experiment_id,
                     DatasetExperimentModel.coordinator_token == coordinator_token,
-                    DatasetExperimentModel.status == "running",
+                    DatasetExperimentModel.status.in_(statuses),
                 )
                 .values(worker_pid=worker_pid)
                 .execution_options(synchronize_session=False)
@@ -251,16 +254,73 @@ def start_recovered_coordinator(session, experiment_id, coordinator_token,
     return worker_pid
 
 
+def normalize_orphaned_evaluation(session, experiment_id, evaluation_id,
+                                  coordinator_token):
+    """Generation-fenced restart normalization of ``pending + PID`` evaluations.
+
+    Atomic DB-side UPDATE proving the current Experiment generation/link. On a
+    zero-row miss: fresh generation check -> ``FENCE_LOST`` when stale, otherwise
+    a legitimate no-op (the Evaluation is no longer ``pending`` + PID).
+    """
+    statement = (
+        update(DatasetEvaluationModel)
+        .where(
+            DatasetEvaluationModel.id == evaluation_id,
+            DatasetEvaluationModel.status == "pending",
+            DatasetEvaluationModel.worker_pid.is_not(None),
+            exists().where(
+                DatasetExperimentModel.id == experiment_id,
+                DatasetExperimentModel.status == "evaluating",
+                DatasetExperimentModel.coordinator_token == coordinator_token,
+                DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+            ),
+        )
+        .values(
+            status="interrupted",
+            error_type="BENCHMARK_INTERRUPTED",
+            error_message="Benchmark worker did not survive platform restart.",
+            completed_at=_now(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    try:
+        result = session.execute(statement)
+        rowcount = int(result.rowcount or 0)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    if rowcount == 1:
+        return True
+
+    generation = session.execute(
+        select(DatasetExperimentModel.status,
+               DatasetExperimentModel.coordinator_token,
+               DatasetExperimentModel.dataset_evaluation_id)
+        .where(DatasetExperimentModel.id == experiment_id)
+    ).one_or_none()
+    if (generation is None or generation[0] != "evaluating"
+            or generation[1] != coordinator_token
+            or generation[2] != evaluation_id):
+        raise PlatformError(
+            "DATASET_EXPERIMENT_FENCE_LOST",
+            "Coordinator generation no longer owns the experiment.",
+            409,
+        )
+    return False
+
+
 def recover_dataset_experiments(session, *, job_manager, registry,
                                 model_release_store, executor_registry,
                                 startup_recovery_cutoff):
     """Restart recovery for active DatasetExperiments.
 
-    Selects only ``running`` Experiments (G5 owns ``evaluating``). For each:
-    claim a fresh generation under the fixed ``startup_recovery_cutoff``,
-    reconcile real AnalysisRun state, repair local pending launch gaps, fail
-    closed on invariants, then spawn one coordinator. Never reruns completed
-    Items and never auto-retries failed Items.
+    Selects ``running`` and ``evaluating`` Experiments. For each: claim a fresh
+    generation under the fixed ``startup_recovery_cutoff``, then branch:
+    ``running`` -> sealed G4 inference reconciliation + local repair;
+    ``evaluating`` -> generation-fenced evaluation normalization only (ZERO
+    inference reconciliation, ZERO AnalysisRuns). Finally spawn one coordinator.
+    Never reruns completed Items and never auto-retries failed Items.
     """
     report = RecoveryReport()
     ds = DatasetExperimentService(
@@ -290,21 +350,36 @@ def recover_dataset_experiments(session, *, job_manager, registry,
             continue
         report.claimed += 1
         session.expire_all()
+        current = session.execute(
+            select(DatasetExperimentModel.status,
+                   DatasetExperimentModel.dataset_evaluation_id)
+            .where(DatasetExperimentModel.id == experiment_id)
+        ).one_or_none()
+        current_status = current[0] if current is not None else None
+        evaluation_id = current[1] if current is not None else None
         try:
-            ds.reconcile_items(experiment_id, coordinator_token=claimed_token)
-            report = repair_local_pending_runs(
-                session, ds, analysis,
-                experiment_id=experiment_id,
-                coordinator_token=claimed_token,
-                report=report,
-            )
+            if current_status == "evaluating":
+                # Evaluating takeover: NO inference reconciliation/repair.
+                if evaluation_id is not None:
+                    normalize_orphaned_evaluation(
+                        session, experiment_id, evaluation_id, claimed_token
+                    )
+            else:
+                ds.reconcile_items(experiment_id, coordinator_token=claimed_token)
+                report = repair_local_pending_runs(
+                    session, ds, analysis,
+                    experiment_id=experiment_id,
+                    coordinator_token=claimed_token,
+                    report=report,
+                )
         except PlatformError as exc:
             session.rollback()
             if exc.code == "DATASET_EXPERIMENT_FENCE_LOST":
                 report.skipped += 1
                 continue
             ds._fail_experiment(
-                experiment_id, claimed_token, exc.code, exc.message
+                experiment_id, claimed_token, exc.code, exc.message,
+                expected_status=current_status or "running",
             )
             report.invariants_failed += 1
             continue

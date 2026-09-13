@@ -228,7 +228,7 @@ def test_all_success_seam_restart_no_new_run_and_still_running(client):
         assert fresh.query(AnalysisRunModel).count() == 2
 
 
-def test_evaluating_experiment_not_selected_by_g4(client):
+def test_evaluating_experiment_selected_by_g5(client):
     seed_dataset(client, count=1)
     session, ds, analysis, provider = local_services(client)
     experiment = create_experiment(ds)
@@ -236,11 +236,16 @@ def test_evaluating_experiment_not_selected_by_g4(client):
     experiment.coordinator_token = "T"
     session.commit()
 
-    report, _ = _recover(client, provider=provider, job_manager=RecordingJobManager())
-    assert report.claimed == 0
-    assert report.coordinators_started == 0
+    job_manager = RecordingJobManager()
+    report, _ = _recover(client, provider=provider, job_manager=job_manager,
+                         cutoff=_later_cutoff())
+    assert report.claimed == 1
+    assert report.coordinators_started == 1
+    assert len(job_manager.calls) == 1
     with client.app.state.database.session_factory() as fresh:
-        assert fresh.get(DatasetExperimentModel, experiment.id).status == "evaluating"
+        stored = fresh.get(DatasetExperimentModel, experiment.id)
+        assert stored.status == "evaluating"
+        assert stored.coordinator_token != "T"
 
 
 def test_recover_pid_commit_failure_rolls_back(client, monkeypatch):

@@ -165,9 +165,11 @@ def test_invariant_failure_rolls_back_before_fail_experiment(client, monkeypatch
     observed = {}
     real_fail = DatasetExperimentService._fail_experiment
 
-    def wrapper(self, experiment_id, coordinator_token, error_type, error_message):
+    def wrapper(self, experiment_id, coordinator_token, error_type, error_message,
+                **kwargs):
         observed["in_transaction"] = self.session.in_transaction()
-        return real_fail(self, experiment_id, coordinator_token, error_type, error_message)
+        return real_fail(self, experiment_id, coordinator_token, error_type,
+                         error_message, **kwargs)
 
     monkeypatch.setattr(DatasetExperimentService, "_fail_experiment", wrapper)
 
@@ -411,7 +413,7 @@ def test_duplicate_active_attempt_invariant_fails_experiment_zero_launch(client)
 def test_non_running_experiments_untouched(client):
     seed_dataset(client, count=1)
     session, ds, analysis, provider = local_services(client)
-    statuses = ["pending", "completed", "failed", "evaluating"]
+    statuses = ["pending", "completed", "failed"]
     ids = []
     for status in statuses:
         experiment = create_experiment(ds)
