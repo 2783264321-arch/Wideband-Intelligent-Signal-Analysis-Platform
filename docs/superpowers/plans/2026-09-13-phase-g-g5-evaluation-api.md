@@ -398,32 +398,39 @@ if summary.queued == 0 and summary.running == 0 and summary.failed == 0 and summ
     if benchmark_services_factory is None or benchmark_job_manager is None:
         return CoordinatorOutcome.INFERENCE_COMPLETE      # sealed G3-C/G4 behavior
     evaluation = self._ensure_evaluation(...)             # G5 atomic link (status now evaluating)
+    # From here the Experiment is durably `evaluating`. EVERY PlatformError below
+    # is handled with evaluating ownership; none may reach the running-only catch.
     try:
         ds.start_linked_evaluation(experiment_id, evaluation.id, token,
                                    benchmark_job_manager)
+        return CoordinatorOutcome.WAITING   # started / uncertain / already_started
     except PlatformError as exc:
         session.rollback()
         if exc.code == "DATASET_EXPERIMENT_FENCE_LOST":
             return CoordinatorOutcome.FENCE_LOST
-        if exc.code == "DATASET_EXPERIMENT_EVALUATION_FAILED":
-            # generation-fenced evaluation running -> failed already committed
-            ds._fail_experiment(experiment_id, token,
-                                "DATASET_EXPERIMENT_EVALUATION_FAILED",
-                                exc.message, expected_status="evaluating")
-            return CoordinatorOutcome.INVARIANT_FAILED
-        raise
+        error_type = (
+            "DATASET_EXPERIMENT_EVALUATION_FAILED"
+            if exc.code == "DATASET_EXPERIMENT_EVALUATION_FAILED"
+            else exc.code
+        )
+        if not ds._fail_experiment(experiment_id, token, error_type, exc.message,
+                                   expected_status="evaluating"):
+            return CoordinatorOutcome.FENCE_LOST
+        return CoordinatorOutcome.INVARIANT_FAILED
     except Exception:
-        # spawn state uncertain: NEVER fail the Experiment; reconcile next iteration
+        # Preserve accepted start-uncertainty semantics: do not false-fail an
+        # outcome whose physical spawn state may be unknowable.
         session.rollback()
         return CoordinatorOutcome.WAITING
-    return CoordinatorOutcome.WAITING
 ```
 
 Special-case: this handoff is the ONLY place where a `running` step can mutate a
 now-`evaluating` Experiment. It never calls the unfenced
 `DatasetBenchmarkService.start_evaluation`; it calls
-`DatasetExperimentService.start_linked_evaluation` and projects outcomes with
-`expected_status="evaluating"`, never through the running-only catch.
+`DatasetExperimentService.start_linked_evaluation` and projects EVERY post-link
+`PlatformError` (including `DATASET_EXPERIMENT_INVARIANT_VIOLATION` from
+`_diagnose_start_claim_miss`) with `expected_status="evaluating"`, never through
+the running-only catch. No post-link PlatformError escapes.
 
 ### Start-uncertainty semantics (conceptual class `DATASET_EXPERIMENT_EVALUATION_START_UNCERTAIN`)
 
@@ -899,17 +906,39 @@ Add:
             setattr(evaluation, field, value)
         return evaluation
 
+    def _evaluation_is_dataset_experiment_managed(self, evaluation_id):
+        from app.dataset_experiments.model import DatasetExperimentModel
+        return bool(self.session.scalar(
+            select(exists().where(
+                DatasetExperimentModel.dataset_evaluation_id == evaluation_id
+            ))
+        ))
+
     def retry_evaluation(self, evaluation_id):
+        # OWNERSHIP: a DatasetExperiment-linked Evaluation is orchestration-managed
+        # and MUST NOT be retried through the generic benchmark API; that would
+        # leave Experiment=failed while the Evaluation advances out-of-band.
+        self.get_evaluation(evaluation_id)   # 404 if missing
+        if self._evaluation_is_dataset_experiment_managed(evaluation_id):
+            raise PlatformError(
+                "BENCHMARK_MANAGED_BY_DATASET_EXPERIMENT",
+                "This DatasetEvaluation is managed by DatasetExperiment; use the "
+                "DatasetExperiment Retry Evaluation endpoint.",
+                409,
+            )
         evaluation = self.prepare_retry_evaluation(evaluation_id)
         self.session.commit()
         self.session.refresh(evaluation)
         return evaluation
 ```
 
-`retry_evaluation` public result is unchanged (status `pending`, metrics cleared).
-`mark_linked_evaluation_interrupted` is intentionally NOT a benchmark helper:
-restart normalization is an Experiment-generation-fenced write owned by
-`dataset_experiments/recovery.py` (see Task 4).
+`prepare_retry_evaluation` stays transaction-neutral and does NOT reject linked
+evaluations: it is used internally by the evaluating coordinator interrupted
+recovery and by DatasetExperiment explicit Retry Evaluation. Generic retry
+behavior for UNLINKED evaluations is byte-compatible.
+
+NOTE: G5 adds `exists` to the `app.benchmarks.service` SQLAlchemy imports
+(`from sqlalchemy import exists, func, select, update`).
 
 Tests:
 
@@ -932,7 +961,16 @@ Tests:
   `completed` and only records `worker_pid`.
 - `test_prepare_retry_evaluation_stages_without_commit` — no commit; fresh Session
   still sees the old status.
-- `test_retry_evaluation_public_behavior_unchanged`.
+- `test_retry_evaluation_public_behavior_unchanged` (UNLINKED failed/interrupted
+  → pending, metrics cleared).
+- `test_retry_evaluation_rejects_dataset_experiment_linked_failed` — a
+  `DatasetExperiment.dataset_evaluation_id` referencing this failed Evaluation →
+  `BENCHMARK_MANAGED_BY_DATASET_EXPERIMENT` (409); Experiment and Evaluation
+  unchanged.
+- `test_retry_evaluation_rejects_dataset_experiment_linked_interrupted` — same
+  for an interrupted linked Evaluation; zero mutation.
+- `test_prepare_retry_evaluation_allows_linked_evaluation` — the neutral seam does
+  NOT reject a linked Evaluation (internal use).
 - `test_restore_retry_evaluation_roundtrip`.
 - Existing benchmark suites unchanged.
 
@@ -1427,6 +1465,7 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
                                     "Retry Evaluation lost its ownership CAS.", 409)
             self.session.commit()
         except PlatformError:
+            self.session.rollback()
             raise
         except Exception:
             self.session.rollback()
@@ -1569,6 +1608,9 @@ Tests (`test_dataset_experiment_evaluation_ownership.py`):
   Evaluation and Experiment mutation; `FENCE_LOST`)
 - `test_retry_evaluation_concurrent_one_winner`
 - `test_retry_evaluation_pid_cas_loss_does_not_compensate_newer_generation`
+- `test_retry_evaluation_prepare_platform_error_rollback_session_reusable` (a
+  `prepare_retry_evaluation` rejection in Transaction 1 → rollback → session not
+  in transaction and reusable)
 - `test_list_experiments_derived_counts`
 - `test_list_attempts_ownership_validation`
 
@@ -1671,6 +1713,15 @@ Tests:
   durable `running`; startup stale handler → `interrupted`; coordinator resets +
   re-claims + spawns once; ZERO AnalysisRuns).
 - `test_running_experiment_with_preexisting_evaluation_link_fails_closed_zero_spawn`.
+- `test_post_link_invariant_platformerror_fails_experiment_under_evaluating_guard`
+  (`_ensure_evaluation` links; `start_linked_evaluation` then raises
+  `DATASET_EXPERIMENT_INVARIANT_VIOLATION`; Experiment is failed under
+  `expected_status="evaluating"`; NOT stranded `evaluating`).
+- `test_post_link_stale_token_failure_projection_returns_fence_lost` (generation
+  rotates before the failure projection → `FENCE_LOST`, zero mutation to the
+  newer generation).
+- `test_post_link_no_platformerror_uses_running_only_projection` (guard that no
+  post-link path calls `_fail_experiment` with the default `expected_status`).
 - `test_benchmark_start_failure_after_link_fails_evaluating_experiment` (link
   commits, definitive start failure; Experiment ends `failed`, never stranded
   `evaluating`).
@@ -1879,6 +1930,26 @@ Baseline before G5: `1599 passed, 28 skipped`; require a fresh summary with
 - PID CAS loss after successful spawn does not compensate a newer generation;
 - zero new Attempts / AnalysisRuns / Item mutations.
 
+### Linked generic retry ownership
+- unlinked generic benchmark retry unchanged (`failed`/`interrupted` → `pending`);
+- linked failed generic retry → `BENCHMARK_MANAGED_BY_DATASET_EXPERIMENT` (409);
+- linked interrupted generic retry → 409;
+- rejection mutates neither Experiment nor Evaluation;
+- DatasetExperiment explicit Retry Evaluation still works via the neutral seam;
+- evaluating coordinator interrupted metrics retry still works via the neutral
+  seam.
+
+### Cross-status handoff
+- a post-link invariant `PlatformError` fails the Experiment under
+  `expected_status="evaluating"`; it is never stranded evaluating;
+- a post-link stale-token failure projection returns `FENCE_LOST` with zero
+  mutation;
+- no post-link error uses the running-only failure projection.
+
+### Session hygiene
+- Retry Evaluation Transaction 1 `PlatformError` leaves the Session not in a
+  transaction and reusable.
+
 ### Evaluating write fencing
 - stale coordinator cannot reset `interrupted -> pending`;
 - stale recovery cannot normalize `pending + PID -> interrupted`;
@@ -1975,6 +2046,22 @@ running path.
     pending); PID persistence writes only PID. PASS
 34. Crash after claim-before-spawn is recoverable via the existing
     `mark_stale_running_evaluations_interrupted` → metrics-only retry. PASS
+35. Generic benchmark retry cannot bypass DatasetExperiment Retry Evaluation for
+    a linked Evaluation (`BENCHMARK_MANAGED_BY_DATASET_EXPERIMENT`). PASS
+36. Unlinked generic benchmark retry behavior is unchanged. PASS
+37. `prepare_retry_evaluation` stays transaction-neutral and does not reject
+    linked evaluations, so interrupted-recovery and explicit Retry Evaluation
+    still work. PASS
+38. Once the `running -> evaluating` link commits, EVERY `PlatformError` in the
+    handoff is handled with evaluating ownership; none falls into the running-only
+    catch. PASS
+39. A post-link failure projection that loses the generation returns `FENCE_LOST`
+    with zero mutation. PASS
+40. Durable Evaluation `pending -> running` start claim remains unchanged. PASS
+41. Retry Evaluation Transaction 1 `PlatformError` rolls back; no transaction
+    leak. PASS
+42. Linked generic retry rejection mutates neither Experiment nor Evaluation. PASS
+43. No schema/G6/frontend/remote leakage. PASS
 
 ---
 
