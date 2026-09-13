@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.remote_execution.recovery import mark_stale_local_cpu_runs_interrupted
+from app.remote_execution.recovery import mark_stale_local_runs_interrupted
 from app.recordings.model import RecordingModel
 
 
@@ -28,23 +28,25 @@ def _get_run_status(client, run_id):
         return session.get(AnalysisRunModel, run_id).status
 
 
-def test_stale_helper_interrupts_local_cpu_only(client):
-    _add_run(client, "run_local", "local_cpu", "running")
+def test_stale_helper_interrupts_local_running_only(client):
+    _add_run(client, "run_cpu", "local_cpu", "running")
+    _add_run(client, "run_gpu", "local_gpu", "running")
+    _add_run(client, "run_remote", "remote_gpu", "running")
+    with client.app.state.database.session_factory() as session:
+        n = mark_stale_local_runs_interrupted(session)
+    assert n == 2
+    assert _get_run_status(client, "run_cpu") == "interrupted"
+    assert _get_run_status(client, "run_gpu") == "interrupted"
+    assert _get_run_status(client, "run_remote") == "running"
+
+
+def test_legacy_stale_helper_alias_delegates(client):
+    from app.remote_execution.recovery import mark_stale_local_cpu_runs_interrupted
+
+    _add_run(client, "run_gpu", "local_gpu", "running")
     _add_run(client, "run_remote", "remote_gpu", "running")
     with client.app.state.database.session_factory() as session:
         n = mark_stale_local_cpu_runs_interrupted(session)
     assert n == 1
-    assert _get_run_status(client, "run_local") == "interrupted"
-    assert _get_run_status(client, "run_remote") == "running"
-
-
-def test_legacy_stale_helper_delegates_to_local_only(client):
-    from app.analysis.service import mark_stale_running_runs_interrupted
-
-    _add_run(client, "run_local", "local_cpu", "running")
-    _add_run(client, "run_remote", "remote_gpu", "running")
-    with client.app.state.database.session_factory() as session:
-        n = mark_stale_running_runs_interrupted(session)
-    assert n == 1
-    assert _get_run_status(client, "run_local") == "interrupted"
+    assert _get_run_status(client, "run_gpu") == "interrupted"
     assert _get_run_status(client, "run_remote") == "running"

@@ -5,7 +5,7 @@ from app.recordings.model import RecordingModel
 from app.remote_execution.recovery import (
     coordinate_orphaned_remote_runs,
     find_orphaned_remote_runs,
-    mark_stale_local_cpu_runs_interrupted,
+    mark_stale_local_runs_interrupted,
     rotate_coordinator_token,
 )
 
@@ -56,14 +56,18 @@ def _get_run_status(client, run_id):
         return run.status, run.execution_metadata_json.get("coordinator_token")
 
 
-def test_mark_stale_interrupts_local_cpu_running_only(client):
-    _add_run(client, "run_local", "local_cpu", "running", token="t1")
-    _add_run(client, "run_remote", "remote_gpu", "running", token="t2")
+def test_mark_stale_interrupts_local_running_only(client):
+    _add_run(client, "run_cpu", "local_cpu", "running", token="t1")
+    _add_run(client, "run_gpu", "local_gpu", "running", token="t2")
+    _add_run(client, "run_gpu_pending", "local_gpu", "pending", token="t3")
+    _add_run(client, "run_remote", "remote_gpu", "running", token="t4")
     with client.app.state.database.session_factory() as session:
-        n = mark_stale_local_cpu_runs_interrupted(session)
-    assert _get_run_status(client, "run_local")[0] == "interrupted"
-    assert _get_run_status(client, "run_remote")[0] == "running"  # preserved
-    assert n == 1
+        n = mark_stale_local_runs_interrupted(session)
+    assert n == 2
+    assert _get_run_status(client, "run_cpu")[0] == "interrupted"
+    assert _get_run_status(client, "run_gpu")[0] == "interrupted"
+    assert _get_run_status(client, "run_gpu_pending")[0] == "pending"   # untouched
+    assert _get_run_status(client, "run_remote")[0] == "running"        # preserved
 
 
 def test_startup_preserves_remote_pending_and_running(client):

@@ -1,7 +1,7 @@
-"""Startup recovery for remote AnalysisRuns.
+"""Startup recovery for AnalysisRuns.
 
-- ``local_cpu`` ``running`` runs are interrupted on startup (unchanged
-  semantics, scoped to ``local_cpu`` only).
+- ``local_cpu`` *and* ``local_gpu`` ``running`` runs are interrupted on startup
+  (they run as out-of-process local workers that cannot survive a restart).
 - ``remote_gpu`` ``pending``/``running`` runs are NEVER blindly interrupted:
   when valid remote config exists they are re-coordinated under a freshly
   rotated local fencing token; otherwise they are left untouched and no
@@ -18,13 +18,18 @@ from sqlalchemy.orm import Session
 from app.analysis.model import AnalysisRunModel
 from app.remote_execution.startup import rotate_coordinator_token
 
+_LOCAL_EXECUTORS = ("local_cpu", "local_gpu")
 
-def mark_stale_local_cpu_runs_interrupted(session: Session) -> int:
-    """Interrupt stale ``local_cpu`` running runs only. Remote runs untouched."""
+
+def mark_stale_local_runs_interrupted(session: Session) -> int:
+    """Interrupt stale running LOCAL runs (``local_cpu`` + ``local_gpu``).
+
+    Remote runs are never touched by this local helper.
+    """
     statement = (
         update(AnalysisRunModel)
         .where(AnalysisRunModel.status == "running")
-        .where(AnalysisRunModel.executor == "local_cpu")
+        .where(AnalysisRunModel.executor.in_(_LOCAL_EXECUTORS))
         .values(
             status="interrupted",
             error_type="ANALYSIS_INTERRUPTED",
@@ -35,6 +40,10 @@ def mark_stale_local_cpu_runs_interrupted(session: Session) -> int:
     result = session.execute(statement)
     session.commit()
     return int(result.rowcount or 0)
+
+
+# Backward-compatible alias for the previous local_cpu-scoped name.
+mark_stale_local_cpu_runs_interrupted = mark_stale_local_runs_interrupted
 
 
 def find_orphaned_remote_runs(session: Session) -> list[str]:

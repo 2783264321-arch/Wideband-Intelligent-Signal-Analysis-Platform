@@ -10,7 +10,7 @@ def test_startup_recovery_order(settings, monkeypatch):
     import app.dataset_experiments.recovery as dr
 
     monkeypatch.setattr(
-        rr, "mark_stale_local_cpu_runs_interrupted",
+        rr, "mark_stale_local_runs_interrupted",
         lambda session: calls.append("local_stale"),
     )
     monkeypatch.setattr(
@@ -33,7 +33,7 @@ def test_startup_recovery_order_with_remote(settings, monkeypatch):
     import app.dataset_experiments.recovery as dr
 
     monkeypatch.setattr(
-        rr, "mark_stale_local_cpu_runs_interrupted",
+        rr, "mark_stale_local_runs_interrupted",
         lambda session: calls.append("local_stale"),
     )
     monkeypatch.setattr(

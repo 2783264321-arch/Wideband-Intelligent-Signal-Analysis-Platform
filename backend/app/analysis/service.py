@@ -17,14 +17,14 @@ from app.remote_execution.executor import RemoteExecutorProbe
 
 
 def mark_stale_running_runs_interrupted(session: Session) -> int:
-    """Interrupt stale ``local_cpu`` running runs only.
+    """Interrupt stale running LOCAL runs (``local_cpu`` + ``local_gpu``).
 
     Remote ``remote_gpu`` runs are never blindly interrupted here; they are
     re-coordinated at startup (see ``remote_execution.recovery``).
     """
-    from app.remote_execution.recovery import mark_stale_local_cpu_runs_interrupted
+    from app.remote_execution.recovery import mark_stale_local_runs_interrupted
 
-    return mark_stale_local_cpu_runs_interrupted(session)
+    return mark_stale_local_runs_interrupted(session)
 
 
 class AnalysisService:

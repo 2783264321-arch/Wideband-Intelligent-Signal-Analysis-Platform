@@ -137,10 +137,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     with app.state.database.session_factory() as recovery_session:
         from app.remote_execution.recovery import (
             coordinate_orphaned_remote_runs,
-            mark_stale_local_cpu_runs_interrupted,
+            mark_stale_local_runs_interrupted,
         )
 
-        mark_stale_local_cpu_runs_interrupted(recovery_session)
+        mark_stale_local_runs_interrupted(recovery_session)
         mark_stale_running_evaluations_interrupted(recovery_session)
         if app.state.remote_config_available and app.state.remote_coordinator_launcher is not None:
             coordinate_orphaned_remote_runs(
