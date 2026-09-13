@@ -282,3 +282,57 @@ def test_launch_failure_preserves_intent_and_failed_run(client):
         assert stored_run.status == "failed"
         assert stored_run.error_type == "ANALYSIS_FAILED"
         assert stored_run.error_message == "boom"
+
+
+# ---------------------------------------------------------------------------
+# Plan A1 / Task 4 — authority before intent + pending-Run terminalization
+# ---------------------------------------------------------------------------
+
+
+def _owned_attempt_with_token(client, token="T"):
+    session, ds, analysis, provider, experiment, item, attempt = _owned_attempt(client)
+    experiment.coordinator_token = token
+    session.commit()
+    return session, ds, analysis, provider, experiment, item, attempt
+
+
+def test_authority_missing_before_intent_terminalizes_run(client):
+    session, ds, analysis, provider, experiment, item, attempt = _owned_attempt_with_token(client)
+    run_id = attempt.analysis_run_id
+    ds.executor_registry._providers.pop("local_cpu")  # provider disappears
+
+    with pytest.raises(PlatformError) as exc:
+        ds.launch_item_attempt(
+            experiment_id=experiment.id, item_id=item.id, attempt_id=attempt.id,
+            analysis_service=analysis, coordinator_token="T",
+        )
+    assert exc.value.code == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    with client.app.state.database.session_factory() as fresh:
+        att = fresh.get(DatasetExperimentAttemptModel, attempt.id)
+        run = fresh.get(AnalysisRunModel, run_id)
+        itm = fresh.get(DatasetExperimentItemModel, item.id)
+    assert att.launch_requested_at is None            # no intent claimed
+    assert run.status == "interrupted"                # terminalized
+    assert run.error_type == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    assert run.worker_pid is None
+    assert itm.status == "running"                    # projected failed by reconcile
+
+
+def test_authority_fail_close_requires_generation(client):
+    session, ds, analysis, provider, experiment, item, attempt = _owned_attempt_with_token(client, token="T")
+    run_id = attempt.analysis_run_id
+    ds.executor_registry._providers.pop("local_cpu")
+    experiment.coordinator_token = "T2"               # generation rotated
+    session.commit()
+
+    with pytest.raises(PlatformError) as exc:
+        ds.launch_item_attempt(
+            experiment_id=experiment.id, item_id=item.id, attempt_id=attempt.id,
+            analysis_service=analysis, coordinator_token="T",  # stale
+        )
+    assert exc.value.code == "DATASET_EXPERIMENT_FENCE_LOST"
+    with client.app.state.database.session_factory() as fresh:
+        run = fresh.get(AnalysisRunModel, run_id)
+        att = fresh.get(DatasetExperimentAttemptModel, attempt.id)
+    assert run.status == "pending"                    # stale actor terminalized nothing
+    assert att.launch_requested_at is None

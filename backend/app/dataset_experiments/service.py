@@ -24,11 +24,87 @@ from app.dataset_experiments.schema import (
 )
 from app.pipelines.plugin import validate_plugin_parameters
 from app.recordings.model import RecordingModel
+from app.remote_execution.runtime import FROZEN_AUTHORITY_ITEM_CODES, RuntimeDescriptor
 
 if TYPE_CHECKING:
     from app.analysis.service import AnalysisService
 
 _ITEM_STATUSES = ("queued", "running", "completed", "failed")
+
+
+def cas_fail_closed_pending_run(session, *, experiment_id, coordinator_token,
+                                item_id, attempt_id, run_id, error_type, error_message):
+    """Generation-fenced ``pending -> interrupted`` for an unlaunched run.
+
+    Fence: experiment running + coordinator_token AND item running AND attempt
+    binds the item/run. Returns ``"interrupted"`` or ``"already_interrupted"``;
+    raises ``DATASET_EXPERIMENT_FENCE_LOST`` for a stale generation.
+    """
+    statement = (
+        update(AnalysisRunModel)
+        .where(
+            AnalysisRunModel.id == run_id,
+            AnalysisRunModel.status == "pending",
+            exists().where(
+                DatasetExperimentModel.id == experiment_id,
+                DatasetExperimentModel.status == "running",
+                DatasetExperimentModel.coordinator_token == coordinator_token,
+            ),
+            exists().where(
+                DatasetExperimentItemModel.id == item_id,
+                DatasetExperimentItemModel.experiment_id == experiment_id,
+                DatasetExperimentItemModel.status == "running",
+            ),
+            exists().where(
+                DatasetExperimentAttemptModel.id == attempt_id,
+                DatasetExperimentAttemptModel.experiment_item_id == item_id,
+                DatasetExperimentAttemptModel.analysis_run_id == run_id,
+            ),
+        )
+        .values(
+            status="interrupted",
+            error_type=error_type,
+            error_message=error_message,
+            finished_at=datetime.now(timezone.utc),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    try:
+        result = session.execute(statement)
+        rowcount = int(result.rowcount or 0)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    if rowcount == 1:
+        return "interrupted"
+
+    generation = session.execute(
+        select(DatasetExperimentModel.status, DatasetExperimentModel.coordinator_token)
+        .where(DatasetExperimentModel.id == experiment_id)
+    ).one_or_none()
+    if generation is None or generation[0] != "running" or generation[1] != coordinator_token:
+        raise PlatformError(
+            "DATASET_EXPERIMENT_FENCE_LOST",
+            "Coordinator generation no longer owns the experiment.",
+            409,
+        )
+    run_status = session.execute(
+        select(AnalysisRunModel.status).where(AnalysisRunModel.id == run_id)
+    ).scalar_one_or_none()
+    if run_status == "interrupted":
+        return "already_interrupted"
+    if run_status is None:
+        raise PlatformError(
+            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+            "Unlaunched run no longer exists.",
+            409,
+        )
+    raise PlatformError(
+        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+        "Unlaunched run could not be terminalized from its current state.",
+        409,
+    )
 
 
 @dataclass(frozen=True)
@@ -388,30 +464,13 @@ class DatasetExperimentService:
                 409,
             )
 
-        # 8. Executor capability + exact certificate + provider RuntimeDescriptor.
-        try:
-            provider = self.executor_registry.provider(experiment.executor)
-        except PlatformError as exc:
-            raise PlatformError(
-                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                "Frozen executor is no longer technically supported.",
-                409,
-            ) from exc
-        if self.executor_registry.certified_capability(
-            definition, frozen_release_id, experiment.executor
-        ) is None:
-            raise PlatformError(
-                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                "Exact execution certificate no longer exists for the frozen identity.",
-                409,
-            )
-        if provider.runtime_descriptor().to_metadata() != (experiment.runtime_descriptor_json or {}):
-            raise PlatformError(
-                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                "Provider RuntimeDescriptor no longer matches the frozen descriptor.",
-                409,
-            )
-
+        # NOTE (Plan A1 / P3): frozen executor authority (provider registration,
+        # exact certificate, provider descriptor match) is intentionally NOT
+        # revalidated here. It is a per-item, pre-intent check owned by
+        # `launch_item_attempt` via
+        # `ExecutorRegistry.validate_frozen_execution_authority`, so a recoverable
+        # provider/certificate loss fails the item rather than the whole
+        # experiment. Dataset/release identity checks above remain experiment-level.
         return experiment
 
     def _assert_item_membership(self, experiment, manifest):
@@ -670,6 +729,34 @@ class DatasetExperimentService:
                 409,
             )
 
+        # Pre-intent frozen execution-authority revalidation (Plan A1 / P3).
+        # Must happen BEFORE Transaction B claims the launch intent, so an
+        # unavailable authority never leaves a durable intent with no worker.
+        definition = self.registry.get(experiment.plugin_id).definition
+        if definition.version != experiment.plugin_version:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Active plugin version no longer matches the frozen plugin version.",
+                409,
+            )
+        frozen_descriptor = RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)
+        try:
+            self.executor_registry.validate_frozen_execution_authority(
+                definition, experiment.model_release_id, experiment.executor, frozen_descriptor
+            )
+        except PlatformError as exc:
+            if exc.code in FROZEN_AUTHORITY_ITEM_CODES and coordinator_token is not None:
+                self.fail_closed_unlaunched_run(
+                    experiment_id=experiment.id,
+                    coordinator_token=coordinator_token,
+                    item_id=item.id,
+                    attempt_id=attempt.id,
+                    run_id=run.id,
+                    error_type=exc.code,
+                    error_message=exc.message,
+                )
+            raise
+
         now = datetime.now(timezone.utc)
         try:
             with self.session.no_autoflush:
@@ -716,6 +803,21 @@ class DatasetExperimentService:
             )
         result = self.session.execute(statement)
         return int(result.rowcount or 0)
+
+    def fail_closed_unlaunched_run(self, *, experiment_id, coordinator_token,
+                                   item_id, attempt_id, run_id,
+                                   error_type, error_message):
+        """Generation-fenced ``pending -> interrupted`` for an unlaunched run."""
+        return cas_fail_closed_pending_run(
+            self.session,
+            experiment_id=experiment_id,
+            coordinator_token=coordinator_token,
+            item_id=item_id,
+            attempt_id=attempt_id,
+            run_id=run_id,
+            error_type=error_type,
+            error_message=error_message,
+        )
 
     # ---------- reconciliation + scheduling selection (G3-C) ----------
 

@@ -121,16 +121,20 @@ def test_item_level_failure_marks_item_failed_and_continues(client):
         assert second.status == "running"
 
 
-def test_experiment_level_execution_capability_failure_stops(client):
+def test_execution_capability_unavailable_is_item_level(client):
+    # Plan A1: EXECUTION_CAPABILITY_UNAVAILABLE at scheduling is a recoverable
+    # deployment condition -> the item fails, the experiment is NOT failed.
     session, ds, analysis, provider, experiment = running_experiment_with_token(client, "T", max_concurrency=2)
     outcome = step_once(client, experiment.id, "T",
                         prepare_wrapper=_raise("EXECUTION_CAPABILITY_UNAVAILABLE"))
-    assert outcome == CoordinatorOutcome.INVARIANT_FAILED
+    assert outcome in (CoordinatorOutcome.SCHEDULED, CoordinatorOutcome.WAITING)
     assert provider.launches == []
     with client.app.state.database.session_factory() as fresh:
         stored = fresh.get(DatasetExperimentModel, experiment.id)
-        assert stored.status == "failed"
-        assert stored.error_type == "EXECUTION_CAPABILITY_UNAVAILABLE"
+        assert stored.status == "running"
+        failed = fresh.query(DatasetExperimentItemModel).filter_by(
+            experiment_id=experiment.id, status="failed").count()
+        assert failed >= 1
 
 
 def test_remote_runtime_drift_stops_experiment(client):
@@ -187,3 +191,11 @@ def test_no_direct_prepare_run_or_provider_launch():
     source = inspect.getsource(coordinator_module)
     assert "prepare_run(" not in source
     assert "provider.launch(" not in source
+
+
+def test_authority_codes_are_item_level_classification():
+    from app.dataset_experiments.coordinator import is_experiment_level
+    assert not is_experiment_level(PlatformError("EXECUTION_CAPABILITY_UNAVAILABLE", "x"))
+    assert not is_experiment_level(PlatformError("EXECUTION_NOT_CERTIFIED", "x"))
+    assert is_experiment_level(PlatformError("RUNTIME_DESCRIPTOR_INVALID", "x"))
+    assert is_experiment_level(PlatformError("DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED", "x"))

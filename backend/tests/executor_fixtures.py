@@ -142,6 +142,28 @@ class FakeRegistry:
         descriptor = provider.runtime_descriptor()
         return ExecutionCapability(executor, descriptor.device_type, descriptor.precision)
 
+    def validate_frozen_execution_authority(
+        self, definition, model_release_id, executor, frozen_descriptor
+    ):
+        provider = self._providers.get(executor)
+        if provider is None:
+            raise PlatformError(
+                "EXECUTION_CAPABILITY_UNAVAILABLE",
+                f"No executor provider is registered for '{executor}'.",
+            )
+        current = provider.runtime_descriptor()
+        if current is None or current.to_metadata() != frozen_descriptor.to_metadata():
+            raise PlatformError(
+                "RUNTIME_DESCRIPTOR_INVALID",
+                "Provider runtime descriptor no longer matches the frozen descriptor.",
+            )
+        if self.certified_capability(definition, model_release_id, executor) is None:
+            raise PlatformError(
+                "EXECUTION_NOT_CERTIFIED",
+                "No exact execution certificate for the frozen runtime identity.",
+            )
+        return provider
+
     def deployment_qualified_executors(self, definition, model_release_id):
         supported = sorted(
             name for name in self._providers if name in definition.executors_supported

@@ -15,7 +15,8 @@ from app.dataset_experiments.model import (
     DatasetExperimentItemModel,
     DatasetExperimentModel,
 )
-from app.dataset_experiments.service import DatasetExperimentService
+from app.dataset_experiments.service import DatasetExperimentService, cas_fail_closed_pending_run
+from app.remote_execution.runtime import FROZEN_AUTHORITY_ITEM_CODES
 
 
 @dataclass
@@ -86,70 +87,15 @@ def claim_experiment_generation(session, experiment_id, expected_token,
 def fail_closed_pending_local_run(session, *, experiment_id, coordinator_token,
                                   item_id, attempt_id, run_id):
     """Generation-fenced ``pending -> interrupted`` for an ambiguous local Run."""
-    statement = (
-        update(AnalysisRunModel)
-        .where(
-            AnalysisRunModel.id == run_id,
-            AnalysisRunModel.status == "pending",
-            exists().where(
-                DatasetExperimentModel.id == experiment_id,
-                DatasetExperimentModel.status == "running",
-                DatasetExperimentModel.coordinator_token == coordinator_token,
-            ),
-            exists().where(
-                DatasetExperimentItemModel.id == item_id,
-                DatasetExperimentItemModel.experiment_id == experiment_id,
-                DatasetExperimentItemModel.status == "running",
-            ),
-            exists().where(
-                DatasetExperimentAttemptModel.id == attempt_id,
-                DatasetExperimentAttemptModel.experiment_item_id == item_id,
-                DatasetExperimentAttemptModel.analysis_run_id == run_id,
-            ),
-        )
-        .values(
-            status="interrupted",
-            error_type=_AMBIGUOUS_ERROR_TYPE,
-            error_message=_AMBIGUOUS_ERROR_MESSAGE,
-            finished_at=_now(),
-        )
-        .execution_options(synchronize_session=False)
-    )
-    try:
-        result = session.execute(statement)
-        rowcount = int(result.rowcount or 0)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    if rowcount == 1:
-        return "interrupted"
-
-    generation = session.execute(
-        select(DatasetExperimentModel.status, DatasetExperimentModel.coordinator_token)
-        .where(DatasetExperimentModel.id == experiment_id)
-    ).one_or_none()
-    if generation is None or generation[0] != "running" or generation[1] != coordinator_token:
-        raise PlatformError(
-            "DATASET_EXPERIMENT_FENCE_LOST",
-            "Coordinator generation no longer owns the experiment.",
-            409,
-        )
-    run_status = session.execute(
-        select(AnalysisRunModel.status).where(AnalysisRunModel.id == run_id)
-    ).scalar_one_or_none()
-    if run_status == "interrupted":
-        return "already_interrupted"
-    if run_status is None:
-        raise PlatformError(
-            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
-            "Ambiguous local run no longer exists.",
-            409,
-        )
-    raise PlatformError(
-        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
-        "Ambiguous local run could not be terminalized from its current state.",
-        409,
+    return cas_fail_closed_pending_run(
+        session,
+        experiment_id=experiment_id,
+        coordinator_token=coordinator_token,
+        item_id=item_id,
+        attempt_id=attempt_id,
+        run_id=run_id,
+        error_type=_AMBIGUOUS_ERROR_TYPE,
+        error_message=_AMBIGUOUS_ERROR_MESSAGE,
     )
 
 
@@ -195,6 +141,12 @@ def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
             except PlatformError as exc:
                 if exc.code == "DATASET_EXPERIMENT_FENCE_LOST":
                     raise
+                if exc.code in FROZEN_AUTHORITY_ITEM_CODES:
+                    # launch_item_attempt terminalized the pending run under the
+                    # generation fence; the coordinator will project the item to
+                    # failed. Do not fail the whole experiment.
+                    report.ambiguous_failed += 1
+                    continue
                 session.expire_all()
                 refreshed = session.get(DatasetExperimentAttemptModel, latest.id)
                 if refreshed is not None and refreshed.launch_requested_at is not None:

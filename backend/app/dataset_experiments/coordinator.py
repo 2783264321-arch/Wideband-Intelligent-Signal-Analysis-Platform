@@ -8,8 +8,6 @@ from app.dataset_experiments.model import DatasetExperimentModel
 
 EXPERIMENT_LEVEL_CODES = frozenset({
     "ANALYSIS_RUN_NOT_LAUNCHABLE",
-    "EXECUTION_CAPABILITY_UNAVAILABLE",
-    "EXECUTION_NOT_CERTIFIED",
     "MODEL_RELEASE_MISMATCH",
     "PIPELINE_INCOMPATIBLE",
     "PLUGIN_API_INCOMPATIBLE",
@@ -29,6 +27,10 @@ ITEM_LEVEL_CODES = frozenset({
     "REMOTE_EXECUTOR_UNAVAILABLE",
     "REMOTE_TRANSPORT_UNAVAILABLE",
     "REMOTE_PROBE_UNAVAILABLE",
+    # Plan A1: a recoverable deployment authority loss fails the item, not the
+    # experiment. The persisted pending run is terminalized before this is raised.
+    "EXECUTION_CAPABILITY_UNAVAILABLE",
+    "EXECUTION_NOT_CERTIFIED",
 })
 
 
