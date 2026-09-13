@@ -261,59 +261,78 @@ freeze requires them.)
 
 ## Auto Policy
 
-V1 Auto is deterministic, explainable, and cheap — never an opaque ML scheduler.
+V1 Auto is deterministic, explainable, cheap, and **portable** — never an opaque
+ML scheduler and never dependent on Linux-only telemetry.
 
-**Candidate inputs actually available today:** plugin technical capabilities
-(`definition.technical_execution_capabilities`), registered providers
-(`build_local_providers`, remote provider), exact certificates
-(`execution_certificates.json`), live availability (`availability_for`),
-recording size (`RecordingModel.num_samples`/`duration_s`), dataset item count
-(`prepare_manifest().expected_recordings`), `recommended_execution`, and remote
-probe/config presence. GPU memory/utilization is read only for the optional
-"GPU currently saturated" guard; CPU/resource pressure uses the existing
-Amendment-A1 cgroup reader.
-
-**Policy hierarchy (evaluated in order, first match wins):**
+**AUTO CORE INPUTS (portable; always available; no Linux/cgroup dependency):**
 ```text
-1. Build the runnable set = candidates that are also live-available.
-2. If the runnable set is empty → fail closed with the union of per-executor
-   reasons (AUTO_NO_RUNNABLE_EXECUTOR); never invent an executor.
-3. If exactly one executor is runnable → select it (AUTO_ONLY_RUNNABLE_EXECUTOR).
-4. Compute workload class from task size:
-     GPU_BENEFICIAL if duration_s > GPU_PREFER_DURATION_S (default 0.05 s)
-       OR num_samples > GPU_PREFER_SAMPLES (default 3,000,000)
-       OR dataset_item_count >= GPU_BATCH_ITEMS (default 8);
-     else SMALL_WORKLOAD.
-5. If GPU_BENEFICIAL and local_gpu is runnable → local_gpu
-     (AUTO_LOCAL_GPU_PREFERRED). Prefer local over remote to avoid SSH/cost.
-6. Else if SMALL_WORKLOAD and local_cpu is runnable (and certified for the
-   release) → local_cpu (AUTO_LOCAL_CPU_SMALL).
-7. Else if remote_gpu is runnable and no local candidate is runnable-or-beneficial
-   → remote_gpu (AUTO_REMOTE_GPU_ONLY_VIABLE).
-8. Else (two or more runnable, none matched above) → deterministic ranking:
-     local_gpu > local_cpu > remote_gpu, filtered by runnable set
-     (AUTO_DETERMINISTIC_RANK; also the fallback when task size is unknown).
-9. The resolver MUST NOT choose an executor the plugin does not technically
-   support or that is not certified for the resolved release.
+- plugin technical capabilities        (definition.technical_execution_capabilities)
+- registered providers                 (build_local_providers + remote provider)
+- exact certificates                   (execution_certificates.json)
+- live availability                    (availability_for / provider probe)
+- recording/task size                  (RecordingModel.num_samples / duration_s)
+- dataset item count                   (prepare_manifest().expected_recordings)
+- recommended_execution                (tie-break hint only)
 ```
-`recommended_execution` is used as a **tie-break hint only** within the runnable
-set, never as an override of availability/certification.
 
-**Reason codes (closed set):** `AUTO_ONLY_RUNNABLE_EXECUTOR`,
-`AUTO_LOCAL_GPU_PREFERRED`, `AUTO_LOCAL_CPU_SMALL`,
-`AUTO_REMOTE_GPU_ONLY_VIABLE`, `AUTO_DETERMINISTIC_RANK`,
-`AUTO_NO_RUNNABLE_EXECUTOR`.
+**OPTIONAL RESOURCE TELEMETRY (never required for Auto to function):**
+```text
+- local GPU saturation, if observable
+- local CPU pressure, if observable
+- deployment-specific memory pressure, if available
+```
+Optional telemetry may **refine** a decision but MUST NOT be required. If it is
+absent (Windows laptop, non-cgroup host, remote-only machine), **Auto continues
+deterministically** rather than failing. Production Auto code MUST NOT import or
+depend on `scripts/bhq3_memory_gate.py` or any cgroup-v2 assumption; Amendment-A1
+memory tooling remains **qualification/acceptance-only** for the current
+Linux/AutoDL deployment. Portability boundary (see "Windows / non-cgroup
+portability"): a Linux-only telemetry source may be injected as an optional
+adapter, but core selection logic has no such dependency.
 
-**Minimal metadata gap (do not over-engineer).** The V1 policy above is
-expressible from technical capabilities (cuda vs cpu), certificates, live
-availability, `recommended_execution`, and task size — **no new plugin metadata
-is required**. A future optional metadata seam (e.g. `execution_preference`,
-`resource_class`, `gpu_acceleration_benefit`) is *not* introduced in V1; the
-policy is generic and contains no plugin-id branches.
+**Policy (small, deterministic, explicit):**
+```text
+1. runnable = deployment-qualified candidates ∩ live availability.
+2. runnable empty → AUTO_NO_RUNNABLE_EXECUTOR (fail closed; union of per-executor
+   reasons; never invent an executor).
+3. exactly one runnable → AUTO_ONLY_RUNNABLE_EXECUTOR (select it).
+4. Classify workload from task size:
+     GPU_BENEFICIAL  if duration_s > GPU_PREFER_DURATION_S
+                        OR num_samples > GPU_PREFER_SAMPLES
+                        OR dataset_item_count >= GPU_BATCH_ITEMS
+     SMALL           otherwise
+     UNKNOWN         when task size is unavailable
+5. Select the first runnable executor in the class ranking:
+     SMALL:          local_cpu > local_gpu > remote_gpu
+     GPU_BENEFICIAL: local_gpu > remote_gpu > local_cpu
+     UNKNOWN:        recommended_execution if runnable
+                     else local_gpu > local_cpu > remote_gpu
+6. Auto never selects an executor the plugin does not technically support or that
+   is not certified for the resolved release.
+```
+Intended outcomes: CPU-only local + remote GPU + large workload → `remote_gpu`
+may be preferred over `local_cpu`; local-GPU machine + large workload →
+`local_gpu` normally; small workload + certified `local_cpu` → `local_cpu`
+normally. Thresholds are **configurable policy constants** in one place (an
+`AUTO_POLICY` config object), not magic values scattered across services:
+`GPU_PREFER_DURATION_S` (default 0.05 s), `GPU_PREFER_SAMPLES` (default
+3,000,000), `GPU_BATCH_ITEMS` (default 8).
+
+**Reason codes (closed set):** `AUTO_NO_RUNNABLE_EXECUTOR`,
+`AUTO_ONLY_RUNNABLE_EXECUTOR`, `AUTO_LOCAL_CPU_PREFERRED`,
+`AUTO_LOCAL_GPU_PREFERRED`, `AUTO_REMOTE_GPU_PREFERRED`,
+`AUTO_UNKNOWN_RECOMMENDED_EXECUTOR`, `AUTO_UNKNOWN_DETERMINISTIC_RANK`.
+
+**Minimal metadata gap (do not over-engineer).** The policy is expressible from
+technical capabilities (cuda vs cpu), certificates, live availability,
+`recommended_execution`, and task size — **no new plugin metadata is required**.
+A future optional metadata seam (e.g. `execution_preference`, `resource_class`,
+`gpu_acceleration_benefit`) is *not* introduced in V1; the policy is generic and
+contains no plugin-id branches.
 
 **Policy factors deliberately excluded in V1:** learned/ML scheduling, market
-cost optimization, cross-host GPU telemetry beyond a simple saturation guard, and
-per-item Auto re-resolution (see DatasetAuto freeze).
+cost optimization, opaque scoring, and per-item Auto re-resolution (see Dataset
+Auto freeze). Optional telemetry may only gate/refine within the explicit rules.
 
 ## Auto vs Fallback Boundary
 
@@ -402,14 +421,66 @@ Approaches:
 
 A runtime/plugin MUST NOT self-certify because execution succeeded once:
 certificates remain platform-owned evidence records bound to a release + runtime
-+ executor. Installation/bootstrap flow (design, not implemented):
++ executor.
+
+**Per-installation certification workflow (operationally defined).**
 ```text
-runtime doctor
-  → runtime identity (python/torch/ultralytics/numpy/scipy/GPU/driver)
-  → capability probe (interpreter, CUDA, assets, label spaces)
-  → qualification evidence (real acceptance on that runtime)
-  → operator-owned certificate provisioning (exact runtime_ref)
+wisa runtime doctor
+  → environment/capability report (interpreter, torch/ultralytics, CUDA, assets,
+    label spaces) written under <data_root>/qualification/<executor>/<runtime_ref>/
+  → runtime identity (generation material → runtime_ref)
+  → small qualification suite for that executor
+      local_cpu  : no-GPU acceptance (dummy/stft/CPN)
+      local_gpu  : bounded CUDA acceptance (CPN/ZoomSpec)
+      remote_gpu : remote probe + one bounded remote run
+  → qualification evidence artifact (results + hashes + runtime_ref) on disk
+  → operator provisions ONE exact certificate for that runtime_ref via platform CLI
+  → runtime becomes deployment-qualified
 ```
+Roles and mechanics:
+- **Operator** in a local class/demo installation is the installing user (or a TA):
+  whoever runs `wisa runtime doctor` and then `wisa certificate install`. There is
+  no separate trust authority and no PKI/signing in V1.
+- **Evidence location:** on disk under the installation data root
+  (`<data_root>/qualification/…`); never committed to the repository; referenced by
+  the certificate `evidence_ref`.
+- **Provisioning without hand-editing JSON:** `wisa certificate install --from
+  <qualification_evidence_dir>` validates the evidence shape and the exact tuple,
+  then writes the certificate into the platform certificate store the control
+  plane loads. The user never edits arbitrary JSON.
+- **Platform-owned:** the certificate is produced by the platform CLI from
+  qualification artifacts; a plugin cannot mint/widen a certificate
+  (`ExecutionCertificateStore`/`ExecutorRegistry` remain the sole authority).
+- **Stale/invalid fail-closed:** any material runtime change produces a new
+  `runtime_ref`; the old certificate no longer matches (`is_certified` exact
+  match) and the executor becomes uncertified/unavailable until re-qualified.
+  `wisa runtime doctor` detects a changed identity and reports the mismatch rather
+  than silently reusing the old certificate.
+- **Explicit distinction:** *code support* = the plugin declares the executor and
+  the framework has a provider; *runtime qualification* = this installation has
+  matching qualification evidence plus an exact certificate. A student's machine
+  may support `local_gpu` in code yet remain uncertified until this workflow runs.
+
+**Windows / non-cgroup portability (production vs tooling).** Components are
+classified as:
+```text
+Portable production contract (must work on Windows/Linux, cgroup or not):
+  manual + Auto selection core (AUTO CORE INPUTS), ExecutorRegistry/certificate
+  gating, provider availability, AnalysisRun/DatasetExperiment lifecycle, API.
+
+Linux/AutoDL qualification tooling (allowed to be Linux-specific):
+  Amendment-A1 cgroup memory gate/monitor, /proc-based worker RSS telemetry,
+  nvidia-smi sampling, crash-injection tooling.
+
+Operator-specific deployment tooling:
+  runtime doctor, runtime identity, certificate provisioning CLI, remote profile/
+  SSH/known_hosts setup, asset-path configuration.
+```
+Production Manual/Auto selection MUST NOT require Linux cgroup v2, `/proc`, or a
+specific `nvidia-smi` path; optional telemetry is injected via an optional adapter
+and its absence leaves Auto deterministic and functional. V1 is not a full
+cross-platform rewrite; the requirement is architectural correctness (no Linux-only
+telemetry in the production selection path).
 
 ## Local-GPU Recovery Design (G1, G2, G7)
 
@@ -424,24 +495,35 @@ and the three impacted recovery tests.
 `repair_local_pending_runs` relaunches the safe first-launch path and fail-closes
 the ambiguous marker path for `local_gpu` exactly as for `local_cpu`.
 
-**P3 — provider-disappearance safety at the durable launch boundary (G7).**
-Required ordering change: verify the frozen executor's provider is still
-registered (and, for local, that the certified capability still exists) **before**
-committing the launch intent in `launch_item_attempt` (`service.py:572-695`), or
-fail-close immediately on a provider miss. Intended semantics:
+**P3 — execution-authority revalidation before the durable launch boundary (G7).**
+Before committing the launch intent in `launch_item_attempt`
+(`service.py:572-695`), revalidate exactly the frozen execution authority:
 ```text
-frozen executor provider absent/unavailable at launch:
+1. the frozen executor's provider is still registered;
+2. the frozen provider's runtime_descriptor() still matches the frozen
+   run/experiment descriptor (executor/device_type/device_index/precision);
+3. the exact ExecutionCertificate still exists for (plugin_id, plugin_version,
+   model_release_id, executor, device_type, precision, provider.runtime_ref).
+```
+This is a cheap deployment-configuration check (registry/certificate lookup), NOT
+a live hardware probe. A live device disappearing after a valid launch authority is
+a normal worker failure, not the same problem. Two distinct fail-closed concepts:
+```text
+execution authority disappeared BEFORE intent:
   → do NOT claim the launch intent;
   → fail the item with EXECUTION_CAPABILITY_UNAVAILABLE (or
     DATASET_EXPERIMENT_EVALUATION_FAILED at evaluation time);
   → experiment proceeds deterministically (completed_with_failures);
-  → retry_failed / retry_evaluation available once the executor is restored;
-  → NEVER a false "another actor launched it" claim;
-  → NEVER a stall until the next restart.
+  → retry_failed / retry_evaluation available once authority is restored.
+
+hardware failed AFTER a valid launch (worker crashed):
+  → normal lifecycle: run running→failed/interrupted; item failed;
+  → handled by the existing worker/coordinator terminalization, not P3.
 ```
-This preserves the existing CAS/launch-intent semantics (no new state machine) and
-closes the ambiguity window. A run already `pending` with a durable intent and no
-worker remains fail-closed to `interrupted` (`ANALYSIS_LAUNCH_AMBIGUOUS`) by the
+This preserves the existing CAS/launch-intent semantics (no new state machine),
+avoids a false "another actor launched it" claim, and avoids an in-process stall.
+A run already `pending` with a durable intent and no worker remains fail-closed to
+`interrupted` (`ANALYSIS_LAUNCH_AMBIGUOUS`) by the
 existing recovery path.
 
 **Recovery acceptance cases (H4):**
@@ -638,20 +720,24 @@ Comparable: localization AP + per-recording TF boxes/membership. N/A: class-awar
 AP, matched accuracy, confusion, per-class SpaceNet-14 (CPN emits
 `cpn_bandwidth_tier_v1`). Existing APIs are sufficient; no new endpoint in V1.
 
-## Concurrency Design (H5)
+## Concurrency + Endurance Design (H5, combined)
 
-- H5-C2 only (concurrency=2); concurrency=1 baseline is provided by H2.
-- 8-stem slice `0,1,2,3,9,11,12,15`, CPN `local_gpu`, `max_concurrency=2`.
-- Prove: max simultaneously live `local_inference_worker` PIDs ≤ 2 (sample
-  `/proc/*/cmdline` + `nvidia-smi --query-compute-apps`); all items terminal; one
-  run/attempt; no duplicate ownership; no orphan workers; DB consistent.
+Concurrency=2 is **folded into the endurance workload** — no separate 8-item
+concurrency experiment (the concurrency=1 baseline is already provided by H2).
+The first controlled section of the 40-execution endurance run proves the
+concurrency contract; the same qualification sequence then continues to the
+endurance count.
+
+- Workload: 40 real CPN `local_gpu` executions at `max_concurrency=2`, cycling the
+  16-stem set across three sequential experiments (16 + 16 + 8) in a dedicated
+  qualification DB.
+- **Concurrency section (first ~16 executions)** must prove: max simultaneously
+  live `local_inference_worker` PIDs ≤ 2 (sampled via `/proc/*/cmdline` +
+  `nvidia-smi --query-compute-apps`); all intended items terminal; exactly one run
+  per attempt; no duplicate attempt ownership; no orphan workers; DB consistent.
+- **Endurance section (remaining executions)** continues the same monitoring to 40.
 - V1 ceiling is 2 (SQLite single-writer + single GPU); no higher concurrency.
-
-## Endurance Design (H5 continuation)
-
-- 40 real CPN `local_gpu` executions at concurrency=2, cycling the 16-stem set
-  across three sequential experiments.
-- Machine-auditable criteria:
+- Machine-auditable criteria (apply across the combined run):
 ```text
 all intended runs terminal; 0 failed runs/items
 0 orphan qualification worker PIDs; 0 remaining qualification GPU compute processes after quiescence
@@ -663,9 +749,10 @@ leak analysis: compare identical stems across cycles, separately for
   no one-way growth trend
 ```
 Observation cadence ~5 s + before/after each experiment: worker PID set/lifetimes,
-`/proc/<pid>/status` `VmHWM`, GPU process memory, GPU used/free, cgroup
-`memory.current`/`committed_floor`/`effective_headroom`, `memory.pressure`,
-`memory.events`, DB counts.
+`/proc/<pid>/status` `VmHWM`, GPU process memory, GPU used/free, and (Linux/AutoDL
+qualification only) cgroup `memory.current`/`committed_floor`/`effective_headroom`,
+`memory.pressure`, `memory.events`, DB counts. Resource telemetry here is
+qualification tooling, not a production dependency (see Auto Policy portability).
 
 ## Deterministic Dataset Qualification Subset Strategy
 
@@ -712,22 +799,27 @@ Reuse Amendment-A1 tooling (`scripts/bhq3_memory_gate.py`: `read_snapshot`,
 - H2 CPN ×16 at concurrency=1 serves simultaneously as: Dataset→one-model
   evidence, concurrency=1 baseline, and H3 Experiment A.
 - H3 runs **only** ZoomSpec Experiment B (×16).
-- H5 runs **only** concurrency=2 (8 executions).
-- BHQ-3 owns real local_gpu health + single-recording CPN/ZoomSpec acceptance;
-  the H1 GPU probe is removed.
-- DB/state-machine ambiguity cases stay CPU-only where GPU is irrelevant.
+- H5 combines concurrency=2 **and** endurance in one 40-execution workload (no
+  separate 8-item concurrency experiment).
+- H4 live worker-kill is limited to genuine crashes (~2–4 executions); the
+  ambiguous-launch, CAS, repeated-recovery, fencing, and provider-disappearance
+  cases are deterministic **CPU/DB-level** fault-injection tests (no real GPU).
+- BHQ-3 owns real local_gpu health + single-recording CPN/ZoomSpec acceptance; the
+  H1 GPU probe is removed. Only real CUDA behavior justifies a real GPU execution.
 
 ## GPU Qualification Matrix (local_gpu)
 
 | Qualification | GPU? | Why | Executions |
 |---|---:|---|---:|
-| H2 CPN local_gpu ×16 (c=1) | yes | real batch CUDA + evaluation | 16 |
+| H2 CPN local_gpu ×16 (c=1) | yes | real batch CUDA + evaluation (also c=1 baseline + H3-A) | 16 |
 | H3 ZoomSpec local_gpu ×16 | yes | real CUDA multi-model | 16 |
-| H4 live worker-kill recovery | yes | real GPU worker crash | ~4 |
-| H4 ambiguous-launch live | yes | real pending GPU run | ~2 |
-| H5 concurrency=2 (8) | yes | ≤2 live GPU workers | 8 |
-| H5 endurance (40 CPN, c=2) | yes | lifecycle/resource trend | 40 |
-| **local_gpu total** | | | **~86** |
+| H4 genuine live worker-kill recovery | yes | real GPU worker crash | ~2–4 |
+| H4 ambiguous-launch / CAS / provider-disappearance | no | deterministic CPU/DB fault injection | 0 |
+| H5 concurrency=2 + endurance (40 CPN, c=2, first section proves c=2) | yes | ≤2 live workers + lifecycle/resource trend | 40 |
+| **local_gpu total** | | | **~74–76** |
+
+Every additional real GPU execution beyond this list must be individually
+justified. Local and remote budgets are reported separately.
 
 ## Remote-GPU Budget
 
@@ -739,14 +831,24 @@ Reuse Amendment-A1 tooling (`scripts/bhq3_memory_gate.py`: `read_snapshot`,
 | **remote_gpu total** | | | **~5–7 remote executions + 1 operator session** |
 
 Remote budget is reported separately from local_gpu; it requires the rented GPU
-target to still be in GPU mode (i.e., before the H5.5 cold switch).
+target to still be in GPU mode (i.e., strictly before the H5.5 cold switch).
 
 ## H5.5 Handoff
 
-See "AutoDL Cold Mode Switch and GPU→No-GPU Handoff Seal". H5.5-S (pre-shutdown
-terminal/zero-PID/persist-under-`/root/autodl-tmp` seal) runs at the end of the
-GPU phase, before the mode change; H5.5-C (post-cold-boot continuity) is the first
-step of the no-GPU phase. All remote_gpu acceptance must complete before H5.5-S.
+See "AutoDL Cold Mode Switch and GPU→No-GPU Handoff Seal". The authoritative
+GPU-phase sequence (no contradiction) is:
+```text
+Plan A (CPU/TDD) → Plan B (local-GPU qualification; do NOT shut down GPU)
+  → Plan C (remote-GPU / two-host; while the rented GPU target is still available)
+  → H5.5-S (single GPU-phase pre-shutdown handoff seal)
+  → OPERATOR ACTION (cold switch GPU→no-GPU)
+  → H5.5-C (state continuity verification)
+  → Plan D (no-GPU qualification + API freeze + final Backend V1 evidence)
+```
+Plan B must NOT claim an independently completed GPU-phase seal before Plan C.
+Plan C live qualification must finish before H5.5-S. H5.5-S requires all local and
+remote qualification processes terminal and zero qualification PIDs before the
+cold switch.
 
 ## API / Frontend Executor Contract
 
@@ -777,13 +879,22 @@ POST /api/dataset-experiments
 
 Resolver/explanation (future): GET /api/executor-selection
   ?recording_id=&pipeline_id=[&dataset_split=&model_release_id=]
-  → { resolved_executor, reason_code, reason,
+  → { requested_mode, resolved_executor, reason_code, reason,
+      workload_class,
       candidates: [ { executor, technical, configured, certified, available,
                       reason_code, reason_message } ] }
 ```
 Rules: `execution_mode="auto"` resolves before persistence; a persisted run/
 experiment never has `executor="auto"`; manual stays exact-by-name. The existing
 `GET /api/executor-availability` remains the per-executor availability probe.
+
+**Do not expose acceptance-only internals.** The production API (including Auto
+explanation) MUST NOT return: private interpreter/asset paths, SSH material or
+`environment_ref`, certificate internal fields beyond boolean
+`technical/configured/certified/available`, or raw cgroup/PSI/telemetry
+diagnostics. `reason_code`/`reason`/`reason_message` are bounded, human-readable,
+and contain no secret or host-specific path. (Acceptance tooling may keep richer
+local evidence; it never crosses the API boundary.)
 
 Frontend UX model (future, not implemented):
 ```text
@@ -817,44 +928,58 @@ LGPU setup            + local_gpu python path + runtime_ref; local_cpu coexists
 RGPU local control-plane setup   RemoteProfile env (host/user/key/known_hosts/
                                  repo/job roots/python/required commit)
 RGPU rented GPU-server setup     repo at required commit, assets, dataset roots
-runtime doctor        interpreter probe, CUDA probe, asset/label checks
+runtime doctor        interpreter probe, CUDA probe, asset/label checks, runtime report
 runtime identity      generation material -> runtime_ref
-certificate provisioning   operator-owned exact certificate per runtime_ref
+certificate provisioning   `wisa certificate install --from <evidence_dir>` writes an
+                           exact platform-owned certificate per runtime_ref (no JSON hand-editing)
+stale certificate     runtime identity change invalidates the old certificate; re-qualify
 asset-path configuration    namespaced WSP_LOCAL_ASSET_PATHS_JSON / remote maps
 remote profile / SSH / known_hosts   strict host-key verification, no weakening
 ```
 
-## Recommended Final Seal Model
+## Final Completion Model — One Authoritative Seal
 
-**Recommendation: Option B — two explicit seals**, both V1-required before
-frontend productization (because Profile RGPU is now an explicit user scenario):
+Evidence remains in separate domains, but completion has **ONE** identity:
+**`BACKEND_V1_SEAL_SHA`** — meaning "Backend V1 is finished and frontend
+productization may begin."
 
+Evidence domains (kept distinct, all synthesized by the final seal commit):
 ```text
-Seal 1 — Backend V1 Core Functional Seal
-  local_cpu + local_gpu; Scenarios A/B/C; recovery (P1/P2/P3); Auto policy;
-  concurrency=2; endurance; no-GPU startup semantics; regression; API freeze.
-
-Seal 2 — Backend V1 Portable Deployment Seal
-  remote_gpu real path (Profile RGPU): loopback transport mechanics + a small
-  remote DatasetExperiment + operator-assisted true two-host acceptance;
-  per-installation certificate provisioning model; installation/deployment docs.
+Backend V1 Core Functional Acceptance Evidence
+Backend V1 Portable Deployment Evidence
+Backend V1 API Contract
+OpenAPI subset snapshot
 ```
-Why two seals: the remote path carries a distinct cost profile (rented GPU +
-operator-assisted two-host) and a distinct evidence type (transport/deployment),
-and it can be validated independently without re-running local science. Splitting
-avoids blocking the core seal on operator scheduling while keeping remote work
-inside V1. A single combined seal (Option A) is acceptable but riskier for
-schedule and evidence attribution.
+Intermediate checkpoints (informational only; NOT the final seal, and NOT
+permission to start frontend work):
+```text
+CORE_ACCEPTANCE_CHECKPOINT        (local_cpu + local_gpu functional acceptance)
+PORTABLE_ACCEPTANCE_CHECKPOINT    (remote_gpu / two-host portability)
+GPU_PHASE_HANDOFF_CHECKPOINT      (H5.5-S cold-handoff seal)
+```
+Rules:
+```text
+BACKEND_V1_SEAL_SHA is created only after ALL Core + Portable + No-GPU + API gates pass.
+It is the SHA of the final evidence commit that synthesizes/references all earlier
+  accepted checkpoints.
+An earlier checkpoint must not imply completeness while remote/two-host is unfinished.
+The SHA is determined externally after the commit and is never embedded in its own
+  evidence file.
+```
+This keeps the practical benefit of staged evidence (clear cost/evidence domains)
+without a "Core Seal" that could be mistaken for "Backend V1 done".
 
 ## Cost-Aware GPU Budget
 
-Local_gpu phase: ~86 real executions (H2 16, H3 16, H4 ~6, H5 8, endurance 40).
-At BHQ-3 measured worker walls (CPN ~6.9 s, ZoomSpec ~8.2–18.2 s), the local GPU
-phase is on the order of **~20–30 minutes** of GPU wall (≈ one server-hour).
-Remote_gpu: ~5–7 remote executions + one operator-assisted two-host session,
-reported separately, and must occur **before** the H5.5 cold switch. The rejected
-brute force (2500 × 2 ≈ 5000 runs at ~7 s ≈ 9.7 h GPU) is ~20–50× the cost for no
-added acceptance value; no-GPU work runs at ~0.10 RMB/h.
+Local_gpu phase: **~74–76 real executions** (H2 16, H3 16, H4 live crashes ~2–4,
+H5 concurrency=2 + endurance 40). Ambiguous-launch/CAS/provider-disappearance
+cases are CPU/DB-only and add no GPU executions. At BHQ-3 measured worker walls
+(CPN ~6.9 s, ZoomSpec ~8.2–18.2 s), the local GPU phase is on the order of
+**~20–30 minutes** of GPU wall (≈ one server-hour). Remote_gpu: ~5–7 remote
+executions + one operator-assisted two-host session, reported separately, and must
+occur **before** the H5.5 cold switch. The rejected brute force (2500 × 2 ≈ 5000
+runs at ~7 s ≈ 9.7 h GPU) is ~20–50× the cost for no added acceptance value;
+no-GPU work runs at ~0.10 RMB/h.
 
 ## Final Seal Criteria
 
@@ -888,11 +1013,15 @@ risks** (not a literal "zero bugs" claim).
 
 Artifacts:
 ```text
-Backend V1 Acceptance Evidence          docs/superpowers/acceptance/…-backend-v1-acceptance.md
-Backend V1 Portable Deployment Evidence  docs/superpowers/acceptance/…-backend-v1-portable-deployment.md
-Backend V1 API Contract                 docs/superpowers/acceptance/…-backend-v1-api-contract.md
-OpenAPI subset snapshot                 docs/superpowers/acceptance/…-backend-v1-openapi.json
-BACKEND_V1_SEAL_SHA / PORTABLE_SEAL_SHA  determined externally after commit (never embedded)
+Backend V1 Core Functional Acceptance Evidence  docs/superpowers/acceptance/…-backend-v1-acceptance.md
+Backend V1 Portable Deployment Evidence         docs/superpowers/acceptance/…-backend-v1-portable-deployment.md
+Backend V1 API Contract                         docs/superpowers/acceptance/…-backend-v1-api-contract.md
+OpenAPI subset snapshot                         docs/superpowers/acceptance/…-backend-v1-openapi.json
+BACKEND_V1_SEAL_SHA                             SHA of the final synthesis commit
+                                                (determined externally; never embedded in its own file)
+
+Intermediate checkpoints (not the final seal):
+  CORE_ACCEPTANCE_CHECKPOINT, PORTABLE_ACCEPTANCE_CHECKPOINT, GPU_PHASE_HANDOFF_CHECKPOINT
 ```
 
 ## Risks / Limitations
@@ -908,8 +1037,11 @@ BACKEND_V1_SEAL_SHA / PORTABLE_SEAL_SHA  determined externally after commit (nev
   defaults derived from the BHQ-2/BHQ-3 workload sizes; they are documented and
   adjustable, not learned. Mis-calibration only affects preference, never
   correctness (availability/certification always gate).
+- **Auto portability:** Auto core must not depend on Linux cgroup/`/proc`/
+  `nvidia-smi`; optional telemetry is best-effort. Risk mitigated by keeping
+  telemetry out of the production selection path.
 - **Certificate portability:** each machine needs its own runtime identity +
-  certificates; there is no cross-machine certificate reuse in V1.
+  operator-provisioned exact certificate; no cross-machine reuse in V1.
 - **Cold hardware switch:** a failed AutoDL mode change is an infrastructure
   event; H5.5-S ensures no required state is lost.
 - **Two-host is operator-assisted:** evidence depends on operator participation;
@@ -919,43 +1051,73 @@ BACKEND_V1_SEAL_SHA / PORTABLE_SEAL_SHA  determined externally after commit (nev
 
 ## Proposed Implementation Sequence (plan decomposition, not created here)
 
-Do not create implementation plans in this pass. Expected decomposition (each
-plan independently seals before the next begins):
+Do not create implementation plans in this pass. The authoritative sequence (no
+ordering contradiction):
 
 ```text
-Plan A  Recovery + Auto-policy + runtime/deployment hardening + qualification tooling
-        (P1/P2/P3; Auto resolver design+impl; runtime doctor/identity; selector +
-        registration tooling; no-GPU startup semantics; unit/integration tests)
-Plan B  Concentrated local-GPU qualification
-        (H2 CPN ×16 c=1; H3 ZoomSpec ×16; H4 live recovery; H5 concurrency=2;
-        endurance ×40; GPU evidence; then H5.5-S pre-shutdown seal)
-Plan C  Remote-GPU / two-host portability qualification
-        (profile config; loopback mechanics; small remote DatasetExperiment;
-        operator-assisted true two-host; per-installation certificate model;
-        installation/deployment docs) — before H5.5-S
-Plan D  GPU→no-GPU cold handoff + no-GPU Backend Seal + API/frontend contract freeze
-        (H5.5-C continuity; no-GPU Case A/B; H2-CPU; H1 CPU; full regression;
-        API contract; final evidence; BACKEND_V1_SEAL_SHA)
+Plan A   Recovery + Auto + installation/runtime qualification + acceptance tooling
+         (P1/P2/P3; Auto resolver; runtime doctor/identity; certificate provisioning
+          CLI; qualification tooling; no-GPU startup semantics; CPU/TDD)
+         [may change production code; no GPU dependency; runs first]
+   ↓
+Plan B   Local-GPU final qualification
+         (H2 CPN ×16 c=1 [= H3-A]; H3 ZoomSpec ×16; H4 genuine live crashes ~2–4;
+          H5 concurrency=2 + endurance 40 combined)
+         [do NOT shut down GPU; must NOT claim an independent GPU-phase seal]
+   ↓
+Plan C   Remote-GPU / true two-host qualification
+         (profile config; loopback mechanics; small remote ZoomSpec DatasetExperiment;
+          operator-assisted two-host; per-installation certificate model; docs)
+         [must finish while the rented GPU target is still available]
+   ↓
+H5.5-S   single GPU-phase pre-shutdown handoff seal
+   ↓
+OPERATOR ACTION   cold switch AutoDL GPU → no-GPU mode
+   ↓
+H5.5-C   state continuity verification
+   ↓
+Plan D   No-GPU qualification + API freeze + final Backend V1 evidence
+         (H5.5-C; no-GPU Case A/B; H2-CPU; H1 CPU; recovery CPU/DB suites; full
+          regression; API contract + OpenAPI snapshot; synthesis commit)
+         → BACKEND_V1_SEAL_SHA (only after ALL gates pass)
 ```
-Note ordering tension: Plan C requires the GPU target to still be in GPU mode, so
-Plan C must complete (or at least its live portions) before Plan B's final
-H5.5-S shutdown. Plan A has no GPU dependency and may run first.
+Only after Plan D is sealed may the project move to formal Frontend V1 design.
+Plan A may change production code; Plans B/C predominantly execute already-designed
+acceptance paths rather than invent architecture; Plan D creates the single final
+seal.
 
 ---
 
 ### Spec self-review record
 
-- Manual + Auto both preserved; Auto is deterministic/explainable with closed
-  reason codes; Auto resolves before run persistence; resolved identity is always
-  an exact executor; no `executor="auto"` persisted.
-- No silent runtime fallback; DatasetExperiment Auto freezes one executor.
+- Auto production logic has **no dependency** on BHQ-3 A1 / `scripts/bhq3_memory_gate.py`
+  or cgroup v2; AUTO CORE INPUTS are portable; optional telemetry is best-effort.
+- Auto works without Linux resource telemetry (Windows/non-cgroup); absence of
+  telemetry → deterministic selection, never failure.
+- Policy is simple, deterministic, explainable; no plugin-id branches; no opaque
+  scoring; thresholds are configurable policy constants in one place.
+- Large LCPU+RGPU workload can sensibly select `remote_gpu`
+  (`GPU_BENEFICIAL` ranking `local_gpu > remote_gpu > local_cpu`).
+- Manual + Auto both preserved; Auto resolves before persistence; resolved
+  identity is always an exact executor; no `executor="auto"` persisted.
+- No runtime fallback after resolution; DatasetExperiment Auto freezes one executor
+  (recovery/retry preserve it).
 - Plugin × executor matrix explicit; certificate portability stated honestly
-  (per-installation identity; no weakened certificates).
-- remote_gpu treated as a real deployment profile (RGPU), with loopback ≠ two-host.
-- AutoDL mode switch modeled as a cold reboot with a pre-shutdown seal and
-  post-boot continuity check; no required state in `/tmp`.
-- Recovery handles provider disappearance (P3) and the durable launch ordering.
-- GPU evidence reused (H2 used for c=1 baseline + H3-A); H1 GPU probe removed;
-  local/remote GPU budgets separated.
-- API contract includes manual/Auto semantics; frontend executor UX defined.
+  (per-installation identity; no weakened/generic certificates); installation/
+  qualification workflow operationalized (runtime doctor → identity → evidence →
+  `wisa certificate install`), platform-owned, stale certificates fail closed.
+- Windows/non-cgroup portability boundary documented (portable production contract
+  vs Linux/AutoDL qualification tooling vs operator-specific tooling);
+  acceptance-only internals never leak through the API.
+- Real GPU tests are not duplicated (H2 = c=1 baseline + H3-A; BHQ-3 owns
+  single-recording health); concurrency evidence is reused inside endurance
+  (no separate 8-item experiment); H4 ambiguous/CAS cases are CPU/DB-only;
+  local_gpu budget ~74–76, remote_gpu ~5–7 reported separately.
+- Plan B/C/H5.5 order has no contradiction: A → B (no shutdown) → C (GPU still
+  available) → H5.5-S → operator cold switch → H5.5-C → D.
+- Recovery P3 revalidates execution authority (provider registered, descriptor
+  matches, exact certificate exists) before intent, with no expensive live probe;
+  authority-disappearance and post-launch hardware failure remain distinct.
+- Final completion has ONE `BACKEND_V1_SEAL_SHA` (with named intermediate
+  checkpoints that do not imply completion).
 - No implementation occurred; no TODO/TBD placeholders remain.
