@@ -162,3 +162,18 @@ def test_launch_item_attempt_fence_lost_before_transaction_b(client):
         assert stored_run.worker_pid is None
         assert stored_attempt.launch_requested_at is None
         assert fresh.get(DatasetExperimentItemModel, item.id).status == "running"
+
+
+def test_reconcile_fence_lost_no_projection(client):
+    token = "coord_T"
+    session, ds, analysis, provider, experiment, item, attempt = _owned_attempt_with_token(client, token)
+    run = session.get(AnalysisRunModel, attempt.analysis_run_id)
+    run.status = "completed"
+    session.commit()
+    _rotate_token(client, experiment.id, "coord_T2")
+
+    with pytest.raises(PlatformError) as exc:
+        ds.reconcile_items(experiment.id, coordinator_token=token)
+    assert exc.value.code == "DATASET_EXPERIMENT_FENCE_LOST"
+    with client.app.state.database.session_factory() as fresh:
+        assert fresh.get(DatasetExperimentItemModel, item.id).status == "running"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -27,6 +28,15 @@ if TYPE_CHECKING:
     from app.analysis.service import AnalysisService
 
 _ITEM_STATUSES = ("queued", "running", "completed", "failed")
+
+
+@dataclass(frozen=True)
+class ReconcileSummary:
+    expected: int
+    queued: int
+    running: int
+    completed: int
+    failed: int
 
 
 class DatasetExperimentService:
@@ -699,3 +709,207 @@ class DatasetExperimentService:
             )
         result = self.session.execute(statement)
         return int(result.rowcount or 0)
+
+    # ---------- reconciliation + scheduling selection (G3-C) ----------
+
+    def _load_attempts_by_item(self, item_ids):
+        attempts = list(
+            self.session.scalars(
+                select(DatasetExperimentAttemptModel)
+                .where(DatasetExperimentAttemptModel.experiment_item_id.in_(item_ids))
+                .order_by(
+                    DatasetExperimentAttemptModel.experiment_item_id,
+                    DatasetExperimentAttemptModel.attempt_number,
+                )
+            ).all()
+        )
+        by_item: dict[str, list] = {}
+        for attempt in attempts:
+            by_item.setdefault(attempt.experiment_item_id, []).append(attempt)
+        return by_item
+
+    def _load_runs_by_id(self, run_ids):
+        if not run_ids:
+            return {}
+        return {
+            run.id: run
+            for run in self.session.scalars(
+                select(AnalysisRunModel).where(AnalysisRunModel.id.in_(run_ids))
+            ).all()
+        }
+
+    def reconcile_items(self, experiment_id, coordinator_token=None):
+        try:
+            if coordinator_token is not None:
+                fence = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "running",
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                    )
+                    .values(status="running")
+                    .execution_options(synchronize_session=False)
+                )
+                if int(fence.rowcount or 0) != 1:
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_FENCE_LOST",
+                        "Coordinator generation no longer owns the experiment.",
+                        409,
+                    )
+            experiment = self.session.get(DatasetExperimentModel, experiment_id)
+            if experiment is None:
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_NOT_FOUND", "Dataset experiment was not found.", 404
+                )
+            items = list(
+                self.session.scalars(
+                    select(DatasetExperimentItemModel)
+                    .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+                    .order_by(DatasetExperimentItemModel.manifest_order)
+                ).all()
+            )
+            if not items:
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_INVARIANT_VIOLATION", "Experiment has no items.", 409
+                )
+            attempts_by_item = self._load_attempts_by_item([item.id for item in items])
+            run_ids = {
+                attempt.analysis_run_id
+                for attempts in attempts_by_item.values()
+                for attempt in attempts
+            }
+            runs_by_id = self._load_runs_by_id(run_ids)
+            now = datetime.now(timezone.utc)
+            for item in items:
+                attempts = attempts_by_item.get(item.id, [])
+                for attempt in attempts:
+                    run = runs_by_id.get(attempt.analysis_run_id)
+                    if run is None:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Attempt references a missing analysis run.", 409,
+                        )
+                    if run.recording_id != item.recording_id:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Attempt run does not match the item recording.", 409,
+                        )
+                    if (
+                        run.pipeline_id != experiment.plugin_id
+                        or run.pipeline_version != experiment.plugin_version
+                        or run.executor != experiment.executor
+                    ):
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Attempt run identity does not match the frozen experiment.", 409,
+                        )
+                latest = attempts[-1] if attempts else None
+                latest_run = runs_by_id.get(latest.analysis_run_id) if latest else None
+                active = [
+                    attempt for attempt in attempts
+                    if runs_by_id[attempt.analysis_run_id].status in {"pending", "running"}
+                ]
+                if item.status == "queued":
+                    if active:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Queued item has an active attempt.", 409,
+                        )
+                    if latest is not None and latest_run.status not in {"failed", "interrupted"}:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Queued item has a non-retryable historical attempt.", 409,
+                        )
+                    continue
+                if item.status == "running":
+                    if latest is None or latest_run is None:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Running item has no authoritative attempt/run.", 409,
+                        )
+                    if latest_run.status in {"pending", "running"}:
+                        if active != [latest]:
+                            raise PlatformError(
+                                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "The active attempt is not the latest attempt.", 409,
+                            )
+                        continue
+                    if latest_run.status == "completed":
+                        if active:
+                            raise PlatformError(
+                                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Terminal latest attempt has an older active attempt.", 409,
+                            )
+                        item.status = "completed"
+                        item.updated_at = now
+                    elif latest_run.status in {"failed", "interrupted"}:
+                        if active:
+                            raise PlatformError(
+                                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Terminal latest attempt has an older active attempt.", 409,
+                            )
+                        item.status = "failed"
+                        item.last_error_type = latest_run.error_type
+                        item.last_error_message = latest_run.error_message
+                        item.updated_at = now
+                    else:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Running item references an unknown run status.", 409,
+                        )
+                elif item.status == "completed":
+                    if latest is None or latest_run is None or latest_run.status != "completed":
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Completed item disagrees with its authoritative run.", 409,
+                        )
+                    if active:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Completed item retains an active attempt.", 409,
+                        )
+                elif item.status == "failed":
+                    if latest is not None and (
+                        latest_run is None or latest_run.status not in {"failed", "interrupted"}
+                    ):
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Failed item disagrees with its authoritative run.", 409,
+                        )
+                    if active:
+                        raise PlatformError(
+                            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Failed item retains an active attempt.", 409,
+                        )
+                else:
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                        "Item has an unknown status.", 409,
+                    )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0}
+        for item in items:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        return ReconcileSummary(
+            expected=len(items), queued=counts["queued"], running=counts["running"],
+            completed=counts["completed"], failed=counts["failed"],
+        )
+
+    def select_queued_items(self, experiment_id, limit):
+        if limit <= 0:
+            return []
+        return list(
+            self.session.scalars(
+                select(DatasetExperimentItemModel.id)
+                .where(
+                    DatasetExperimentItemModel.experiment_id == experiment_id,
+                    DatasetExperimentItemModel.status == "queued",
+                )
+                .order_by(DatasetExperimentItemModel.manifest_order.asc())
+                .limit(limit)
+            ).all()
+        )
