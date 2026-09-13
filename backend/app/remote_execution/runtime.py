@@ -31,6 +31,14 @@ def _not_certified(message: str) -> PlatformError:
     return PlatformError("EXECUTION_NOT_CERTIFIED", message)
 
 
+# Bounded authority-loss codes that may be treated as item-level (recoverable
+# deployment condition) once the persisted run has been terminalized.
+FROZEN_AUTHORITY_ITEM_CODES = (
+    "EXECUTION_CAPABILITY_UNAVAILABLE",
+    "EXECUTION_NOT_CERTIFIED",
+)
+
+
 @dataclass(frozen=True)
 class RuntimeDescriptor:
     executor: str
@@ -296,6 +304,41 @@ class ExecutorRegistry:
             technical=technical,
         )
         return certified[0] if certified else None
+
+    def validate_frozen_execution_authority(
+        self,
+        definition: PipelineDefinition,
+        model_release_id: str | None,
+        executor: str,
+        frozen_descriptor: RuntimeDescriptor,
+    ) -> "ExecutorProvider":
+        """Cheap, deterministic frozen-execution-authority check. Never probes.
+
+        Order (fail closed):
+          1. provider registered                -> EXECUTION_CAPABILITY_UNAVAILABLE
+          2. provider runtime descriptor EXACTLY matches the frozen internal
+             descriptor (full ``to_metadata()``, including environment identity)
+                                                 -> RUNTIME_DESCRIPTOR_INVALID
+          3. exact certificate for that identity -> EXECUTION_NOT_CERTIFIED
+        """
+        provider = self._providers.get(executor)
+        if provider is None:
+            raise PlatformError(
+                "EXECUTION_CAPABILITY_UNAVAILABLE",
+                f"Frozen executor '{executor}' is no longer registered.",
+            )
+        current = provider.runtime_descriptor()
+        if current is None or current.to_metadata() != frozen_descriptor.to_metadata():
+            raise PlatformError(
+                "RUNTIME_DESCRIPTOR_INVALID",
+                "Provider runtime descriptor no longer matches the frozen descriptor.",
+            )
+        if self.certified_capability(definition, model_release_id, executor) is None:
+            raise PlatformError(
+                "EXECUTION_NOT_CERTIFIED",
+                "No exact execution certificate for the frozen runtime identity.",
+            )
+        return provider
 
     def deployment_qualified_executors(
         self, definition: PipelineDefinition, model_release_id: str | None
