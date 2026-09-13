@@ -98,10 +98,13 @@ already exist before certificate issuance (it must never reference post-cert run
     `cpu_supported` or raw plugin declaration.
 18. One real ML case at a time (never concurrent); each real case in its own
     subprocess.
-19. **Cgroup memory gate:** before EVERY real model case in Task 8 and Task 11,
-    require `headroom = memory.max - memory.current >= 4 GiB`; otherwise STOP
-    `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`. Never auto-kill OpenCode / Jupyter /
-    TensorBoard / autopanel or unrelated processes to free memory.
+19. **Cgroup memory gate (superseded by Amendment A1):** before EVERY real model
+    case in Task 8 and Task 11, require `headroom = memory.max - memory.current
+    >= 4 GiB`; otherwise STOP `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`. Never auto-kill
+    OpenCode / Jupyter / TensorBoard / autopanel or unrelated processes to free
+    memory. (Original raw-headroom rule retained for provenance; Task 8/Task 11
+    admission now also permits the fail-closed cache-aware Path B defined in
+    **Amendment A1**.)
 20. **Honest resource evidence:** a controller process cannot read another
     process's torch CUDA allocator peaks. Record only what is externally
     observable (controller wall time; `/proc/<worker_pid>/status` RSS where
@@ -121,7 +124,7 @@ PRECISION_CONTRACT_UNRESOLVED          Task 1 cannot reconcile local_gpu precisi
 CUDA_PROBE_FAILED                      Task 2 probe cannot detect/prove CUDA readiness in the configured interpreter.
 ASSET_MISMATCH                         Task 8/9 asset manifest or bytes differ from the frozen golden manifests.
 PRE_CERT_GATE_FAILED                   Task 7: provider+capability without a certificate does NOT report EXECUTION_NOT_CERTIFIED.
-BHQ_3_BLOCKED_BY_CGROUP_MEMORY         Task 8/11 pre-launch gate: memory.max - memory.current < 4 GiB before a real ML worker.
+BHQ_3_BLOCKED_BY_CGROUP_MEMORY         Task 8/11 pre-launch gate (superseded by Amendment A1): memory.max - memory.current < 4 GiB before a real ML worker.
 REAL_LOCAL_GPU_ACCEPTANCE_FAILED       Task 8: real worker run does not reach completed with persisted DetectionResults.
 BHQ2_PARITY_FAILED                     Task 9: gross divergence between the committed direct-science oracle and the production local_gpu worker outputs.
 PRODUCTION_PATH_FAILED                 Task 11: post-cert real AnalysisRun fails or falls back to CPU/remote.
@@ -557,7 +560,8 @@ No certificate may be committed before this gate is green.
    where the temp cert tuple is
    `(plugin_id, "1.0.0", "golden", "local_gpu", "cuda", "float16", runtime_ref)`.
 4. `registry = ExecutorRegistry(providers, temp_store)`.
-5. **Pre-launch cgroup memory gate (per case, immediately before launch):**
+5. **Pre-launch cgroup memory gate (per case, immediately before launch)
+   [superseded by Amendment A1]:**
 
    ```python
    headroom = int(Path("/sys/fs/cgroup/memory.max").read_text()) - int(Path("/sys/fs/cgroup/memory.current").read_text())
@@ -566,6 +570,8 @@ No certificate may be committed before this gate is green.
    ```
 
    Never auto-kill OpenCode/Jupyter/TensorBoard/autopanel or unrelated processes.
+   **Amendment A1** replaces this call with `require_memory_admission()` (Path A
+   raw OR guarded Path B) plus live `MemoryMonitor` abort conditions.
 6. **Create provider work roots before `create_app`/availability:**
 
    ```python
@@ -790,7 +796,9 @@ produces a sealed BHQ-3 result.
    `WSP_LOCAL_INFERENCE_WORK_ROOT`, and the namespaced `WSP_LOCAL_ASSET_PATHS_JSON`
    for each golden manifest.
 2. **Pre-launch cgroup memory gate** (same as Task 8 step 5; `>= 4 GiB`, else STOP
-   `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`). Never auto-kill unrelated processes.
+   `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`) **[superseded by Amendment A1: use
+   `require_memory_admission()` + live monitor]**. Never auto-kill unrelated
+   processes.
 3. **Create work roots before `create_app`:**
 
    ```python
@@ -1015,6 +1023,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_local_gpu_pre_cert_gate.py -q
 
 # cgroup memory gate (MANDATORY before every real model case)
+# [superseded by Amendment A1: use scripts/bhq3_memory_gate.py require_memory_admission()]
 headroom=$(( $(cat /sys/fs/cgroup/memory.max) - $(cat /sys/fs/cgroup/memory.current) ))
 [ "$headroom" -ge $((4*1024*1024*1024)) ] || { echo BHQ_3_BLOCKED_BY_CGROUP_MEMORY; exit 1; }
 
@@ -1111,3 +1120,157 @@ No other production file may change. The final BHQ-3 seal is based on C8. The
 **FINAL BHQ-3 SEAL SHA** is the C8 commit SHA obtained by external Git
 verification after C8 is committed; it is reported in the execution report /
 reviewer audit and never self-referenced inside the C8 document.
+
+---
+
+# Amendment A1 — Cache-Aware Memory Admission
+
+**Status:** approved direction; implemented in acceptance-only tooling (not
+production). This amendment preserves the original sealed plan text above,
+which is annotated `superseded by Amendment A1` at its Task 8 step 5, Task 11
+step 2, global constraint 19, STOP-list entry, and verification-index gate.
+
+## A1.1 Provenance
+
+```text
+Original sealed plan SHA:                     589bf642b08276e6146cde4d1beb68e02cb39287
+Implementation checkpoint before amendment:   c0362993b57f5f4bc9ee379472eec195eb839c16
+(C1–C5 accepted; no C6/C7/C8; certificates unchanged)
+```
+
+## A1.2 Observed defect
+
+The original pre-launch gate `memory.max - memory.current >= 4 GiB` produces a
+**false negative** in a cache-dominated cgroup: clean, reclaimable file page
+cache is accounted in `memory.current`, so the raw gate cannot pass while the
+cache fills the limit, even though the workload's true (anonymous)
+memory is tiny and there is no OOM/pressure.
+
+## A1.3 Measured evidence (BHQ_MEMORY_RECLAIM_UNAVAILABLE report)
+
+```text
+memory.max       ≈ 90 GiB
+memory.current   ≈ 87 GiB
+anon             ≈ 1.4–1.5 GiB
+file             ≈ 85.3 GiB   (active_file ≈ 78.4 GiB)
+dirty/writeback  ≈ 0
+unevictable      = 0
+oom/oom_kill     = 0
+max events       = 0
+PSI current      ≈ 0
+memory.reclaim   unavailable  (Linux 5.15)
+cgroup2          read-only     (no cgroup-local reclaim possible)
+host MemAvailable ≈ 652 GiB
+```
+
+## A1.4 Replacement gate (fail-closed, two paths)
+
+Path A is unchanged raw admission; Path B is a **strictly guarded**
+cache-dominant admission. Any missing/unparseable required field, or any failed
+condition, blocks with `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`.
+
+### A1.4.1 Accounting model (total-minus-explicitly-clean)
+
+To avoid silently omitting future/other kernel-accounted memory, the amendment
+does NOT use an additive whitelist. It charges everything except explicitly
+clean file cache into a conservative `committed_floor`:
+
+```python
+clean_file_cache = max(file - shmem - file_dirty - file_writeback, 0)
+committed_floor  = max(memory.current - clean_file_cache, 0)
+raw_headroom       = memory.max - memory.current
+effective_headroom = memory.max - committed_floor
+clean_cache_ratio  = clean_file_cache / memory.current   (0.0 if current == 0)
+```
+
+Notes: `memory.stat:file` includes tmpfs/shared memory, so `shmem` is NOT
+treated as clean cache; dirty/writeback pages are NOT treated as immediately
+reclaimable; `slab_reclaimable` is deliberately NOT subtracted; all
+kernel/unknown accounting stays inside `committed_floor`.
+
+### A1.4.2 Path A
+
+```text
+raw_headroom >= 4 GiB  →  mode = raw
+```
+
+### A1.4.3 Path B (only when Path A fails)
+
+Require ALL (thresholds in the plan/tool config):
+
+```text
+ 1. finite memory.max (not "max")
+ 2. committed_floor <= 16 GiB
+ 3. effective_headroom >= 6 GiB
+ 4. clean_file_cache >= 50% of memory.current
+ 5. file_dirty + file_writeback <= 512 MiB
+ 6. unevictable <= 256 MiB
+ 7. shmem <= 2 GiB
+ 8. memory.low == 0
+ 9. memory.min == 0
+10. memory.events.max == 0
+11. memory.events.oom == 0
+12. memory.events.oom_kill == 0
+13. memory.pressure some avg10 <= 5.0     (PSI percentage)
+14. memory.pressure full avg10 <= 1.0     (PSI percentage)
+15. host MemAvailable >= 64 GiB
+```
+
+`memory.events.high` is **not** a blocker; it is expected when `memory.high`
+causes reclaim/throttling. PSI `avg10` values are stall **percentages**, not
+seconds. This cache-guarded path is host/workload-qualified BHQ acceptance
+logic, NOT a general production memory scheduler.
+
+## A1.5 Live monitor / abort conditions
+
+A pre-launch baseline snapshot is taken; the existing ~0.2 s acceptance poll
+cadence samples cgroup state during the run. Abort the case (and the remaining
+canary sequence) on ANY:
+
+```text
+Δoom > 0
+OR Δoom_kill > 0
+OR Δmemory.events.max > 0
+OR PSI full avg10 > 10.0 for >= 3 consecutive samples
+OR PSI some avg10 > 25.0 for >= 3 consecutive samples
+OR committed_floor rises > 6 GiB above pre-launch baseline
+OR effective_headroom < 4 GiB
+OR (memory.current > memory.max - 256 MiB AND PSI full is rising)
+```
+
+Expected and NOT failures: `file`/`active_file` decreasing, `pgscan`/`pgsteal`
+increasing, `memory.events.high` increasing, and `raw_headroom` remaining below
+4 GiB during a `cache_guarded` run.
+
+## A1.6 Guarded canary + driver order
+
+Path B admission is only ever used for a staged canary, one real case per fresh
+process, smallest-to-largest, re-evaluating admission from a fresh snapshot
+before every case:
+
+```text
+CPN stem 2 → CPN stem 0 → ZoomSpec stem 2 → ZoomSpec stem 0
+```
+
+Any abort stops the remaining sequence. After every successful case: require no
+`max`/`oom`/`oom_kill` delta and persist the memory evidence. The Task 9
+direct-science oracle is a real CUDA workload and is guarded under the same
+policy (parent controller → admission → one oracle child → ~0.2 s monitoring →
+SIGTERM the exact child on abort). No scientific code changes.
+
+## A1.7 Tooling (acceptance-only)
+
+```text
+scripts/bhq3_memory_gate.py          (new: pure evaluate() + reader + monitor)
+scripts/bhq3_common.py               (require_memory_admission; raw helper kept)
+scripts/bhq3_acceptance_core.py      (gate + live monitor + abort + evidence)
+scripts/bhq3_direct_science_oracle.py (guarded parent/child execution)
+backend/tests/test_bhq3_memory_gate.py (behavior tests)
+```
+
+`require_headroom_gib()` is retained as a raw-only compatibility helper with
+unchanged semantics. No `backend/app/**` production file changes.
+
+**Amendment commits:** A1-DOC (`docs: amend BHQ-3 memory admission gate
+(cache-aware)`) then A1-TOOLING (`test: add cache-aware BHQ-3 memory admission
+guard`).
