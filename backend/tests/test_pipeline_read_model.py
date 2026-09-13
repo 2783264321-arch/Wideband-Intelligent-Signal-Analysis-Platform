@@ -58,6 +58,7 @@ def test_list_pipelines_includes_plugin_fields(client):
     assert zoom["technical_execution_capabilities"] == [
         {"executor": "remote_gpu", "device_type": "cuda", "precision": "float16"},
         {"executor": "local_cpu", "device_type": "cpu", "precision": "float32"},
+        {"executor": "local_gpu", "device_type": "cuda", "precision": "float16"},
     ]
     assert zoom["recommended_execution"] == "remote_gpu"
 

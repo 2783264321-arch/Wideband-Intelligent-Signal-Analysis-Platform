@@ -172,7 +172,12 @@ def test_certified_capabilities_empty_for_wrong_runtime_ref():
 
 def test_loading_seed_certificates():
     certificates = load_execution_certificates(_CERT_PATH)
-    zoom_certificates = [cert for cert in certificates if cert.plugin_id == PLUGIN_ID]
+    # Select the historical remote_gpu ZoomSpec certificate explicitly (C7
+    # legitimately adds a second local_gpu ZoomSpec certificate).
+    zoom_certificates = [
+        cert for cert in certificates
+        if cert.plugin_id == PLUGIN_ID and cert.executor == "remote_gpu"
+    ]
     assert len(zoom_certificates) == 1
     cert = zoom_certificates[0]
     assert cert.plugin_version == PLUGIN_VERSION

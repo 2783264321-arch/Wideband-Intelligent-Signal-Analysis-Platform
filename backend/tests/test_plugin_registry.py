@@ -131,6 +131,7 @@ def test_zoomspec_declares_remote_gpu_capability_early():
     assert declaration.definition.technical_execution_capabilities == (
         ExecutionCapability("remote_gpu", "cuda", "float16"),
         ExecutionCapability("local_cpu", "cpu", "float32"),
+        ExecutionCapability("local_gpu", "cuda", "float16"),
     )
 
 
