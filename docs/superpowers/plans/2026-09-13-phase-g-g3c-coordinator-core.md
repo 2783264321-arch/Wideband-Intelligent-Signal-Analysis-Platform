@@ -608,6 +608,8 @@ EXPERIMENT_LEVEL_CODES = frozenset({
     "PLUGIN_NOT_FOUND",
     "PLUGIN_PARAMETERS_INVALID",
     "RECORDING_NOT_FOUND",
+    "REMOTE_IMPLEMENTATION_MISMATCH",
+    "PIPELINE_ASSET_MISMATCH",
 })
 
 ITEM_LEVEL_CODES = frozenset({
@@ -619,8 +621,6 @@ ITEM_LEVEL_CODES = frozenset({
     "REMOTE_EXECUTOR_UNAVAILABLE",
     "REMOTE_TRANSPORT_UNAVAILABLE",
     "REMOTE_PROBE_UNAVAILABLE",
-    "REMOTE_IMPLEMENTATION_MISMATCH",
-    "PIPELINE_ASSET_MISMATCH",
 })
 
 
@@ -1151,12 +1151,38 @@ Scheduling + classification tests
   started.
 - `test_experiment_level_release_failure_stops` — injects
   `MODEL_RELEASE_MISMATCH` or `EXECUTION_NOT_CERTIFIED` → Experiment `failed`.
+- `test_remote_runtime_drift_stops_experiment` — injects
+  `REMOTE_IMPLEMENTATION_MISMATCH` on the pre-run prepare/probe path for the first
+  queued Item → Experiment `failed`; no later queued Item starts; the failing
+  Item is not merely projected Item-level; pre-existing Runs/results preserved.
+- `test_remote_asset_drift_stops_experiment` — injects `PIPELINE_ASSET_MISMATCH`
+  on the pre-run scheduling path → Experiment `failed`; no later queued Item
+  starts.
 - `test_impossible_launch_state_stops` — injects `ANALYSIS_RUN_NOT_LAUNCHABLE`
   → Experiment `failed`.
 - `test_unknown_platform_error_fails_closed` — injected code not in either set
   → Experiment `failed`.
 - `test_scheduling_uses_g3a_then_g3b`
 - `test_no_direct_prepare_run_or_provider_launch` (source scan)
+
+`_mark_item_failed` coverage (`test_dataset_experiment_start.py` or a dedicated
+`test_dataset_experiment_mark_item_failed.py`), real Sessions:
+
+- `test_mark_item_failed_wrong_experiment_fails_closed` — Item belongs to
+  Experiment B; call `_mark_item_failed(item_b, ..., experiment_id=A,
+  coordinator_token=A_valid)` → `DATASET_EXPERIMENT_INVARIANT_VIOLATION`; Item B
+  unchanged.
+- `test_mark_item_failed_already_failed_is_idempotent` — same Experiment, valid
+  generation, Item already `failed` → returns `False`; Item remains `failed`; no
+  ownership/invariant error.
+- `test_mark_item_failed_queued_projects_failed_once` — valid queued Item →
+  returns `True`; `status="failed"` with bounded `last_error_type`/
+  `last_error_message`; a second call returns `False` (exactly one durable
+  mutation).
+- `test_mark_item_failed_running_projects_failed_once` — valid running Item →
+  same assertions.
+- `test_mark_item_failed_stale_generation_fence_lost` — stale token →
+  `DATASET_EXPERIMENT_FENCE_LOST`; zero Item mutation (retained).
 
 Shared one-step helper:
 
@@ -1317,16 +1343,34 @@ a fresh final pytest summary. Commit: `test: add phase G G3C regression matrix`.
 | `PLUGIN_NOT_FOUND` | Experiment-level | frozen plugin identity drift |
 | `PLUGIN_PARAMETERS_INVALID` | Experiment-level | frozen parameters drift |
 | `RECORDING_NOT_FOUND` | Experiment-level | frozen membership corruption |
+| `REMOTE_IMPLEMENTATION_MISMATCH` | Experiment-level | live remote runtime commit drifted from the frozen required runtime commit (§14.2 execution-identity drift) |
+| `PIPELINE_ASSET_MISMATCH` | Experiment-level | pre-run remote probe returned an asset manifest SHA different from the frozen release manifest (§14.2 ModelRelease/AssetManifest drift) |
 | `INPUT_INCOMPATIBLE` | Item-level | recording-specific input failure |
 | `EXECUTOR_UNAVAILABLE` | Item-level | recording-specific probe failure |
 | `ANALYSIS_FAILED` | Item-level | provider execution failure |
 | `SOURCE_DATA_NOT_FOUND` / `SOURCE_DATA_NOT_FILE` | Item-level | recording source failure |
-| `REMOTE_EXECUTOR_UNAVAILABLE` / `REMOTE_TRANSPORT_UNAVAILABLE` / `REMOTE_PROBE_UNAVAILABLE` / `REMOTE_IMPLEMENTATION_MISMATCH` | Item-level | recording-specific remote failure |
-| `PIPELINE_ASSET_MISMATCH` | Item-level | recording-specific asset failure |
+| `REMOTE_EXECUTOR_UNAVAILABLE` / `REMOTE_TRANSPORT_UNAVAILABLE` / `REMOTE_PROBE_UNAVAILABLE` | Item-level | recording-specific remote availability failure |
 | any other code | Experiment-level (fail closed) | unknown → stop |
 
 `DATASET_EXPERIMENT_FENCE_LOST` is handled before the table and maps to
 `FENCE_LOST` (no Experiment failure).
+
+### Pre-run vs run-level `PIPELINE_ASSET_MISMATCH`
+
+`is_experiment_level()` classifies only errors observed on the **pre-run
+scheduling path** (revalidation, `prepare_run` availability/probe, G3-A/G3-B
+claims). On that path, `PIPELINE_ASSET_MISMATCH` and
+`REMOTE_IMPLEMENTATION_MISMATCH` mean the live remote deployment drifted from the
+frozen required runtime commit / release asset manifest — a frozen
+execution/scientific identity failure (§14.2) that must fail the Experiment and
+stop scheduling.
+
+A run-level asset/deployment failure that occurs **after** an `AnalysisRun` has
+physically launched (worker/remote-runtime execution failure) is an
+`AnalysisRun` terminal outcome and is projected by reconciliation into
+`Item.failed` (§14.1). It never passes through the coordinator's pre-run
+`is_experiment_level()` classifier, so moving these two codes to
+Experiment-level does not change §14.1 run-level failure semantics.
 
 ---
 
@@ -1363,12 +1407,15 @@ For a `queued` Item:
    complete exact code above. PASS
 2. Error classification table, prose, and tests agree:
    `test_item_level_failure...` uses `INPUT_INCOMPATIBLE`;
-   `EXECUTION_CAPABILITY_UNAVAILABLE` is Experiment-level. PASS
+   `EXECUTION_CAPABILITY_UNAVAILABLE` is Experiment-level;
+   `REMOTE_IMPLEMENTATION_MISMATCH` and `PIPELINE_ASSET_MISMATCH` are
+   Experiment-level on the pre-run path, with run-level projection unchanged. PASS
 3. Queued historical Attempts allow only failed/interrupted; completed → invariant. PASS
 4. Matching-token tests persist `Experiment.coordinator_token = token` before the
    fenced call. PASS
 5. `_mark_item_failed` includes `experiment_id` in the UPDATE and precisely
-   classifies zero-row outcomes (missing/wrong-experiment/terminal/invalid). PASS
+   classifies zero-row outcomes; wrong-experiment, idempotent-terminal, and
+   exactly-once queued/running projection tests are enumerated. PASS
 6. Reconciliation keeps `try/commit/except rollback`; coordinator rolls back
    before `_fail_experiment`; all-or-nothing test present. PASS
 7. Generation claims remain in the final CAS (EXISTS); no SELECT-then-UPDATE,
