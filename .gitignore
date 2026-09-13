@@ -25,3 +25,7 @@ data/cache/spectrograms/*
 
 backend/tests/.tiny_iq.bin
 backend/tests/.burst_iq.bin
+
+# G6 acceptance artifacts (never committed)
+g6_acceptance.db
+data/g6_work/
