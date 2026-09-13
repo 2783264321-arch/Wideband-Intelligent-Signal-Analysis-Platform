@@ -234,3 +234,27 @@ def test_benchmark_start_failure_after_link_fails_evaluating_experiment(client):
         stored = fresh.get(DatasetExperimentModel, experiment.id)
         assert stored.status == "failed"
         assert stored.error_type == "DATASET_EXPERIMENT_EVALUATION_FAILED"
+
+
+def test_post_link_failure_projection_stale_generation_returns_fence_lost(client, monkeypatch):
+    session, ds, analysis, provider, experiment = _all_success_experiment(client)
+
+    def rotate_then_raise(self, experiment_id, evaluation_id, coordinator_token, job_manager):
+        with client.app.state.database.session_factory() as other:
+            stored = other.get(DatasetExperimentModel, experiment_id)
+            stored.coordinator_token = "T2"
+            other.commit()
+        raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION", "post-link", 409)
+
+    monkeypatch.setattr(DatasetExperimentService, "start_linked_evaluation", rotate_then_raise)
+
+    coordinator = _coordinator(
+        client, provider=provider, job_manager=RecordingBenchmarkJobManager()
+    )
+    outcome = coordinator.step(experiment.id, "T")
+
+    assert outcome == CoordinatorOutcome.FENCE_LOST
+    with client.app.state.database.session_factory() as fresh:
+        stored = fresh.get(DatasetExperimentModel, experiment.id)
+        assert stored.coordinator_token == "T2"
+        assert stored.status == "evaluating"
