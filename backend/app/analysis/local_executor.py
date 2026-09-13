@@ -30,6 +30,42 @@ _LOCAL_SPECS = {
     "local_gpu": ("local_gpu_python_path", "local_gpu_runtime_ref", "cuda", "float16"),
 }
 
+# Platform-owned, bounded CUDA health probe executed INSIDE the configured ML
+# interpreter. The control-plane process never imports torch. No user-controlled
+# Python code is ever executed; only this fixed script plus the configured index.
+_GPU_PROBE_SCRIPT = """
+import json, sys
+result = {"ok": False, "reason": None, "detail": {}}
+try:
+    import torch
+except Exception:
+    result["reason"] = "torch import failed"
+    print(json.dumps(result)); sys.exit(0)
+try:
+    if not torch.cuda.is_available():
+        result["reason"] = "cuda unavailable"
+        print(json.dumps(result)); sys.exit(0)
+    index = int(sys.argv[1])
+    count = torch.cuda.device_count()
+    if count <= index:
+        result["reason"] = "configured cuda device index is not available"
+        print(json.dumps(result)); sys.exit(0)
+    props = torch.cuda.get_device_properties(index)
+    x = torch.randn((64, 64), device="cuda:%d" % index, dtype=torch.float16)
+    y = x @ x
+    torch.cuda.synchronize()
+    result["ok"] = True
+    result["detail"] = {
+        "device_name": props.name,
+        "compute_capability": [props.major, props.minor],
+        "device_count": count,
+    }
+except Exception as exc:
+    result["reason"] = "cuda health check failed: " + type(exc).__name__
+print(json.dumps(result))
+"""
+_GPU_PROBE_TIMEOUT_S = 120
+
 
 class LocalInferenceWorkerProvider:
     """Launches a plugin-native local inference worker with a configured interpreter."""
@@ -51,6 +87,8 @@ class LocalInferenceWorkerProvider:
         self._device_type, self._precision = (
             ("cuda", "float16") if executor_kind == "local_gpu" else ("cpu", "float32")
         )
+        # BHQ-3 supports CUDA device index 0 for local_gpu only.
+        self._device_index = 0
 
     @property
     def name(self) -> str:
@@ -70,8 +108,8 @@ class LocalInferenceWorkerProvider:
             environment_label=self._runtime_ref,
         )
 
-    def probe(self) -> tuple[bool, str | None]:
-        """Check the configured interpreter and work root. Never assume CPU is ready."""
+    def _probe_interpreter(self) -> tuple[bool, str | None]:
+        """Check the configured interpreter and work root. Never assume readiness."""
         if not self._interpreter.is_file():
             return False, "Configured local inference interpreter does not exist."
         if not os.access(self._interpreter, os.X_OK):
@@ -89,6 +127,44 @@ class LocalInferenceWorkerProvider:
             return False, "Unable to run the configured local inference interpreter."
         if result.returncode != 0:
             return False, "Configured local inference interpreter failed its health check."
+        return True, None
+
+    def _probe_gpu(self) -> tuple[bool, str | None]:
+        """CUDA health check via the configured ML interpreter (never the control plane)."""
+        try:
+            result = subprocess.run(
+                [str(self._interpreter), "-c", _GPU_PROBE_SCRIPT, str(self._device_index)],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=_GPU_PROBE_TIMEOUT_S,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, "Unable to run the configured local GPU probe."
+        if result.returncode != 0:
+            return False, "Configured local GPU interpreter failed its CUDA health check."
+        payload = None
+        for line in reversed((result.stdout or "").strip().splitlines()):
+            try:
+                candidate = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(candidate, dict) and "ok" in candidate:
+                payload = candidate
+                break
+        if payload is None:
+            return False, "Configured local GPU probe returned no valid result."
+        if not payload.get("ok"):
+            return False, payload.get("reason") or "Configured local GPU runtime is not ready."
+        return True, None
+
+    def probe(self) -> tuple[bool, str | None]:
+        """Check the configured interpreter/work root, then CUDA for local_gpu."""
+        ok, reason = self._probe_interpreter()
+        if not ok:
+            return ok, reason
+        if self._executor_kind == "local_gpu":
+            return self._probe_gpu()
         return True, None
 
     def availability(

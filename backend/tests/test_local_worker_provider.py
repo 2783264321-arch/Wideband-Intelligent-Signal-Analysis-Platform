@@ -1,11 +1,13 @@
 """TASK D2 — local inference-worker providers use a configured ML interpreter."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from app.analysis import local_executor
 from app.analysis.local_executor import LocalInferenceWorkerProvider, build_local_providers
 from app.core.config import Settings
 
@@ -160,3 +162,156 @@ def test_launch_propagates_required_worker_env(tmp_path, monkeypatch):
     assert env["WSP_DATABASE_URL"] == str(settings.database_url)
     assert env["WSP_LOCAL_INFERENCE_RUNTIME_REF"] == "local-gen-1"
     assert json.loads(env["WSP_LOCAL_ASSET_PATHS_JSON"]) == asset_map
+
+
+# ---------------------------------------------------------------------------
+# TASK BHQ-3 C1 — CUDA-aware local_gpu probe (control-plane, ML-free)
+# ---------------------------------------------------------------------------
+
+
+def _completed(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+def _gpu_provider(tmp_path: Path) -> LocalInferenceWorkerProvider:
+    return LocalInferenceWorkerProvider(
+        interpreter=_fake_interpreter(tmp_path),
+        runtime_ref="local:autodl_primary:gpu:test",
+        work_root=tmp_path,
+        executor_kind="local_gpu",
+    )
+
+
+def _patch_probe(monkeypatch, gpu_stdout: str, calls: list):
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if len(argv) == 3:  # interpreter health stage: [interp, "-c", "import sys"]
+            return _completed("")
+        return _completed(gpu_stdout)  # GPU probe stage: [interp, "-c", SCRIPT, index]
+
+    monkeypatch.setattr(local_executor.subprocess, "run", fake_run)
+
+
+def test_local_gpu_probe_success_parses_cuda_payload(tmp_path, monkeypatch):
+    calls: list = []
+    payload = json.dumps({
+        "ok": True,
+        "detail": {"device_name": "NVIDIA GeForce RTX 5090", "compute_capability": [12, 0], "device_count": 1},
+    })
+    _patch_probe(monkeypatch, payload, calls)
+    ok, reason = _gpu_provider(tmp_path).probe()
+    assert ok is True
+    assert reason is None
+    # GPU stage invoked with the configured device index and the platform script.
+    assert len(calls) == 2
+    assert calls[1][1] == "-c"
+    assert calls[1][3] == "0"
+
+
+def test_local_gpu_probe_torch_import_failure(tmp_path, monkeypatch):
+    _patch_probe(monkeypatch, json.dumps({"ok": False, "reason": "torch import failed"}), [])
+    ok, reason = _gpu_provider(tmp_path).probe()
+    assert ok is False
+    assert "torch import failed" in reason
+
+
+def test_local_gpu_probe_cuda_unavailable(tmp_path, monkeypatch):
+    _patch_probe(monkeypatch, json.dumps({"ok": False, "reason": "cuda unavailable"}), [])
+    ok, reason = _gpu_provider(tmp_path).probe()
+    assert ok is False
+    assert "cuda unavailable" in reason
+
+
+def test_local_gpu_probe_device_index_absent(tmp_path, monkeypatch):
+    _patch_probe(
+        monkeypatch,
+        json.dumps({"ok": False, "reason": "configured cuda device index is not available"}),
+        [],
+    )
+    ok, reason = _gpu_provider(tmp_path).probe()
+    assert ok is False
+    assert "device index" in reason
+
+
+def test_local_gpu_probe_fp16_operation_failure(tmp_path, monkeypatch):
+    _patch_probe(monkeypatch, json.dumps({"ok": False, "reason": "cuda health check failed: RuntimeError"}), [])
+    ok, reason = _gpu_provider(tmp_path).probe()
+    assert ok is False
+    assert "cuda health check failed" in reason
+
+
+def test_local_gpu_probe_nonzero_exit_fails_closed(tmp_path, monkeypatch):
+    def fake_run(argv, **kwargs):
+        if len(argv) == 3:
+            return _completed("")
+        return _completed("", returncode=1)
+
+    monkeypatch.setattr(local_executor.subprocess, "run", fake_run)
+    ok, reason = _gpu_provider(tmp_path).probe()
+    assert ok is False
+    assert reason
+
+
+def test_local_gpu_probe_interpreter_missing(tmp_path):
+    provider = LocalInferenceWorkerProvider(
+        interpreter=tmp_path / "missing_python",
+        runtime_ref="local:autodl_primary:gpu:test",
+        work_root=tmp_path,
+        executor_kind="local_gpu",
+    )
+    ok, reason = provider.probe()
+    assert ok is False
+    assert reason
+
+
+def test_local_gpu_probe_interpreter_not_executable(tmp_path):
+    interpreter = tmp_path / "python"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o644)
+    provider = LocalInferenceWorkerProvider(
+        interpreter=interpreter,
+        runtime_ref="local:autodl_primary:gpu:test",
+        work_root=tmp_path,
+        executor_kind="local_gpu",
+    )
+    ok, reason = provider.probe()
+    assert ok is False
+    assert reason
+
+
+def test_local_cpu_probe_unchanged(tmp_path, monkeypatch):
+    calls: list = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _completed("")
+
+    monkeypatch.setattr(local_executor.subprocess, "run", fake_run)
+    provider = _provider(tmp_path, executor_kind="local_cpu")
+    ok, reason = provider.probe()
+    assert ok is True
+    assert reason is None
+    # CPU provider runs ONLY the interpreter health check (no CUDA probe stage).
+    assert len(calls) == 1
+
+
+def test_local_executor_import_is_ml_free_subprocess():
+    import os
+
+    backend_root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys; import app.analysis.local_executor; "
+        "assert 'torch' not in sys.modules and 'ultralytics' not in sys.modules; "
+        "print('LOCAL_EXECUTOR_ML_FREE_OK')"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(backend_root) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(backend_root),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "LOCAL_EXECUTOR_ML_FREE_OK" in result.stdout
