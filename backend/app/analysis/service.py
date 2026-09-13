@@ -14,6 +14,9 @@ from app.pipelines.plugin import validate_plugin_parameters
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
 from app.remote_execution.executor import RemoteExecutorProbe
+from app.remote_execution.runtime import FROZEN_AUTHORITY_ITEM_CODES, RuntimeDescriptor
+
+_LOCAL_EXECUTORS = ("local_cpu", "local_gpu")
 
 
 def mark_stale_running_runs_interrupted(session: Session) -> int:
@@ -246,6 +249,20 @@ class AnalysisService:
 
     # ---------- physical launch of an already-persisted prepared run ----------
 
+    def _terminalize_unlaunched_local_run(self, run: AnalysisRunModel, code: str, message: str) -> None:
+        """Terminalize a persisted, never-launched local run (Plan A1).
+
+        Only acts on a ``pending`` run with no worker; never rewrites a terminal
+        run and never touches remote runs.
+        """
+        if run.status != "pending" or run.worker_pid is not None:
+            return
+        run.status = "failed"
+        run.error_type = code
+        run.error_message = (message or "")[:1000]
+        run.finished_at = datetime.now(timezone.utc)
+        self.session.commit()
+
     def launch_prepared_run(self, run_id: str) -> AnalysisRunModel:
         """Physically launch an already-persisted prepared AnalysisRun.
 
@@ -282,7 +299,35 @@ class AnalysisService:
             raise PlatformError(
                 "EXECUTION_CAPABILITY_UNAVAILABLE", "Executor registry is not configured."
             )
-        provider = self.executor_registry.provider(run.executor)
+        try:
+            provider = self.executor_registry.provider(run.executor)
+        except PlatformError as exc:
+            if run.executor in _LOCAL_EXECUTORS:
+                self._terminalize_unlaunched_local_run(run, exc.code, exc.message)
+            raise
+
+        if run.executor in _LOCAL_EXECUTORS:
+            # Pre-launch frozen execution-authority revalidation (Plan A1).
+            try:
+                definition = self.registry.get(run.pipeline_id).definition
+                if definition.version != run.pipeline_version:
+                    raise PlatformError(
+                        "RUNTIME_DESCRIPTOR_INVALID",
+                        "Active plugin version no longer matches the frozen plugin version.",
+                    )
+                metadata = run.execution_metadata_json or {}
+                frozen_descriptor = RuntimeDescriptor.from_metadata(
+                    metadata.get("runtime_descriptor")
+                )
+                self.executor_registry.validate_frozen_execution_authority(
+                    definition,
+                    metadata.get("model_release_id"),
+                    run.executor,
+                    frozen_descriptor,
+                )
+            except PlatformError as exc:
+                self._terminalize_unlaunched_local_run(run, exc.code, exc.message)
+                raise
 
         coordinator_token = None
         if run.executor == "remote_gpu":

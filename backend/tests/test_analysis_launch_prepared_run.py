@@ -293,6 +293,11 @@ def test_launch_prepared_run_missing_provider_fails_closed(client):
     with pytest.raises(PlatformError) as exc:
         empty.launch_prepared_run("run_noprov")
     assert exc.value.code == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    with client.app.state.database.session_factory() as fresh:
+        stored = fresh.get(AnalysisRunModel, "run_noprov")
+    assert stored.status == "failed"                       # Plan A1: no stale pending
+    assert stored.error_type == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    assert stored.worker_pid is None
 
 
 def test_launch_prepared_run_remote_missing_token_fails_closed(client):
@@ -343,3 +348,90 @@ def test_launch_prepared_run_remote_failure_uses_remote_message(client):
     assert exc.value.message == "Unable to launch remote coordinator."
     with client.app.state.database.session_factory() as fresh:
         assert fresh.get(AnalysisRunModel, run.id).status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Plan A1 / Task 5 — standalone single-recording pre-launch authority fail-close
+# ---------------------------------------------------------------------------
+
+
+def _prepared_local_run(client):
+    _add_recording(client)
+    service, provider, registry = _service_local(client)
+    run = _prepare_local(service)
+    service.session.commit()
+    return service, provider, registry, run
+
+
+def test_launch_prepared_local_run_provider_disappeared_terminalizes_run(client):
+    service, provider, registry, run = _prepared_local_run(client)
+    registry._providers.pop("local_cpu")
+    with pytest.raises(PlatformError) as exc:
+        service.launch_prepared_run(run.id)
+    assert exc.value.code == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    with client.app.state.database.session_factory() as fresh:
+        stored = fresh.get(AnalysisRunModel, run.id)
+    assert stored.status == "failed"
+    assert stored.error_type == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    assert stored.worker_pid is None
+
+
+def test_launch_prepared_local_run_runtime_generation_changed_terminalizes(client):
+    service, provider, registry, run = _prepared_local_run(client)
+    provider._runtime_ref = "local:autodl_primary:cpu:different"  # frozen identity drift
+    with pytest.raises(PlatformError) as exc:
+        service.launch_prepared_run(run.id)
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
+    with client.app.state.database.session_factory() as fresh:
+        stored = fresh.get(AnalysisRunModel, run.id)
+    assert stored.status == "failed"
+    assert stored.error_type == "RUNTIME_DESCRIPTOR_INVALID"
+
+
+def test_launch_prepared_local_run_plugin_version_changed_terminalizes(client):
+    service, provider, registry, run = _prepared_local_run(client)
+    run.pipeline_version = "2.0"   # frozen plugin version no longer active
+    service.session.commit()
+    with pytest.raises(PlatformError) as exc:
+        service.launch_prepared_run(run.id)
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
+    with client.app.state.database.session_factory() as fresh:
+        stored = fresh.get(AnalysisRunModel, run.id)
+    assert stored.status == "failed"
+    assert stored.worker_pid is None
+
+
+def test_create_run_provider_disappears_after_prepare_does_not_leave_pending(client):
+    service, provider, registry, run = _prepared_local_run(client)
+    assert run.status == "pending"
+    registry._providers.pop("local_cpu")
+    with pytest.raises(PlatformError):
+        service.launch_prepared_run(run.id)
+    with client.app.state.database.session_factory() as fresh:
+        pending = fresh.query(AnalysisRunModel).filter_by(status="pending").count()
+    assert pending == 0
+
+
+def test_launch_prepared_remote_provider_missing_unchanged(client):
+    _add_recording(client)
+    session = client.app.state.database.session_factory()
+    session.add(AnalysisRunModel(
+        id="run_rem", recording_id="rec_x", pipeline_id="remote_test",
+        pipeline_version="1.0", executor="remote_gpu", status="pending",
+        parameters_json={}, execution_metadata_json={
+            "runtime_descriptor": {}, "coordinator_token": "coord_x",
+        },
+    ))
+    session.commit()
+    service = AnalysisService(
+        client.app.state.database.session_factory(),
+        PipelineRegistry([]),
+        client.app.state.job_manager,
+        executor_registry=FakeRegistry({}),
+    )
+    with pytest.raises(PlatformError) as exc:
+        service.launch_prepared_run("run_rem")
+    assert exc.value.code == "EXECUTION_CAPABILITY_UNAVAILABLE"
+    with client.app.state.database.session_factory() as fresh:
+        stored = fresh.get(AnalysisRunModel, "run_rem")
+    assert stored.status == "pending"   # remote pending owned by remote recovery (unchanged)
