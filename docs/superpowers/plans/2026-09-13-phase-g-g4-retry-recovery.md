@@ -681,6 +681,12 @@ def start_recovered_coordinator(session, experiment_id, coordinator_token,
     """Spawn the recovered coordinator outside any transaction, then persist the
     PID guarded by the fresh token and ``status == running``.
 
+    Precondition: the CALLER has no open SQLAlchemy transaction when
+    ``job_manager.start()`` is invoked. ``recover_dataset_experiments``
+    explicitly closes any autobegun read transaction before calling this. This
+    function itself opens NO SELECT/read transaction before spawning; it spawns
+    outside a transaction and only then opens the PID-persistence transaction.
+
     On spawn failure the Experiment is left ``running`` with the fresh token and
     ``worker_pid NULL`` so the next startup recovery can retry. Returns the PID,
     or ``None`` on spawn failure.
@@ -757,6 +763,7 @@ def recover_dataset_experiments(session, *, job_manager, registry,
                 report=report,
             )
         except PlatformError as exc:
+            session.rollback()
             if exc.code == "DATASET_EXPERIMENT_FENCE_LOST":
                 report.skipped += 1
                 continue
@@ -765,6 +772,15 @@ def recover_dataset_experiments(session, *, job_manager, registry,
             )
             report.invariants_failed += 1
             continue
+        except Exception:
+            session.rollback()
+            raise
+
+        # `repair_local_pending_runs` may have issued read-only ORM SELECTs after
+        # its last durable commit. SQLAlchemy autobegin therefore may have opened
+        # a read transaction. Close it before subprocess spawn.
+        session.rollback()
+
         started_pid = start_recovered_coordinator(
             session, experiment_id, claimed_token, job_manager
         )
@@ -777,13 +793,15 @@ def recover_dataset_experiments(session, *, job_manager, registry,
 
 **Task 2 stage delta:** at the end of Task 2 the module contains everything
 above EXCEPT `start_recovered_coordinator`, the two report fields
-`coordinators_started`/`spawn_failures`, and the final spawn block in
-`recover_dataset_experiments`. Its signature at Task 2 is
+`coordinators_started`/`spawn_failures`, the final spawn block in
+`recover_dataset_experiments`, and the pre-spawn `session.rollback()` boundary
+that closes autobegun read transactions (the boundary only matters once a spawn
+exists). Its signature at Task 2 is
 `recover_dataset_experiments(session, *, registry, model_release_store,
 executor_registry, startup_recovery_cutoff)`. Task 3 adds the deferred pieces
-exactly as shown. `claim_experiment_generation(..., startup_recovery_cutoff)`
-and the generation-fenced `fail_closed_pending_local_run(...)` are part of the
-Task 2 module.
+exactly as shown. `claim_experiment_generation(..., startup_recovery_cutoff)`,
+the generation-fenced `fail_closed_pending_local_run(...)`, and the error-path
+`session.rollback()` calls are part of the Task 2 module.
 
 ### C. `backend/app/main.py` — startup integration (Task 4)
 
@@ -989,6 +1007,10 @@ TRANSACTION (one commit) — claim_experiment_generation:
     COMMIT
     IF rowcount != 1: return None (loser; no token, no spawn)
 
+PRECONDITION before spawn:
+    reconcile + local repair may have issued read-only ORM SELECTs, which
+    autobegin a read transaction; explicitly session.rollback() to close it
+
 OUTSIDE TRANSACTION:
     pid = job_manager.start(experiment_id, fresh_token)
 
@@ -1136,19 +1158,33 @@ B from writing at all, which is what makes A's post-B launch deterministic.
 
 ## TRANSACTION HYGIENE
 
-Every G4 recovery write follows the sealed G3-C standard — explicit
-`try / commit / except rollback / raise`, never reusing a failed Session:
+ORM `SELECT`s may **autobegin** a SQLAlchemy transaction even on read-only
+paths. Therefore every recovery write follows the sealed G3-C standard
+(`try / commit / except rollback / raise`, never reusing a failed Session), and
+recovery MUST explicitly close read/autobegun transactions before any subprocess
+spawn.
 
-| Write | Hygiene |
+| Operation | Hygiene |
 |---|---|
 | `claim_experiment_generation` | `try: session.execute(CAS); session.commit()` / `except: session.rollback(); raise` |
-| `fail_closed_pending_local_run` | `try: session.execute(generation-fenced UPDATE); session.commit()` / `except: session.rollback(); raise` |
+| `fail_closed_pending_local_run` | `try: session.execute(generation-fenced UPDATE); session.commit()` / `except: session.rollback(); raise`; zero-row generation diagnostics run in a fresh read transaction which the outer catch rolls back |
 | `start_recovered_coordinator` PID persist | `try: session.execute(guarded UPDATE); session.commit()` / `except: session.rollback(); raise` |
+| `recover_dataset_experiments` pre-spawn boundary | explicit `session.rollback()` after reconcile/repair and BEFORE `start_recovered_coordinator`, closing any autobegun read transaction |
+| `recover_dataset_experiments` error paths | `except PlatformError: session.rollback()` before FENCE_LOST `continue` and before `ds._fail_experiment(...)`; `except Exception: session.rollback(); raise` |
 | `retry_failed` Transaction 1 | guarded CAS + Item requeue, `commit`; `except PlatformError: raise`; `except Exception: rollback; raise` |
 | `retry_failed` Transaction 2 (PID) | `try: ...; commit` / `except: rollback; raise` |
 | `_restore_retry_failed` | ownership CAS first; `rowcount != 1 -> rollback; return False`; else Item restore + `commit`; `except: rollback; raise` |
 
-Spawn and provider physical launch stay outside every DB transaction.
+Spawn and provider physical launch stay outside every DB transaction. The
+pre-spawn `session.rollback()` discards only read/autobegin state: every durable
+mutation before that point owns its own commit boundary (generation claim,
+reconciliation, G3-B Transaction B before physical first launch,
+`AnalysisService` launch persistence, ambiguous Run fail-close).
+
+`start_recovered_coordinator` does not open a SELECT/read transaction before
+`job_manager.start()`. It is NOT automatically "outside a transaction" merely
+because its own body omits an explicit `begin()`: the caller is responsible for
+closing the autobegun read transaction first.
 
 ---
 
@@ -1565,6 +1601,20 @@ Tests:
 - `test_claim_generation_commit_failure_rolls_back` — monkeypatch `session.commit`
   to raise; `claim_experiment_generation` rolls back and re-raises; fresh DB
   keeps the original token (no partial ownership write).
+- `test_fence_loss_diagnostic_rolls_back_and_session_reusable` — monkeypatch
+  `rec.fail_closed_pending_local_run` to perform a diagnostic `session.execute`
+  read and then raise `DATASET_EXPERIMENT_FENCE_LOST`; run recovery over two
+  eligible running Experiments; assert `skipped == 1`, the second Experiment is
+  still processed normally in the SAME pass, zero stale Run/Item mutation, and
+  `session.in_transaction() is False` after recovery (no retained diagnostic
+  transaction).
+- `test_invariant_failure_rolls_back_before_fail_experiment` — monkeypatch
+  `DatasetExperimentService._fail_experiment` with a wrapper that asserts
+  `session.in_transaction() is False` at call time, then delegates; trigger a
+  non-FENCE `DATASET_EXPERIMENT_INVARIANT_VIOLATION` after read activity in the
+  repair phase; assert rollback happened BEFORE `_fail_experiment`, the
+  Experiment is durably `failed`, and no unrelated read-state mutation was
+  committed.
 - `test_safe_first_launch_reuses_same_attempt_and_run` — marker `NULL`;
   `recover_first` path; fresh DB: Attempt count and Run count unchanged, same ids,
   `launch_requested_at is not None`, provider launch once.
@@ -1680,6 +1730,21 @@ Tests:
 - `test_recover_pid_commit_failure_rolls_back` — monkeypatch `session.commit` to
   raise on the PID-persist transaction; the error propagates after rollback and
   the coordinator token/generation is not silently half-written.
+- `test_all_success_read_path_spawns_outside_transaction` — running Experiment,
+  all Items completed with completed Runs; recovery with a `RecordingJobManager`
+  whose `on_start(experiment_id, token)` probe asserts
+  `not recovery_session.in_transaction()` at the instant of spawn; then assert
+  `coordinators_started == 1`, Run/Attempt counts unchanged, Experiment still
+  `running`.
+- `test_read_only_repair_path_closes_autobegin_transaction` — running Experiment
+  with a `remote_gpu` pending Run so the repair phase performs only ORM SELECTs
+  and no local durable repair; the `on_start` probe asserts
+  `recovery_session.in_transaction() is False`; this test is RED without the
+  pre-spawn `session.rollback()`.
+
+Task 3 scaffolding note: `_recover` in this file creates the recovery Session
+explicitly and returns `(report, session)` so the `RecordingJobManager.on_start`
+probe can assert `session.in_transaction()` at spawn time.
 
 ### Steps
 
@@ -1882,6 +1947,15 @@ mutated. DetectionResults are never touched.
 22. recovery writes use explicit `try / commit / except rollback / raise` and
     never reuse a failed Session; spawn/provider launch stay outside
     transactions. PASS
+23. no subprocess spawn can occur while `session.in_transaction()` is true:
+    `recover_dataset_experiments` explicitly `session.rollback()`s any autobegun
+    read transaction before `start_recovered_coordinator`. PASS
+24. read-only ORM recovery paths explicitly close autobegun transactions before
+    spawn. PASS
+25. FENCE_LOST diagnostics and other PlatformError paths rollback before
+    `continue` / `ds._fail_experiment`. PASS
+26. every durable write retains its own commit boundary; the pre-spawn rollback
+    discards only read/autobegin state. PASS
 
 ---
 
