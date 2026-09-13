@@ -250,8 +250,8 @@ class AnalysisService:
         """Physically launch an already-persisted prepared AnalysisRun.
 
         Durable commit ordering is a CALLER precondition:
-            G3 Transaction A COMMIT
-            G4 Transaction B COMMIT
+            G3-A Transaction A COMMIT
+            G3-B Transaction B COMMIT
             launch_prepared_run(...)
 
         This method does not prove transaction durability from ORM object state.
