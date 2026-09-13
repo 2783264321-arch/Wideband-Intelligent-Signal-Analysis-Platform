@@ -428,3 +428,78 @@ def test_non_running_experiments_untouched(client):
     with client.app.state.database.session_factory() as fresh:
         for experiment_id, status in zip(ids, statuses):
             assert fresh.get(DatasetExperimentModel, experiment_id).status == status
+
+
+# ---------------------------------------------------------------------------
+# Plan A1 / Task 2 — generic local pending-run repair (local_cpu + local_gpu)
+# ---------------------------------------------------------------------------
+
+
+def _manual_pending_experiment(client, *, executor):
+    from app.recordings.model import RecordingModel
+
+    session = client.app.state.database.session_factory()
+    session.add(RecordingModel(
+        id="rec_m", name="0", data_path="recordings/0/raw.iq", data_format="complex64_le",
+        sample_rate_hz=1e6, center_frequency_hz=0.0, frequency_low_hz=-5e5, frequency_high_hz=5e5,
+        num_samples=1000, duration_s=0.001, dataset_name="SpaceNet", dataset_split="test",
+        label_space="spacenet_14", source_data_sha256="1" * 64,
+    ))
+    experiment = DatasetExperimentModel(
+        id="exp_m", name="m", dataset_name="SpaceNet", dataset_split="test",
+        dataset_label_space="spacenet_14", recording_manifest_hash="a" * 64,
+        plugin_id="g3_local", plugin_version="1.0", model_release_id=None,
+        asset_manifest_sha256=None, parameters_json={}, executor=executor,
+        runtime_descriptor_json={}, evaluation_protocol="p", max_concurrency=1,
+        status="running", coordinator_token="T",
+    )
+    target = DatasetExperimentItemModel(
+        id="item_m", experiment_id="exp_m", manifest_order=0,
+        recording_id="rec_m", status="running",
+    )
+    session.add(AnalysisRunModel(
+        id="run_m", recording_id="rec_m", pipeline_id="g3_local", pipeline_version="1.0",
+        executor=executor, status="pending", parameters_json={},
+    ))
+    session.add(DatasetExperimentAttemptModel(
+        id="att_m", experiment_item_id="item_m", attempt_number=1,
+        analysis_run_id="run_m", launch_requested_at=None,
+    ))
+    session.add(experiment)
+    session.add(target)
+    session.commit()
+    return session, experiment, target, None, None
+
+
+def _repair_with_spy(client, monkeypatch, *, executor):
+    session, experiment, target, _, _ = _manual_pending_experiment(client, executor=executor)
+    ds = DatasetExperimentService(
+        session, PipelineRegistry([G3LocalPipeline()]), None, FakeRegistry({})
+    )
+    calls = []
+    monkeypatch.setattr(ds, "launch_item_attempt", lambda **kw: calls.append(kw))
+    report = rec.RecoveryReport()
+    rec.repair_local_pending_runs(
+        session, ds, None, experiment_id=experiment.id,
+        coordinator_token="T", report=report,
+    )
+    return calls, report
+
+
+def test_repair_admits_local_gpu_safe_first_launch(client, monkeypatch):
+    calls, report = _repair_with_spy(client, monkeypatch, executor="local_gpu")
+    assert len(calls) == 1
+    assert calls[0]["attempt_id"] == "att_m"
+    assert report.repaired_first_launch == 1
+
+
+def test_repair_admits_local_cpu_safe_first_launch(client, monkeypatch):
+    calls, report = _repair_with_spy(client, monkeypatch, executor="local_cpu")
+    assert len(calls) == 1
+    assert report.repaired_first_launch == 1
+
+
+def test_repair_skips_foreign_executor(client, monkeypatch):
+    calls, report = _repair_with_spy(client, monkeypatch, executor="remote_gpu")
+    assert calls == []
+    assert report.repaired_first_launch == 0

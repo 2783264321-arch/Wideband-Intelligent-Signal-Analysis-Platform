@@ -30,6 +30,7 @@ class RecoveryReport:
 
 
 _ACTIVE_RECOVERY_STATUSES = ("running", "evaluating")
+_LOCAL_EXECUTORS = ("local_cpu", "local_gpu")
 _AMBIGUOUS_ERROR_TYPE = "ANALYSIS_LAUNCH_AMBIGUOUS"
 _AMBIGUOUS_ERROR_MESSAGE = (
     "Local launch intent is durable but the run is still pending after platform "
@@ -154,7 +155,8 @@ def fail_closed_pending_local_run(session, *, experiment_id, coordinator_token,
 
 def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
                               coordinator_token, report):
-    """Repair local_cpu ``pending`` runs for a just-claimed running Experiment."""
+    """Repair local (``local_cpu`` + ``local_gpu``) ``pending`` runs for a
+    just-claimed running Experiment."""
     items = list(
         session.scalars(
             select(DatasetExperimentItemModel)
@@ -173,7 +175,7 @@ def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
         run = session.get(AnalysisRunModel, latest.analysis_run_id)
         if run is None:
             continue
-        if run.executor != "local_cpu" or run.status != "pending":
+        if run.executor not in _LOCAL_EXECUTORS or run.status != "pending":
             continue
         if latest.launch_requested_at is None:
             if run.worker_pid is not None:
