@@ -182,55 +182,91 @@ Outside transaction:
 
 ---
 
+## DURABLE EVALUATION START CLAIM
+
+Generation ownership alone proves "I am the current Experiment generation" but
+NOT "I am the unique starter of this DatasetEvaluation". Two actors can both see
+`pending + worker_pid NULL` and both spawn (same-token duplicate actor; manual
+`/run` vs automatic start; T1 spawn → PID persist loss → T2 takeover before the
+worker flips `running`).
+
+Existing fields are sufficient: the benchmark worker does not require the
+evaluation to be `pending`; its first action writes `status="running"` again. G5
+therefore uses `pending -> running` as the durable single-winner start claim. NO
+schema column is added.
+
+Both manual and automatic start use a CAS that atomically transitions
+`pending -> running` (with `worker_pid IS NULL`); the automatic path additionally
+embeds an `EXISTS` Experiment generation/link predicate in the SAME statement.
+Only the CAS winner may spawn. This gives DatasetEvaluation the same
+duplicate-execution protection that `AnalysisRun.launch_requested_at` gives the
+G3-B local first launch.
+
+Consequences:
+
+- claim committed before spawn (durable `running` marker);
+- T1 spawn → PID persist loss → T2 sees `running`, never re-claims `pending`, so
+  it never spawns a second worker for the same Evaluation;
+- crash after claim before spawn is recovered by the existing
+  `mark_stale_running_evaluations_interrupted` → metrics-only retry;
+- manual-vs-manual, automatic-vs-automatic, and manual-vs-automatic all collapse
+  to exactly one CAS winner.
+
+---
+
 ## EVALUATION START CRASH WINDOWS
 
 `start_evaluation` spawns the worker and only then persists `worker_pid`. The
 durable state machine is:
 
+The durable start claim is `pending -> running` (see DURABLE EVALUATION START
+CLAIM below): the Evaluation becomes `running` in the SAME commit that proves
+generation ownership and uniquely claims the start, BEFORE any subprocess spawn.
+
 | Status | `worker_pid` | Meaning | G5 action |
 |---|---|---|---|
-| `pending` | `NULL` | linked, spawn not durably requested | start it |
-| `pending` | set | spawn requested; worker not yet `running` | wait |
-| `running` | any | worker computing metrics | wait |
+| `pending` | `NULL` | linked, start not yet claimed | claim `pending -> running`, then spawn |
+| `running` | `NULL` | start claimed; spawn reached or not | wait / reconcile; restart stale handler → `interrupted` |
+| `running` | set | worker started/PID persisted | wait |
+| `pending` | set | legacy pre-claim state only | wait (defensive) |
 | `completed` | any | metrics done | Experiment → `completed` |
-| `interrupted` | any | restart interrupted the worker | benchmark retry (metrics only) then start |
+| `interrupted` | any | restart interrupted the worker | metrics-only retry: reset `pending`, re-claim, spawn |
 | `failed` | any | genuine metric failure | Experiment → `failed` |
 
 Crash windows and outcomes (automatic path uses
-`DatasetExperimentService.start_linked_evaluation`; manual benchmark API keeps
-`DatasetBenchmarkService.start_evaluation`):
+`DatasetExperimentService.start_linked_evaluation`; manual benchmark API uses
+`DatasetBenchmarkService.start_evaluation`; both use the same
+`pending -> running` start claim):
 
-1. **Crash after link commit, before spawn** → `pending` + `worker_pid NULL`.
-   Recovery's coordinator starts it. Safe.
-2. **Definitive spawn failure before any process exists** →
+1. **Crash after link commit, before the start claim** → `pending` + `worker_pid
+   NULL`. Recovery's coordinator claims and starts it. Safe.
+2. **Crash after the start claim, before spawn** → Evaluation durable `running`.
+   The pre-G4 startup handler `mark_stale_running_evaluations_interrupted` turns
+   it into `interrupted`; the coordinator resets `pending` (generation-fenced),
+   re-claims, and spawns. No duplicate spawn from `pending`.
+3. **Definitive spawn failure before any process exists** →
    `start_linked_evaluation` commits a generation-fenced Evaluation
-   `pending -> failed` (`BENCHMARK_FAILED`) and raises
+   `running -> failed` (`BENCHMARK_FAILED`) and raises
    `DATASET_EXPERIMENT_EVALUATION_FAILED`; coordinator fails the Experiment under
    `expected_status="evaluating"`.
-3. **Spawn succeeded but PID persistence uncertain** → `start_linked_evaluation`
-   returns `"uncertain"`; the Experiment stays `evaluating` and the coordinator
-   returns `WAITING` (never a false failure). The next step/restart reconciles
-   the real Evaluation state.
-4. **Crash after spawn, before PID persist** → `pending` + `worker_pid NULL`.
-   Restart re-starts it. The orphaned local benchmark process is presumed dead,
-   consistent with the sealed `mark_stale_running_evaluations_interrupted`
-   assumption. (Conservative accepted behavior; duplicate metric runs are
-   idempotent and never rerun inference.)
-5. **Worker spawned, still `pending` before `running`** → `pending` +
-   `worker_pid` set; coordinator waits, never re-spawns.
-6. **Restart while `running`** → pre-G4 step 2 marks it `interrupted`;
+4. **Spawn succeeded but PID persistence uncertain** →
+   `start_linked_evaluation` returns `"uncertain"`; the Experiment stays
+   `evaluating` and the Evaluation stays `running`; the coordinator returns
+   `WAITING` (never a false failure). The next step/restart reconciles.
+5. **Crash after spawn, before PID persist** → Evaluation `running` +
+   `worker_pid NULL`. Restart's stale handler marks it `interrupted`; metrics-only
+   retry. The orphaned local benchmark process is presumed dead, consistent with
+   the sealed stale handler. No second worker is spawned from `pending`.
+6. **Worker spawned, `running` + PID set** → coordinator waits, never re-spawns.
+7. **Restart while `running`** → pre-G4 step 2 marks it `interrupted`;
    coordinator retries metrics, no inference.
-7. **Restart after `completed`** → coordinator sees `completed` and closes the
+8. **Restart after `completed`** → coordinator sees `completed` and closes the
    Experiment.
-8. **Restart with `pending` + `worker_pid` set** (spawn requested but worker
-   died before flipping): G5 evaluating recovery durably marks the linked
-   evaluation `interrupted` (local worker presumed dead) so the coordinator
-   retries metrics instead of waiting forever. This prevents a permanently
-   stuck `Experiment=evaluating / Evaluation=pending`.
 
-There is no durable case of `Experiment=evaluating` + linked evaluation
-`pending` + `worker_pid NULL` that is not started, because the recovery
-coordinator always starts `pending`-with-no-PID evaluations.
+Legacy state `pending` + `worker_pid` set (historical/manual) is handled
+defensively by the evaluating-recovery normalization (`pending + PID ->
+interrupted`); the normal G5 automatic start never produces it because the claim
+runs BEFORE spawn.
 
 ---
 
@@ -271,7 +307,9 @@ try:
         ds.reset_interrupted_evaluation(experiment_id, evaluation.id, token)  # one commit
         return WAITING
     if evaluation.status == "pending" and evaluation.worker_pid is None:
-        # Generation-fenced start owned by the DatasetExperiment layer.
+        # Atomic generation-fenced unique start claim, then spawn. Return value is
+        # one of "started" / "uncertain" / "already_started" -> WAITING; raises
+        # FENCE_LOST / EVALUATION_FAILED, handled by the outer except.
         ds.start_linked_evaluation(experiment_id, evaluation.id, token,
                                    benchmark_job_manager)
         return WAITING
@@ -294,6 +332,24 @@ except Exception:
                         expected_status="evaluating")
     return CoordinatorOutcome.INVARIANT_FAILED
 ```
+
+### Coordinator caller semantics
+
+Both call sites — the `running -> evaluating` all-success handoff and the
+`_step_evaluating` `pending` branch — call `ds.start_linked_evaluation(...)` and
+map its result identically:
+
+```text
+"started"         -> WAITING
+"uncertain"       -> WAITING
+"already_started" -> WAITING          # CAS lost while generation still current
+FENCE_LOST        -> FENCE_LOST       # generation/link no longer current
+EVALUATION_FAILED -> Experiment failed via expected_status="evaluating"
+```
+
+`"already_started"` is never treated as an error or a generation loss; it means
+another actor holds the single Evaluation start claim and this actor must not
+spawn.
 
 ### Status-aware coordinator primitives (backward compatible)
 
@@ -350,7 +406,7 @@ if summary.queued == 0 and summary.running == 0 and summary.failed == 0 and summ
         if exc.code == "DATASET_EXPERIMENT_FENCE_LOST":
             return CoordinatorOutcome.FENCE_LOST
         if exc.code == "DATASET_EXPERIMENT_EVALUATION_FAILED":
-            # generation-fenced evaluation pending -> failed already committed
+            # generation-fenced evaluation running -> failed already committed
             ds._fail_experiment(experiment_id, token,
                                 "DATASET_EXPERIMENT_EVALUATION_FAILED",
                                 exc.message, expected_status="evaluating")
@@ -379,7 +435,7 @@ because raising would risk callers misclassifying it as a scientific failure.
 Once the link commits, the Experiment is durably `evaluating`. From that point:
 
 - **Definitive spawn failure** = the job manager raises BEFORE creating any
-  process AND the generation-fenced `pending -> failed` Evaluation write commits.
+  process AND the generation-fenced `running -> failed` Evaluation write commits.
   Only then may the coordinator project `Experiment evaluating -> failed` with
   `error_type="DATASET_EXPERIMENT_EVALUATION_FAILED"` (via
   `_fail_experiment(expected_status="evaluating")`).
@@ -389,13 +445,16 @@ Once the link commits, the Experiment is durably `evaluating`. From that point:
 
   ```text
   Experiment remains evaluating (no failed projection)
+  DatasetEvaluation remains running (durable start claim)
   no Item mutation; no Attempt; no AnalysisRun; no inference rerun
   coordinator returns WAITING (via start_linked_evaluation returning "uncertain")
   ```
 
   The next coordinator iteration or startup recovery reconciles the actual
   DatasetEvaluation status (the worker may already be running/completed). Parent
-  PID persistence uncertainty alone never fails the Experiment.
+  PID persistence uncertainty alone never fails the Experiment, and because the
+  Evaluation is already `running`, no actor can re-claim `pending` and spawn a
+  second worker.
 
 Production coordinators (spawned by `run_coordinator`) always pass both benchmark
 dependencies, so they create and start the formal evaluation. Unwired coordinators
@@ -675,8 +734,10 @@ column.
 | Durable transition | Commit boundary | Must NOT span |
 |---|---|---|
 | Evaluation prepare + flush + Experiment link + `evaluating` | one commit | benchmark spawn |
-| Benchmark manual start (`start_evaluation` refactor) | one commit for guarded PID persist | SELECT/autobegin and subprocess spawn: read→rollback→spawn→new txn |
-| Automatic linked start (`start_linked_evaluation`) | pre-spawn fence commit; fenced failure write commit; fenced PID commit | subprocess spawn runs between fence commit and PID txn |
+| Durable Evaluation start claim (`pending -> running`) | one commit (manual + automatic; automatic adds Experiment `EXISTS`) | benchmark subprocess spawn |
+| Benchmark manual start (`start_evaluation` refactor) | start-claim commit, then PID persist commit | SELECT/autobegin and subprocess spawn: claim→rollback→spawn→new txn |
+| Automatic linked start (`start_linked_evaluation`) | start-claim commit; fenced failure write commit; fenced PID commit | subprocess spawn runs between claim commit and PID txn |
+| Automatic definitive spawn failure (`running -> failed`) | one fenced commit | — |
 | Start-uncertainty (PID commit failure after spawn) | no failure commit | never fails Experiment; returns `"uncertain"` |
 | Evaluating completion projection | `mark_experiment_completed` one commit | — |
 | Evaluating failure projection | `_fail_experiment(expected_status="evaluating")` one commit | — |
@@ -724,19 +785,43 @@ Add:
         return evaluation
 
     def start_evaluation(self, evaluation_id, job_manager):
-        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
-        if evaluation is None:
-            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
-        if evaluation.status != "pending":
-            raise PlatformError("INVALID_BENCHMARK_TRANSITION",
-                                "Only pending evaluations can be started.", 409)
+        # Transaction A: durable single-winner start claim (pending -> running).
+        try:
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetEvaluationModel)
+                    .where(
+                        DatasetEvaluationModel.id == evaluation_id,
+                        DatasetEvaluationModel.status == "pending",
+                        DatasetEvaluationModel.worker_pid.is_(None),
+                    )
+                    .values(status="running", started_at=datetime.now(timezone.utc),
+                            error_type=None, error_message=None)
+                    .execution_options(synchronize_session=False)
+                )
+            if int(claimed.rowcount or 0) != 1:
+                self.session.rollback()
+                row = self.session.get(DatasetEvaluationModel, evaluation_id)
+                if row is None:
+                    raise PlatformError("BENCHMARK_NOT_FOUND",
+                                        "DatasetEvaluation was not found.", 404)
+                raise PlatformError("INVALID_BENCHMARK_TRANSITION",
+                                    "Evaluation was already started.", 409)
+            self.session.commit()
+        except PlatformError:
+            self.session.rollback()
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
 
-        # Close the read/autobegin transaction BEFORE spawning the subprocess.
+        # No open transaction before spawn.
         self.session.rollback()
 
         try:
-            worker_pid = job_manager.start(evaluation_id)   # ZERO open DB transaction
+            worker_pid = job_manager.start(evaluation_id)
         except Exception as exc:
+            # Claim is now running: definitive spawn failure -> running -> failed.
             now = datetime.now(timezone.utc)
             try:
                 with self.session.no_autoflush:
@@ -744,7 +829,8 @@ Add:
                         update(DatasetEvaluationModel)
                         .where(
                             DatasetEvaluationModel.id == evaluation_id,
-                            DatasetEvaluationModel.status == "pending",
+                            DatasetEvaluationModel.status == "running",
+                            DatasetEvaluationModel.worker_pid.is_(None),
                         )
                         .values(status="failed", error_type="BENCHMARK_FAILED",
                                 error_message=str(exc)[:1000], completed_at=now)
@@ -758,7 +844,7 @@ Add:
                                 "Unable to start local benchmark worker.") from exc
 
         # Parent persists ONLY worker_pid; never overwrite a fast worker's
-        # running/completed/failed status back to pending/running.
+        # running/completed/failed status.
         try:
             with self.session.no_autoflush:
                 self.session.execute(
@@ -771,8 +857,7 @@ Add:
         except Exception:
             self.session.rollback()
             raise
-        self.session.refresh(evaluation)
-        return evaluation
+        return self.session.get(DatasetEvaluationModel, evaluation_id)
 
     def snapshot_retry_evaluation(self, evaluation_id):
         evaluation = self.get_evaluation(evaluation_id)
@@ -834,8 +919,14 @@ Tests:
 - `test_start_evaluation_spawns_outside_transaction` — `on_start(evaluation_id)`
   opens a fresh Session over the SAME `benchmark_session` and asserts
   `not benchmark_session.in_transaction()` at Popen time.
-- `test_start_evaluation_spawn_failure_fresh_guarded_update` — spawn raises; a
-  fresh Session sees `failed`/`BENCHMARK_FAILED` committed; no stale ORM write.
+- `test_start_evaluation_claim_committed_before_spawn` — a fresh Session at
+  `on_start` sees Evaluation `running` + `started_at` already committed.
+- `test_start_evaluation_concurrent_two_sessions_one_winner` — two Sessions call
+  manual `start_evaluation`; exactly one CAS winner; exactly one
+  `job_manager.start` call; loser raises `INVALID_BENCHMARK_TRANSITION`.
+- `test_start_evaluation_spawn_failure_running_to_failed` — spawn raises after the
+  claim; a fresh Session sees `failed`/`BENCHMARK_FAILED` (never reverted to
+  pending).
 - `test_start_evaluation_fast_worker_terminal_not_overwritten` — a fake job
   manager sets `completed` during `start`; the parent PID write leaves status
   `completed` and only records `worker_pid`.
@@ -1108,39 +1199,50 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
 
     def start_linked_evaluation(self, experiment_id, evaluation_id,
                                 coordinator_token, benchmark_job_manager):
-        """Generation-fenced automatic DatasetEvaluation start.
+        """Generation-fenced + uniquely-claimed automatic evaluation start.
 
-        Public/manual ``DatasetBenchmarkService.start_evaluation`` is NOT used by
-        the coordinator: it knows nothing about the Experiment generation, so a
-        stale coordinator could spawn/write after losing ownership. This method
-        binds the pre-spawn fence, the spawn-failure Evaluation write, and the PID
-        persistence to the current Experiment generation.
+        The start claim is the durable Evaluation ``pending -> running`` CAS,
+        additionally requiring current Experiment generation/link ownership via
+        ``EXISTS``. This single statement proves, atomically:
+          1. current Experiment generation/link ownership;
+          2. the Evaluation is startable (pending, no worker);
+          3. this actor uniquely claims the Evaluation start.
+        Only the CAS winner may physically spawn.
 
-        Returns ``"started"`` on a confirmed spawn+PID persist, or ``"uncertain"``
-        when the subprocess may have started but PID persistence failed (caller
-        must keep the Experiment evaluating and reconcile later). Raises
-        ``DATASET_EXPERIMENT_FENCE_LOST`` when ownership is lost and
+        Returns:
+          "started"         -> claim committed + spawn + PID persisted
+          "uncertain"       -> claim committed + spawn succeeded, PID uncertain
+          "already_started" -> generation current but Evaluation already claimed
+        Raises ``DATASET_EXPERIMENT_FENCE_LOST`` when ownership is lost and
         ``DATASET_EXPERIMENT_EVALUATION_FAILED`` on a definitive spawn failure
-        (generation-fenced Evaluation ``pending -> failed`` already committed).
+        (generation-fenced Evaluation ``running -> failed`` already committed).
         """
-        # A. pre-spawn generation fence
+        # A. atomic generation-fenced unique start claim: pending -> running.
         try:
             with self.session.no_autoflush:
-                fence = self.session.execute(
-                    update(DatasetExperimentModel)
+                claim = self.session.execute(
+                    update(DatasetEvaluationModel)
                     .where(
-                        DatasetExperimentModel.id == experiment_id,
-                        DatasetExperimentModel.status == "evaluating",
-                        DatasetExperimentModel.coordinator_token == coordinator_token,
-                        DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                        DatasetEvaluationModel.id == evaluation_id,
+                        DatasetEvaluationModel.status == "pending",
+                        DatasetEvaluationModel.worker_pid.is_(None),
+                        exists().where(
+                            DatasetExperimentModel.id == experiment_id,
+                            DatasetExperimentModel.status == "evaluating",
+                            DatasetExperimentModel.coordinator_token == coordinator_token,
+                            DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                        ),
                     )
-                    .values(heartbeat_at=datetime.now(timezone.utc))
+                    .values(status="running", started_at=datetime.now(timezone.utc),
+                            error_type=None, error_message=None)
                     .execution_options(synchronize_session=False)
                 )
-            if int(fence.rowcount or 0) != 1:
+            if int(claim.rowcount or 0) != 1:
                 self.session.rollback()
-                raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
-                                    "Coordinator generation no longer owns the experiment.", 409)
+                result = self._diagnose_start_claim_miss(
+                    experiment_id, evaluation_id, coordinator_token)
+                self.session.rollback()   # close diagnostic reads before returning
+                return result
             self.session.commit()
         except PlatformError:
             self.session.rollback()
@@ -1156,14 +1258,15 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
         try:
             worker_pid = benchmark_job_manager.start(evaluation_id)
         except Exception as exc:
-            # B-fenced spawn-failure write: pending -> failed ONLY under generation.
+            # running -> failed, generation-fenced (claim put the Evaluation at running).
             try:
                 with self.session.no_autoflush:
                     failed = self.session.execute(
                         update(DatasetEvaluationModel)
                         .where(
                             DatasetEvaluationModel.id == evaluation_id,
-                            DatasetEvaluationModel.status == "pending",
+                            DatasetEvaluationModel.status == "running",
+                            DatasetEvaluationModel.worker_pid.is_(None),
                             exists().where(
                                 DatasetExperimentModel.id == experiment_id,
                                 DatasetExperimentModel.status == "evaluating",
@@ -1209,7 +1312,8 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
                 )
             if int(persisted.rowcount or 0) != 1:
                 # Generation lost AFTER physical spawn. Do NOT compensate; the
-                # newer generation is authority. The stale worker is metrics-only.
+                # newer generation is authority. The Evaluation is already
+                # `running` (start claim), so T2 MUST NOT re-spawn it.
                 self.session.rollback()
                 raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
                                     "Evaluation PID persist lost its generation.", 409)
@@ -1218,10 +1322,41 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
             self.session.rollback()
             raise
         except Exception:
-            # spawn state uncertain: subprocess may be running; do not fail Experiment
+            # spawn state uncertain: subprocess may be running; Evaluation stays
+            # `running`; do not fail Experiment.
             self.session.rollback()
             return "uncertain"
         return "started"
+
+    def _diagnose_start_claim_miss(self, experiment_id, evaluation_id,
+                                   coordinator_token):
+        """Zero-row start-claim diagnosis.
+
+        FIRST diagnose Experiment generation/link ownership. Stale -> FENCE_LOST.
+        If the generation is still current, the miss is an idempotent start race
+        (another actor already claimed/advanced the Evaluation), never
+        FENCE_LOST; return ``"already_started"``. Impossible states fail closed.
+        """
+        generation = self.session.execute(
+            select(DatasetExperimentModel.status,
+                   DatasetExperimentModel.coordinator_token,
+                   DatasetExperimentModel.dataset_evaluation_id)
+            .where(DatasetExperimentModel.id == experiment_id)
+        ).one_or_none()
+        if (generation is None or generation[0] != "evaluating"
+                or generation[1] != coordinator_token
+                or generation[2] != evaluation_id):
+            raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                "Coordinator generation no longer owns the experiment.", 409)
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked DatasetEvaluation is missing.", 409)
+        if (evaluation.status in {"running", "completed", "failed"}
+                or (evaluation.status == "pending" and evaluation.worker_pid is not None)):
+            return "already_started"
+        raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                            "Evaluation start claim missed in an impossible state.", 409)
 
     def list_experiments(self):
         experiments = list(self.session.scalars(
@@ -1399,17 +1534,28 @@ Tests (`test_dataset_experiment_evaluation_ownership.py`):
   (`prepare_retry_evaluation` rejects on the current generation → rollback →
   session has no open transaction and remains usable)
 - `test_start_linked_evaluation_current_generation_spawns_once`
-- `test_start_linked_evaluation_stale_generation_zero_spawn` (T1 loses before
-  pre-spawn fence → ZERO benchmark spawn)
+- `test_start_linked_evaluation_claim_committed_before_spawn` (fresh Session at
+  `on_start` sees Evaluation `running` + `started_at` committed)
+- `test_start_linked_evaluation_same_token_two_actors_one_claim` (two Sessions
+  with the SAME Experiment token call `start_linked_evaluation`; exactly one
+  start claim; exactly one spawn; loser returns `"already_started"`)
+- `test_start_linked_evaluation_vs_manual_run_one_claim` (automatic actor vs
+  manual `/run`: exactly one `pending -> running` claim and one spawn)
+- `test_start_linked_evaluation_stale_generation_zero_spawn` (T1 loses before the
+  start claim → ZERO benchmark spawn)
 - `test_start_linked_evaluation_no_open_transaction_before_spawn` (`on_start`
   asserts `not session.in_transaction()`)
 - `test_start_linked_evaluation_spawn_failure_write_fenced` (definitive spawn
-  failure commits generation-fenced `pending -> failed`, raises
+  failure commits generation-fenced `running -> failed`, raises
   `DATASET_EXPERIMENT_EVALUATION_FAILED`; a stale T1 → `FENCE_LOST`, zero write)
 - `test_start_linked_evaluation_pid_uncertainty_returns_uncertain` (spawn
-  succeeds, PID commit raises → returns `"uncertain"`, no failed projection)
+  succeeds, PID commit raises → returns `"uncertain"`, Evaluation stays
+  `running`, no failed projection)
 - `test_start_linked_evaluation_stale_after_spawn_zero_newer_mutation` (T1 loses
   after spawn; PID write loses fence; newer generation's Evaluation untouched)
+- `test_t2_after_t1_spawn_does_not_respawn_same_evaluation` (T1 claim → `running`
+  + spawn; PID persist loses to T2; T2 observes `running`/terminal and performs
+  ZERO additional spawn)
 - `test_retry_evaluation_requires_failed_with_complete_inference`
 - `test_retry_evaluation_rejects_incomplete_inference`
 - `test_retry_evaluation_rejects_invalid_linkage` (membership/manifest/protocol
@@ -1504,20 +1650,26 @@ Tests:
 - `test_repeated_step_creates_no_duplicate` (one `DatasetEvaluationModel`, same
   `dataset_evaluation_id`).
 - `test_stale_generation_cannot_link_or_complete`.
-- `test_automatic_start_stale_token_zero_spawn` (T1 loses before
-  `start_linked_evaluation`; ZERO benchmark spawn).
+- `test_automatic_start_stale_token_zero_spawn` (T1 loses before the start claim;
+  ZERO benchmark spawn).
 - `test_automatic_start_spawns_with_no_open_transaction` (`on_start` asserts
   `not benchmark_session.in_transaction()`).
 - `test_automatic_start_spawn_failure_write_is_generation_fenced` (definitive
-  spawn failure commits Evaluation `pending -> failed` and fails Experiment under
+  spawn failure commits Evaluation `running -> failed` and fails Experiment under
   `expected_status="evaluating"`; a stale T1 cannot perform that write).
 - `test_automatic_start_pid_persist_uncertainty_keeps_evaluating` (spawn succeeds,
-  PID commit fails → Experiment remains `evaluating`, coordinator returns
-  `WAITING`, zero AnalysisRuns).
+  PID commit fails → Experiment remains `evaluating`, Evaluation stays `running`,
+  coordinator returns `WAITING`, zero AnalysisRuns).
 - `test_uncertain_start_converges_later` (after uncertainty, a subsequent step
-  reconciles the worker's `running`/`completed` state).
+  reconciles the Evaluation's `running`/`completed` state).
 - `test_automatic_start_pid_persist_stale_generation_zero_newer_mutation` (T1
   loses after spawn; PID write loses fence; newer generation untouched).
+- `test_t1_claim_then_t2_takeover_does_not_respawn` (T1 claims `running` + spawns,
+  PID persist loses to T2; T2's coordinator observes `running` and performs ZERO
+  additional spawn; metrics-only).
+- `test_crash_after_claim_before_spawn_recovers_via_stale_handler` (Evaluation
+  durable `running`; startup stale handler → `interrupted`; coordinator resets +
+  re-claims + spawns once; ZERO AnalysisRuns).
 - `test_running_experiment_with_preexisting_evaluation_link_fails_closed_zero_spawn`.
 - `test_benchmark_start_failure_after_link_fails_evaluating_experiment` (link
   commits, definitive start failure; Experiment ends `failed`, never stranded
@@ -1679,21 +1831,33 @@ Baseline before G5: `1599 passed, 28 skipped`; require a fresh summary with
 - running heartbeat/failure default behavior unchanged;
 - benchmark-start failure after link does not strand `evaluating`.
 
+### Durable Evaluation start claim
+- `pending -> running` CAS is a single-winner start claim (manual + automatic);
+- two manual `/run`, two automatic same-token actors, and manual-vs-automatic
+  each produce exactly one claim and one spawn;
+- claim commit happens before Popen; no open transaction at Popen;
+- definitive spawn failure is `running -> failed` (never reverted to pending);
+- PID persistence writes only PID; fast worker terminal status preserved;
+- T1 claim+spawn → PID persist loss → T2 does NOT re-spawn;
+- crash after claim before spawn → stale-running handler → metrics-only retry;
+- evaluated paths create zero AnalysisRuns.
+
 ### Benchmark spawn boundary
 - `start_evaluation` calls `job_manager.start` with
   `benchmark_session.in_transaction() == False` (probe inside `on_start`);
 - fast benchmark worker terminal state is not overwritten by parent PID
   persistence;
-- spawn failure uses a fresh guarded UPDATE (no stale ORM write).
+- manual spawn failure uses a fresh guarded `running -> failed` UPDATE.
 
 ### Automatic evaluation start fencing (`start_linked_evaluation`)
 - current generation spawns exactly once;
-- stale generation before the pre-spawn fence → ZERO benchmark spawn;
+- same-token duplicate actor → `"already_started"`, zero extra spawn;
+- stale generation before the start claim → ZERO benchmark spawn;
 - spawn occurs with `session.in_transaction() == False`;
-- definitive spawn-failure `pending -> failed` write is generation-fenced;
+- definitive spawn-failure `running -> failed` write is generation-fenced;
 - stale generation cannot perform the spawn-failure write;
 - spawn success + PID-persist uncertainty → returns `"uncertain"`, Experiment
-  stays `evaluating`, zero AnalysisRuns;
+  stays `evaluating`, Evaluation stays `running`, zero AnalysisRuns;
 - stale generation after spawn loses the PID fence and mutates nothing for the
   newer generation;
 - uncertain start converges on a later step/restart;
@@ -1787,7 +1951,7 @@ running path.
 21. All-success benchmark-start failure cannot strand `evaluating`. PASS
 22. No inference path is reachable from evaluating. PASS
 23. Every DatasetExperiment-forced Evaluation write is generation-fenced,
-    including automatic benchmark START (pre-spawn fence, spawn-failure write,
+    including automatic benchmark START (start claim, spawn-failure write,
     PID persistence) via `start_linked_evaluation`. PASS
 24. Stale DatasetExperiment generation cannot spawn a linked benchmark worker
     after ownership is lost. PASS
@@ -1799,7 +1963,18 @@ running path.
 27. `running` + pre-existing `dataset_evaluation_id` fails closed with zero spawn
     and zero new evaluation. PASS
 28. Manual benchmark API behavior is unchanged (only DatasetExperiment
-    orchestration uses the fenced start). PASS
+    orchestration uses the generation-fenced start claim). PASS
+29. `pending -> running` is a durable single-winner start claim; same-token
+    duplicate actors cannot double-spawn the Evaluation. PASS
+30. Manual-vs-manual, automatic-vs-automatic, and manual-vs-automatic start races
+    each produce exactly one claim and one spawn. PASS
+31. Token takeover after spawn cannot cause T2 to spawn the same Evaluation,
+    because the claim already committed `running`. PASS
+32. The start claim commits before Popen and no transaction spans Popen. PASS
+33. Definitive spawn failure persists `running -> failed` (never reverted to
+    pending); PID persistence writes only PID. PASS
+34. Crash after claim-before-spawn is recoverable via the existing
+    `mark_stale_running_evaluations_interrupted` → metrics-only retry. PASS
 
 ---
 
