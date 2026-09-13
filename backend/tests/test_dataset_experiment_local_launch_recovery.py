@@ -7,6 +7,7 @@ from dataset_experiment_fixtures import (
     G3LocalPipeline,
     FakeProvider,
     FakeRegistry,
+    RecordingJobManager,
     create_experiment,
     create_remote_experiment,
     item,
@@ -40,13 +41,14 @@ def _local_deps(provider):
     return registry, executor_registry
 
 
-def _recover(client, *, provider, cutoff=None, session=None):
+def _recover(client, *, provider, cutoff=None, session=None, job_manager=None):
     registry, executor_registry = _local_deps(provider)
     session = session or client.app.state.database.session_factory()
     report = rec.recover_dataset_experiments(
         session, registry=registry, model_release_store=None,
         executor_registry=executor_registry,
         startup_recovery_cutoff=cutoff or _cutoff(),
+        job_manager=job_manager or RecordingJobManager(),
     )
     return report, session
 
@@ -340,6 +342,7 @@ def test_remote_pending_run_delegated_no_local_marker_logic(client):
         client.app.state.database.session_factory(),
         registry=registry, model_release_store=store,
         executor_registry=executor_registry, startup_recovery_cutoff=_cutoff(),
+        job_manager=RecordingJobManager(),
     )
     assert provider.launches == []
     with client.app.state.database.session_factory() as fresh:

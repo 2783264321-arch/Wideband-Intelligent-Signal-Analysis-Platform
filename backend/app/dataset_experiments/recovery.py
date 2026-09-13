@@ -24,6 +24,8 @@ class RecoveryReport:
     repaired_first_launch: int = 0
     ambiguous_failed: int = 0
     invariants_failed: int = 0
+    coordinators_started: int = 0
+    spawn_failures: int = 0
 
 
 _ACTIVE_RECOVERY_STATUSES = ("running",)
@@ -210,9 +212,56 @@ def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
     return report
 
 
-def recover_dataset_experiments(session, *, registry, model_release_store,
-                                executor_registry, startup_recovery_cutoff):
-    """Restart recovery for active DatasetExperiments (Task 2 stage: no spawn)."""
+def start_recovered_coordinator(session, experiment_id, coordinator_token,
+                                job_manager):
+    """Spawn the recovered coordinator outside any transaction, then persist the
+    PID guarded by the fresh token and ``status == running``.
+
+    Precondition: the CALLER has no open SQLAlchemy transaction when
+    ``job_manager.start()`` is invoked. ``recover_dataset_experiments``
+    explicitly closes any autobegun read transaction before calling this. This
+    function itself opens NO SELECT/read transaction before spawning; it spawns
+    outside a transaction and only then opens the PID-persistence transaction.
+
+    On spawn failure the Experiment is left ``running`` with the fresh token and
+    ``worker_pid NULL`` so the next startup recovery can retry. Returns the PID,
+    or ``None`` on spawn failure.
+    """
+    try:
+        worker_pid = job_manager.start(experiment_id, coordinator_token)
+    except Exception:
+        return None
+    try:
+        with session.no_autoflush:
+            session.execute(
+                update(DatasetExperimentModel)
+                .where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.coordinator_token == coordinator_token,
+                    DatasetExperimentModel.status == "running",
+                )
+                .values(worker_pid=worker_pid)
+                .execution_options(synchronize_session=False)
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    session.expire_all()
+    return worker_pid
+
+
+def recover_dataset_experiments(session, *, job_manager, registry,
+                                model_release_store, executor_registry,
+                                startup_recovery_cutoff):
+    """Restart recovery for active DatasetExperiments.
+
+    Selects only ``running`` Experiments (G5 owns ``evaluating``). For each:
+    claim a fresh generation under the fixed ``startup_recovery_cutoff``,
+    reconcile real AnalysisRun state, repair local pending launch gaps, fail
+    closed on invariants, then spawn one coordinator. Never reruns completed
+    Items and never auto-retries failed Items.
+    """
     report = RecoveryReport()
     ds = DatasetExperimentService(
         session, registry, model_release_store, executor_registry
@@ -267,4 +316,12 @@ def recover_dataset_experiments(session, *, registry, model_release_store,
         # its last durable commit. SQLAlchemy autobegin therefore may have opened
         # a read transaction. Close it before subprocess spawn.
         session.rollback()
+
+        started_pid = start_recovered_coordinator(
+            session, experiment_id, claimed_token, job_manager
+        )
+        if started_pid is None:
+            report.spawn_failures += 1
+        else:
+            report.coordinators_started += 1
     return report
