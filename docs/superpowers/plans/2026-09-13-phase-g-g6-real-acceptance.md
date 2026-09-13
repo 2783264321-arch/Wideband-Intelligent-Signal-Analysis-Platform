@@ -477,12 +477,74 @@ settings = Settings()
 database = Database(settings.database_url)
 
 
-def acceptance_owned_pids(experiment_id):
-    pids = set()
+def read_proc_argv(pid):
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return None
+    if not raw:
+        return None
+    return [
+        part.decode("utf-8", errors="replace")
+        for part in raw.split(b"\0")
+        if part
+    ]
+
+
+def is_local_run_worker(argv, run_id):
+    if not argv:
+        return False
+    try:
+        index = argv.index("-m")
+    except ValueError:
+        return False
+    return (
+        len(argv) > index + 2
+        and argv[index + 1] == "app.analysis.local_inference_worker"
+        and argv[index + 2] == run_id
+    )
+
+
+def is_dataset_experiment_worker(argv, experiment_id, coordinator_token):
+    if not argv:
+        return False
+    try:
+        module_index = argv.index("-m")
+        token_flag_index = argv.index("--coordinator-token")
+    except ValueError:
+        return False
+    return (
+        len(argv) > module_index + 2
+        and argv[module_index + 1] == "app.dataset_experiments.worker"
+        and argv[module_index + 2] == experiment_id
+        and len(argv) > token_flag_index + 1
+        and argv[token_flag_index + 1] == coordinator_token
+    )
+
+
+def acceptance_owned_processes(experiment_id):
+    """Return (coordinator_pid_or_None, sorted inference_worker_pids).
+
+    Ownership requires BOTH active DB state AND exact live /proc/<pid>/cmdline
+    identity. Terminal rows never contribute; missing/mismatched /proc is skipped
+    (fail closed).
+    """
+    coordinator = None
+    inference_workers = []
     with database.session_factory() as session:
         experiment = session.get(DatasetExperimentModel, experiment_id)
-        if experiment is not None and experiment.worker_pid:
-            pids.add(int(experiment.worker_pid))
+        if experiment is None:
+            return coordinator, inference_workers
+        if (
+            experiment.status in {"running", "evaluating"}
+            and experiment.worker_pid is not None
+            and experiment.coordinator_token is not None
+        ):
+            pid = int(experiment.worker_pid)
+            if is_dataset_experiment_worker(
+                read_proc_argv(pid), experiment.id, experiment.coordinator_token
+            ):
+                coordinator = pid
         items = session.query(DatasetExperimentItemModel).filter_by(
             experiment_id=experiment_id).all()
         for item in items:
@@ -490,18 +552,37 @@ def acceptance_owned_pids(experiment_id):
                 experiment_item_id=item.id).all()
             for attempt in attempts:
                 run = session.get(AnalysisRunModel, attempt.analysis_run_id)
-                if run is not None and run.worker_pid:
-                    pids.add(int(run.worker_pid))
-    return pids
+                if (
+                    run is not None
+                    and run.status in {"pending", "running"}
+                    and run.worker_pid is not None
+                ):
+                    pid = int(run.worker_pid)
+                    if is_local_run_worker(read_proc_argv(pid), run.id):
+                        inference_workers.append(pid)
+    return coordinator, sorted(set(inference_workers))
 
 
-def cleanup_acceptance_pids(experiment_id):
-    """SIGTERM only THIS acceptance's coordinator + CPN worker PIDs."""
-    for pid in acceptance_owned_pids(experiment_id):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+def safe_sigterm(pid):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def cleanup_acceptance_processes(experiment_id):
+    """SIGTERM only currently active, exact-identity G6 processes.
+
+    Stops the validated coordinator FIRST so it cannot schedule more work, then
+    the validated active local inference workers. Never mutates DB state and
+    never signals any PID whose live argv identity cannot be proven.
+    """
+    coordinator, inference_workers = acceptance_owned_processes(experiment_id)
+    if coordinator is not None:
+        safe_sigterm(coordinator)
+    for pid in inference_workers:
+        if pid != coordinator:
+            safe_sigterm(pid)
 
 
 # pre-run snapshot (run-isolation evidence)
@@ -556,12 +637,12 @@ mem_final = read_mem(MEM_NOW_PATH)
 mem_peak = max(mem_peak, mem_final)
 
 if mem2_triggered:
-    cleanup_acceptance_pids(experiment_id)
+    cleanup_acceptance_processes(experiment_id)
     raise SystemExit(
         f"G6 ACCEPTANCE BLOCKED BY MEM-2: peak {mem_peak} > {mem_max - MEM2_RESERVE}")
 
 if status not in {"completed", "failed", "completed_with_failures"}:
-    cleanup_acceptance_pids(experiment_id)
+    cleanup_acceptance_processes(experiment_id)
     raise SystemExit("G6 ACCEPTANCE BLOCKED BY RUN-1: timeout")
 
 # collect evidence
@@ -669,6 +750,56 @@ STOP gate RUN-1: `POST /run` != 202; experiment terminal `failed` or
 `completed_with_failures`; timeout (acceptance-owned PID cleanup then non-zero
 exit); any `AnalysisRun` failed/interrupted. Later startup stale recovery owns DB
 reconciliation of any interrupted workers.
+
+---
+
+## ACCEPTANCE-OWNED PROCESS CLEANUP (FAIL-CLOSED)
+
+The driver's `cleanup_acceptance_processes(experiment_id)` (called by both the
+MEM-2 and timeout paths) is the ONLY cleanup mechanism. Ownership requires BOTH
+current active DB state AND exact live `/proc/<pid>/cmdline` identity:
+
+```text
+AnalysisRun candidate:
+    run.status in {"pending", "running"} AND run.worker_pid is not None
+    argv must contain: -m  app.analysis.local_inference_worker  <exact run_id>
+
+DatasetExperiment coordinator candidate:
+    experiment.status in {"running", "evaluating"}
+    AND experiment.worker_pid is not None
+    AND experiment.coordinator_token is not None
+    argv must contain: -m  app.dataset_experiments.worker  <exact experiment_id>
+                       --coordinator-token  <exact coordinator_token>
+```
+
+Order: validated coordinator FIRST (stop orchestration), then validated active
+inference workers (dedup; never re-signal the coordinator PID).
+
+Fail-closed rules (all SKIP, never kill):
+
+```text
+terminal DB row (completed/failed/interrupted) -> not a candidate
+/proc/<pid> missing or unreadable -> skip
+argv identity mismatch (exact run id / experiment id / token) -> skip
+permission denied -> skip
+PID alone or process name alone or substring match -> NEVER sufficient
+```
+
+`cleanup_acceptance_processes` NEVER mutates
+DatasetExperiment/Item/Attempt/AnalysisRun/DatasetEvaluation status, NEVER
+kills OpenCode/jupyter-lab/tensorboard/autopanel or any unrelated process, and
+never broadens the match. Later startup stale recovery owns DB reconciliation.
+
+Safety invariant:
+
+```text
+terminal row            -> never killed
+stale/reused PID        -> argv mismatch -> never killed
+missing /proc entry     -> skip
+permission denied       -> skip
+active exact coordinator-> SIGTERM allowed
+active exact worker     -> SIGTERM allowed
+```
 
 ---
 
@@ -904,6 +1035,63 @@ committed there. No logs/data/binaries.
 
 - Create `scripts/g6_acceptance_driver.py` (exact complete content above).
 - Syntax/import check and review against this plan BEFORE any real run.
+- Run the acceptance-tooling SELF-CHECK (no CPN launch): exercise the pure
+  ownership helpers and prove fail-closed identity:
+  `is_local_run_worker` returns False for wrong/missing argv and for a wrong
+  `run_id`; True only for exact `-m app.analysis.local_inference_worker <run_id>`;
+  `is_dataset_experiment_worker` returns True only for exact
+  `-m app.dataset_experiments.worker <experiment_id> --coordinator-token <token>`
+  and False for a wrong token/experiment; `read_proc_argv` returns `None` for a
+  missing PID. Example (run with the control-plane interpreter):
+  ```bash
+  PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" - <<'PY'
+  import importlib.util, sys
+  spec = importlib.util.spec_from_file_location("g6_driver", "scripts/g6_acceptance_driver.py")
+  # Only import the helpers by exec of the function defs is unsafe (driver runs);
+  # instead assert on a copy of the two pure helpers loaded from this plan's
+  # verification snippet:
+  from pathlib import Path
+  def read_proc_argv(pid):
+      try:
+          raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+      except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+          return None
+      if not raw:
+          return None
+      return [p.decode("utf-8", errors="replace") for p in raw.split(b"\0") if p]
+  def is_local_run_worker(argv, run_id):
+      if not argv:
+          return False
+      try:
+          i = argv.index("-m")
+      except ValueError:
+          return False
+      return len(argv) > i + 2 and argv[i+1] == "app.analysis.local_inference_worker" and argv[i+2] == run_id
+  def is_dataset_experiment_worker(argv, eid, tok):
+      if not argv:
+          return False
+      try:
+          mi = argv.index("-m"); ti = argv.index("--coordinator-token")
+      except ValueError:
+          return False
+      return (len(argv) > mi+2 and argv[mi+1] == "app.dataset_experiments.worker"
+              and argv[mi+2] == eid and len(argv) > ti+1 and argv[ti+1] == tok)
+  assert is_local_run_worker(None, "run_x") is False
+  assert is_local_run_worker(["python", "app.analysis.local_inference_worker", "run_x"], "run_x") is False
+  assert is_local_run_worker(["-m", "app.analysis.local_inference_worker", "run_x"], "run_x") is True
+  assert is_local_run_worker(["-m", "app.analysis.local_inference_worker", "run_y"], "run_x") is False
+  c = ["-m", "app.dataset_experiments.worker", "exp_1", "--coordinator-token", "tok_1"]
+  assert is_dataset_experiment_worker(c, "exp_1", "tok_1") is True
+  assert is_dataset_experiment_worker(c, "exp_1", "tok_2") is False
+  assert is_dataset_experiment_worker(c, "exp_2", "tok_1") is False
+  assert read_proc_argv(999999999) is None
+  print("G6_OWNERSHIP_SELFCHECK_OK")
+  PY
+  ```
+  NOTE: the self-check above re-declares the two pure helpers verbatim; the
+  implementer may instead import them if the driver guards its main body behind
+  `if __name__ == "__main__":`. Either way it MUST prove the five identity cases
+  without launching CPN.
 - Commit: `test: add G6 real acceptance driver` (script only).
 - ONLY AFTER that commit is clean: execute the driver with the exact env above.
   Record experiment id, frozen identity, and the pre-run run-id snapshot.
@@ -1029,6 +1217,22 @@ binaries, no DBs.
     (Task 2 and Task 4 respectively, committed before execution). PASS
 20. Asset hashes are compared fail-closed; base SHA is unambiguous
     (`3d9f47b...`); execution-time recording/manifest evidence is authoritative. PASS
+21. Cleanup candidates never come from terminal Experiment/Run state (active
+    `{running,evaluating}` / `{pending,running}` only). PASS
+22. PID reuse cannot satisfy ownership without exact parsed-argv identity. PASS
+23. `/proc` missing/unreadable/permission-denied → skip (fail closed). PASS
+24. Coordinator identity includes the exact experiment id AND coordinator token. PASS
+25. Inference identity includes the exact AnalysisRun id and worker module. PASS
+26. Cleanup stops the validated coordinator before validated inference workers. PASS
+27. MEM-2 and timeout use the same fenced cleanup; no DB state mutation. PASS
+28. Task 4 requires an executable ownership self-check (no CPN launch) before the
+    driver is committed/run. PASS
+29. All prior G6 corrections remain intact (stems 0/1/2, registration, seal
+    hardening, MEM-1/MEM-2 thresholds, historical-run assertions, CPN/golden
+    identity, local_cpu/cpu/float32, max_concurrency=1, interpreter, asset SHA
+    checks, protocol, evaluation/classification assertions, evidence schema,
+    commit ownership, no-production-change rule). PASS
+30. Only the G6 plan document changes in this correction. PASS
 
 ---
 
