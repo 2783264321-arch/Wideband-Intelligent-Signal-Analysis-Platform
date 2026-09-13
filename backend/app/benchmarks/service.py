@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import re
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session
 
 from app.analysis.model import AnalysisRunModel
@@ -493,7 +493,7 @@ class DatasetBenchmarkService:
 
     # ---------- explicit frozen evaluation creation ----------
 
-    def create_evaluation(
+    def prepare_evaluation(
         self,
         *,
         name: str,
@@ -609,39 +609,111 @@ class DatasetBenchmarkService:
         evaluation.comparable = evaluation.coverage == 1.0
         self.session.add(evaluation)
         self.session.add_all(item_rows)
+        return evaluation
+
+    def create_evaluation(self, **kwargs):
+        evaluation = self.prepare_evaluation(**kwargs)
         self.session.commit()
         self.session.refresh(evaluation)
         return evaluation
+
     def start_evaluation(self, evaluation_id: str, job_manager) -> DatasetEvaluationModel:
-        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
-        if evaluation is None:
-            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
-        if evaluation.status != "pending":
-            raise PlatformError("INVALID_BENCHMARK_TRANSITION", "Only pending evaluations can be started.", 409)
+        # Transaction A: durable single-winner start claim (pending -> running).
         try:
-            worker_pid = job_manager.start(evaluation.id)
-        except Exception as exc:
-            evaluation.status = "failed"
-            evaluation.error_type = "BENCHMARK_FAILED"
-            evaluation.error_message = str(exc)[:1000]
-            evaluation.completed_at = datetime.now(timezone.utc)
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetEvaluationModel)
+                    .where(
+                        DatasetEvaluationModel.id == evaluation_id,
+                        DatasetEvaluationModel.status == "pending",
+                        DatasetEvaluationModel.worker_pid.is_(None),
+                    )
+                    .values(status="running", started_at=datetime.now(timezone.utc),
+                            error_type=None, error_message=None)
+                    .execution_options(synchronize_session=False)
+                )
+            if int(claimed.rowcount or 0) != 1:
+                self.session.rollback()
+                row = self.session.get(DatasetEvaluationModel, evaluation_id)
+                if row is None:
+                    raise PlatformError("BENCHMARK_NOT_FOUND",
+                                        "DatasetEvaluation was not found.", 404)
+                raise PlatformError("INVALID_BENCHMARK_TRANSITION",
+                                    "Evaluation was already started.", 409)
             self.session.commit()
-            raise PlatformError("BENCHMARK_FAILED", "Unable to start local benchmark worker.") from exc
-        # Parent only records the worker PID. The running transition is owned by
-        # the worker subprocess so a fast worker that completes before this commit
-        # is never overwritten back to running.
-        evaluation.worker_pid = worker_pid
-        self.session.commit()
-        self.session.refresh(evaluation)
-        return evaluation
-        
-        
-    def retry_evaluation(self, evaluation_id: str) -> DatasetEvaluationModel:
-        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
-        if evaluation is None:
-            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        except PlatformError:
+            self.session.rollback()
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+
+        # No open transaction before spawn.
+        self.session.rollback()
+
+        try:
+            worker_pid = job_manager.start(evaluation_id)
+        except Exception as exc:
+            # Claim is now running: definitive spawn failure -> running -> failed.
+            now = datetime.now(timezone.utc)
+            try:
+                with self.session.no_autoflush:
+                    self.session.execute(
+                        update(DatasetEvaluationModel)
+                        .where(
+                            DatasetEvaluationModel.id == evaluation_id,
+                            DatasetEvaluationModel.status == "running",
+                            DatasetEvaluationModel.worker_pid.is_(None),
+                        )
+                        .values(status="failed", error_type="BENCHMARK_FAILED",
+                                error_message=str(exc)[:1000], completed_at=now)
+                        .execution_options(synchronize_session=False)
+                    )
+                self.session.commit()
+            except Exception:
+                self.session.rollback()
+                raise
+            raise PlatformError("BENCHMARK_FAILED",
+                                "Unable to start local benchmark worker.") from exc
+
+        # Parent persists ONLY worker_pid; never overwrite a fast worker's
+        # running/completed/failed status.
+        try:
+            with self.session.no_autoflush:
+                self.session.execute(
+                    update(DatasetEvaluationModel)
+                    .where(DatasetEvaluationModel.id == evaluation_id)
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return self.session.get(DatasetEvaluationModel, evaluation_id)
+
+    def snapshot_retry_evaluation(self, evaluation_id):
+        evaluation = self.get_evaluation(evaluation_id)
+        return {
+            "status": evaluation.status,
+            "error_type": evaluation.error_type,
+            "error_message": evaluation.error_message,
+            "completed_at": evaluation.completed_at,
+            "started_at": evaluation.started_at,
+            "worker_pid": evaluation.worker_pid,
+            "progress_stage": evaluation.progress_stage,
+            "progress_current": evaluation.progress_current,
+            "progress_total": evaluation.progress_total,
+            "aggregate_metrics_json": evaluation.aggregate_metrics_json,
+            "per_class_metrics_json": evaluation.per_class_metrics_json,
+            "confusion_json": evaluation.confusion_json,
+        }
+
+    def prepare_retry_evaluation(self, evaluation_id):
+        evaluation = self.get_evaluation(evaluation_id)
         if evaluation.status not in {"failed", "interrupted"}:
-            raise PlatformError("INVALID_BENCHMARK_TRANSITION", "Only failed/interrupted evaluations can be retried.", 409)
+            raise PlatformError("INVALID_BENCHMARK_TRANSITION",
+                                "Only failed/interrupted evaluations can be retried.", 409)
         evaluation.status = "pending"
         evaluation.error_type = None
         evaluation.error_message = None
@@ -650,6 +722,38 @@ class DatasetBenchmarkService:
         evaluation.confusion_json = None
         evaluation.progress_stage = None
         evaluation.worker_pid = None
+        return evaluation
+
+    def restore_retry_evaluation(self, evaluation_id, snapshot):
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        for field, value in snapshot.items():
+            setattr(evaluation, field, value)
+        return evaluation
+
+    def _evaluation_is_dataset_experiment_managed(self, evaluation_id):
+        from app.dataset_experiments.model import DatasetExperimentModel
+
+        return bool(self.session.scalar(
+            select(exists().where(
+                DatasetExperimentModel.dataset_evaluation_id == evaluation_id
+            ))
+        ))
+
+    def retry_evaluation(self, evaluation_id):
+        # OWNERSHIP: a DatasetExperiment-linked Evaluation is orchestration-managed
+        # and MUST NOT be retried through the generic benchmark API; that would
+        # leave Experiment=failed while the Evaluation advances out-of-band.
+        self.get_evaluation(evaluation_id)  # 404 if missing
+        if self._evaluation_is_dataset_experiment_managed(evaluation_id):
+            raise PlatformError(
+                "BENCHMARK_MANAGED_BY_DATASET_EXPERIMENT",
+                "This DatasetEvaluation is managed by DatasetExperiment; use the "
+                "DatasetExperiment Retry Evaluation endpoint.",
+                409,
+            )
+        evaluation = self.prepare_retry_evaluation(evaluation_id)
         self.session.commit()
         self.session.refresh(evaluation)
         return evaluation
