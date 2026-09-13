@@ -1017,7 +1017,9 @@ committed there. No logs/data/binaries.
 ### Task 2 — Three-Recording Acceptance Snapshot (acceptance tooling + read-only audit)
 
 - Create `scripts/g6_register_spacenet_three.py` (exact fail-closed content above).
-- Syntax/import check, review, THEN commit the script.
+- Syntax-check ONLY (never import/execute the script pre-commit):
+  `"$PWD/.venv/bin/python" -m py_compile scripts/g6_register_spacenet_three.py`;
+  then review against this plan, THEN commit the script.
 - Commit: `test: add G6 three-recording registration tooling` (script only).
 - Reset `g6_acceptance.db`; register stems 0/1/2; capture recording fields, GT
   counts, and `prepare_manifest` hash/order. STOP on DATA-1/SELECT-1.
@@ -1033,68 +1035,92 @@ committed there. No logs/data/binaries.
 
 ### Task 4 — Create + Commit the Acceptance Driver, THEN Execute (tooling + real execution)
 
-- Create `scripts/g6_acceptance_driver.py` (exact complete content above).
-- Syntax/import check and review against this plan BEFORE any real run.
-- Run the acceptance-tooling SELF-CHECK (no CPN launch): exercise the pure
-  ownership helpers and prove fail-closed identity:
-  `is_local_run_worker` returns False for wrong/missing argv and for a wrong
-  `run_id`; True only for exact `-m app.analysis.local_inference_worker <run_id>`;
-  `is_dataset_experiment_worker` returns True only for exact
-  `-m app.dataset_experiments.worker <experiment_id> --coordinator-token <token>`
-  and False for a wrong token/experiment; `read_proc_argv` returns `None` for a
-  missing PID. Example (run with the control-plane interpreter):
-  ```bash
-  PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" - <<'PY'
-  import importlib.util, sys
-  spec = importlib.util.spec_from_file_location("g6_driver", "scripts/g6_acceptance_driver.py")
-  # Only import the helpers by exec of the function defs is unsafe (driver runs);
-  # instead assert on a copy of the two pure helpers loaded from this plan's
-  # verification snippet:
-  from pathlib import Path
-  def read_proc_argv(pid):
-      try:
-          raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-      except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-          return None
-      if not raw:
-          return None
-      return [p.decode("utf-8", errors="replace") for p in raw.split(b"\0") if p]
-  def is_local_run_worker(argv, run_id):
-      if not argv:
-          return False
-      try:
-          i = argv.index("-m")
-      except ValueError:
-          return False
-      return len(argv) > i + 2 and argv[i+1] == "app.analysis.local_inference_worker" and argv[i+2] == run_id
-  def is_dataset_experiment_worker(argv, eid, tok):
-      if not argv:
-          return False
-      try:
-          mi = argv.index("-m"); ti = argv.index("--coordinator-token")
-      except ValueError:
-          return False
-      return (len(argv) > mi+2 and argv[mi+1] == "app.dataset_experiments.worker"
-              and argv[mi+2] == eid and len(argv) > ti+1 and argv[ti+1] == tok)
-  assert is_local_run_worker(None, "run_x") is False
-  assert is_local_run_worker(["python", "app.analysis.local_inference_worker", "run_x"], "run_x") is False
-  assert is_local_run_worker(["-m", "app.analysis.local_inference_worker", "run_x"], "run_x") is True
-  assert is_local_run_worker(["-m", "app.analysis.local_inference_worker", "run_y"], "run_x") is False
-  c = ["-m", "app.dataset_experiments.worker", "exp_1", "--coordinator-token", "tok_1"]
-  assert is_dataset_experiment_worker(c, "exp_1", "tok_1") is True
-  assert is_dataset_experiment_worker(c, "exp_1", "tok_2") is False
-  assert is_dataset_experiment_worker(c, "exp_2", "tok_1") is False
-  assert read_proc_argv(999999999) is None
-  print("G6_OWNERSHIP_SELFCHECK_OK")
-  PY
-  ```
-  NOTE: the self-check above re-declares the two pure helpers verbatim; the
-  implementer may instead import them if the driver guards its main body behind
-  `if __name__ == "__main__":`. Either way it MUST prove the five identity cases
-  without launching CPN.
-- Commit: `test: add G6 real acceptance driver` (script only).
-- ONLY AFTER that commit is clean: execute the driver with the exact env above.
-  Record experiment id, frozen identity, and the pre-run run-id snapshot.
+Pre-commit invariant (MANDATORY):
+
+```text
+Before the Task 4 tooling commit:
+ALLOWED:
+  - write scripts/g6_acceptance_driver.py
+  - "$PWD/.venv/bin/python" -m py_compile scripts/g6_acceptance_driver.py
+  - inspect/review the file
+  - run the standalone pure-helper ownership self-check
+FORBIDDEN:
+  - import scripts.g6_acceptance_driver
+  - execute scripts/g6_acceptance_driver.py
+  - execute it via runpy/importlib/exec
+  - create a real DatasetExperiment
+  - POST /run
+  - launch CPN
+```
+
+Exact order:
+
+1. Create `scripts/g6_acceptance_driver.py` (exact complete content above).
+2. Syntax-check ONLY (never import/execute the driver pre-commit):
+   ```bash
+   "$PWD/.venv/bin/python" -m py_compile scripts/g6_acceptance_driver.py
+   ```
+3. Review the exact script against this sealed plan.
+4. Run the standalone/pure ownership-helper self-check. It re-declares the pure
+   helper functions verbatim and does NOT import, exec, runpy, or otherwise
+   execute the driver:
+   ```bash
+   PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" - <<'PY'
+   from pathlib import Path
+   def read_proc_argv(pid):
+       try:
+           raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+       except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+           return None
+       if not raw:
+           return None
+       return [p.decode("utf-8", errors="replace") for p in raw.split(b"\0") if p]
+   def is_local_run_worker(argv, run_id):
+       if not argv:
+           return False
+       try:
+           i = argv.index("-m")
+       except ValueError:
+           return False
+       return len(argv) > i + 2 and argv[i+1] == "app.analysis.local_inference_worker" and argv[i+2] == run_id
+   def is_dataset_experiment_worker(argv, eid, tok):
+       if not argv:
+           return False
+       try:
+           mi = argv.index("-m"); ti = argv.index("--coordinator-token")
+       except ValueError:
+           return False
+       return (len(argv) > mi+2 and argv[mi+1] == "app.dataset_experiments.worker"
+               and argv[mi+2] == eid and len(argv) > ti+1 and argv[ti+1] == tok)
+   assert is_local_run_worker(None, "run_x") is False
+   assert is_local_run_worker(["python", "app.analysis.local_inference_worker", "run_x"], "run_x") is False
+   assert is_local_run_worker(["-m", "app.analysis.local_inference_worker", "run_x"], "run_x") is True
+   assert is_local_run_worker(["-m", "app.analysis.local_inference_worker", "run_y"], "run_x") is False
+   c = ["-m", "app.dataset_experiments.worker", "exp_1", "--coordinator-token", "tok_1"]
+   assert is_dataset_experiment_worker(c, "exp_1", "tok_1") is True
+   assert is_dataset_experiment_worker(c, "exp_1", "tok_2") is False
+   assert is_dataset_experiment_worker(c, "exp_2", "tok_1") is False
+   assert read_proc_argv(999999999) is None
+   print("G6_OWNERSHIP_SELFCHECK_OK")
+   PY
+   ```
+   Expected: `G6_OWNERSHIP_SELFCHECK_OK`.
+5. Verify no real acceptance side effects occurred: no new
+   `DatasetExperiment`, no new `AnalysisRun`, no CPN worker, and no acceptance
+   evidence JSON (`data/g6_work/g6_evidence.json` absent).
+6. Commit driver only: `test: add G6 real acceptance driver`.
+7. Verify worktree clean.
+8. Re-read MEM-1 (`/sys/fs/cgroup/memory.max`, `/sys/fs/cgroup/memory.current`).
+9. ONLY AFTER the driver commit exists and MEM-1 passes, execute:
+   ```bash
+   PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" scripts/g6_acceptance_driver.py
+   ```
+   Record experiment id, frozen identity, and the pre-run run-id snapshot.
+
+The self-check MUST re-declare the pure helpers verbatim (or load only the
+function definitions without executing the driver). It MUST NOT
+import/exec/runpy/execute `scripts/g6_acceptance_driver.py` before its commit.
+
 - STOP on MEM-1/MEM-2/RUN-1.
 
 ### Task 5 — Execute Three Real Runs (real execution)
