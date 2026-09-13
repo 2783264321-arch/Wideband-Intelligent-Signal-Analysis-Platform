@@ -913,3 +913,207 @@ class DatasetExperimentService:
                 .limit(limit)
             ).all()
         )
+
+    # ---------- coordinator ownership + terminal/failure writes (G3-C) ----------
+
+    def start_experiment(self, experiment_id, job_manager):
+        experiment = self.session.get(DatasetExperimentModel, experiment_id)
+        if experiment is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_NOT_FOUND", "Dataset experiment was not found.", 404
+            )
+        token = f"coord_{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        try:
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "pending",
+                    )
+                    .values(
+                        status="running", coordinator_token=token, started_at=now,
+                        heartbeat_at=now, worker_pid=None,
+                        error_type=None, error_message=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                claimed_count = int(claimed.rowcount or 0)
+            if claimed_count != 1:
+                self.session.rollback()
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_INVALID_TRANSITION",
+                    "Only a pending experiment can be started.",
+                    409,
+                )
+            self.session.commit()
+        except PlatformError:
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+
+        try:
+            worker_pid = job_manager.start(experiment_id, token)
+        except Exception as exc:
+            with self.session.no_autoflush:
+                self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == token,
+                    )
+                    .values(
+                        status="failed", worker_pid=None,
+                        error_type="DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                        error_message=str(exc)[:1000],
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                "Unable to start DatasetExperiment coordinator.",
+            ) from exc
+
+        try:
+            with self.session.no_autoflush:
+                self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        self.session.expire_all()
+        return self.session.get(DatasetExperimentModel, experiment_id)
+
+    def refresh_coordinator_heartbeat(self, experiment_id, coordinator_token):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(heartbeat_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
+    def mark_experiment_completed_with_failures(self, experiment_id, coordinator_token):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(
+                        status="completed_with_failures",
+                        completed_at=datetime.now(timezone.utc),
+                        error_type=None, error_message=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
+    def _fail_experiment(self, experiment_id, coordinator_token, error_type, error_message):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(
+                        status="failed", error_type=error_type,
+                        error_message=(error_message or "")[:1000],
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
+    def _mark_item_failed(self, item_id, error_type, error_message, *,
+                          experiment_id, coordinator_token=None):
+        statement = (
+            update(DatasetExperimentItemModel)
+            .where(
+                DatasetExperimentItemModel.id == item_id,
+                DatasetExperimentItemModel.experiment_id == experiment_id,
+                DatasetExperimentItemModel.status.in_(("queued", "running")),
+            )
+            .values(
+                status="failed", last_error_type=error_type,
+                last_error_message=(error_message or "")[:1000],
+                updated_at=datetime.now(timezone.utc),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if coordinator_token is not None:
+            statement = statement.where(
+                exists().where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.status == "running",
+                    DatasetExperimentModel.coordinator_token == coordinator_token,
+                )
+            )
+        try:
+            result = self.session.execute(statement)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        if int(result.rowcount or 0) == 1:
+            return True
+        if coordinator_token is not None:
+            self._require_experiment_generation(experiment_id, coordinator_token)
+        row = self.session.execute(
+            select(DatasetExperimentItemModel.status, DatasetExperimentItemModel.experiment_id)
+            .where(DatasetExperimentItemModel.id == item_id)
+        ).one_or_none()
+        if row is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ITEM_NOT_FOUND", "Dataset experiment item was not found.", 404
+            )
+        if row[1] != experiment_id:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                "Item does not belong to the expected experiment.",
+                409,
+            )
+        if row[0] in {"completed", "failed"}:
+            return False
+        raise PlatformError(
+            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+            "Item cannot be marked failed from its current state.",
+            409,
+        )
