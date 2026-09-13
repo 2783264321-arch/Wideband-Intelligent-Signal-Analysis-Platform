@@ -497,6 +497,63 @@ def test_build_runtime_accepts_remote_gpu_descriptor(monkeypatch, tmp_path):
     assert captured["detector_device"] == 0
 
 
+def _local_gpu_descriptor(index: int = 0) -> RuntimeDescriptor:
+    return RuntimeDescriptor("local_gpu", "cuda", index, "float16")
+
+
+def test_cpn_declares_local_gpu_technical_capability():
+    definition = create_plugin_registry().get(CPN_ID, CPN_VERSION).definition
+    caps = [c.key() for c in definition.technical_execution_capabilities]
+    assert ("local_gpu", "cuda", "float16") in caps
+    assert ("remote_gpu", "cuda", "float16") in caps
+    assert ("local_cpu", "cpu", "float32") in caps
+
+
+@pytest.mark.parametrize("index", [0, 3])
+def test_build_runtime_accepts_local_gpu_descriptor(monkeypatch, tmp_path, index):
+    captured = {}
+    module = _cpn_pipeline_module()
+
+    class _FakeDetector:
+        def __init__(self, checkpoint_path, *, device):
+            captured["detector_device"] = device
+
+    monkeypatch.setattr(module, "CPNDetector", _FakeDetector)
+    plugin = _cpn_plugin_module()
+    assets = {
+        "detector_checkpoint": tmp_path / "det.pt",
+        "ls_stft_normalization": _write_normalization(tmp_path),
+    }
+    plugin.build_runtime(
+        assets=assets, runtime_descriptor=_local_gpu_descriptor(index),
+        output_label_space=_label_space(),
+    )
+    assert captured["detector_device"] == index
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        RuntimeDescriptor("local_gpu", "cpu", 0, "float16"),
+        RuntimeDescriptor("local_gpu", "cuda", None, "float16"),
+        RuntimeDescriptor("local_gpu", "cuda", -1, "float16"),
+        RuntimeDescriptor("local_gpu", "cuda", 0, "float32"),
+        RuntimeDescriptor("local_gpu", "cuda", True, "float16"),
+    ],
+)
+def test_build_runtime_rejects_invalid_local_gpu_descriptor(tmp_path, bad):
+    plugin = _cpn_plugin_module()
+    assets = {
+        "detector_checkpoint": tmp_path / "det.pt",
+        "ls_stft_normalization": _write_normalization(tmp_path),
+    }
+    with pytest.raises(PlatformError) as exc:
+        plugin.build_runtime(
+            assets=assets, runtime_descriptor=bad, output_label_space=_label_space()
+        )
+    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+
+
 def test_build_runtime_rejects_wrong_label_space(tmp_path):
     plugin = _cpn_plugin_module()
     assets = {

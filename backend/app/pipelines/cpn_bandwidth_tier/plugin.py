@@ -66,13 +66,15 @@ def _load_normalization(path: Path):
 def _require_device(runtime_descriptor):
     """Resolve the scientific device from the deployment descriptor.
 
-    The CPN plugin declares exactly two technical execution capabilities and this
+    The CPN plugin declares exactly three technical execution capabilities and this
     factory matches that claim (technical executability is NOT certification):
 
     - ``remote_gpu``/``cuda``/``float16`` with an explicit non-negative integer
       ``device_index`` -> that CUDA index (int).
     - ``local_cpu``/``cpu``/``float32`` with a canonical ``device_index=None`` ->
       the ``"cpu"`` device string.
+    - ``local_gpu``/``cuda``/``float16`` with an explicit non-negative integer
+      ``device_index`` -> that CUDA index (int).
 
     Any other / crossed tuple fails closed with ``EXECUTOR_UNAVAILABLE``.
     """
@@ -97,6 +99,13 @@ def _require_device(runtime_descriptor):
                 "local_cpu requires the canonical CPU descriptor (device_index is null).",
             )
         return "cpu"
+    if (executor, device_type, precision) == ("local_gpu", "cuda", "float16"):
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise PlatformError(
+                "EXECUTOR_UNAVAILABLE",
+                "local_gpu requires an explicit non-negative integer CUDA device index.",
+            )
+        return index
     raise PlatformError(
         "EXECUTOR_UNAVAILABLE",
         "CPN bandwidth tier supports only remote_gpu/cuda/float16 or "
