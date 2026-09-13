@@ -46,7 +46,10 @@ def test_g4_schemas_unchanged():
 
 def test_recovery_module_boundaries():
     source = inspect.getsource(recovery_module)
-    assert "remote_execution" not in source
+    # Plan A1 allows importing bounded authority codes from remote_execution.runtime;
+    # the remote transport/profile seams must remain absent.
+    assert "app.remote_execution.transport" not in source
+    assert "app.remote_execution.profile" not in source
     assert "prepare_run(" not in source
     assert "provider.launch(" not in source
     assert "paramiko" not in source

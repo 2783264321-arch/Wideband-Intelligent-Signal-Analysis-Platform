@@ -65,7 +65,10 @@ def test_g5_schemas_unchanged():
 def test_recovery_and_coordinator_boundaries():
     for module in (recovery_module, coordinator_module):
         source = inspect.getsource(module)
-        assert "remote_execution" not in source
+        # Plan A1 allows importing bounded authority codes from remote_execution.runtime;
+        # the remote transport/profile seams must remain absent.
+        assert "app.remote_execution.transport" not in source
+        assert "app.remote_execution.profile" not in source
         assert "prepare_run(" not in source
         assert "provider.launch(" not in source
         assert "paramiko" not in source

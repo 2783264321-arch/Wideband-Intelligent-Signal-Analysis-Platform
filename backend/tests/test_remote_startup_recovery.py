@@ -148,3 +148,13 @@ def test_rotate_coordinator_token_does_not_change_request_sha(client):
         rotated = rotate_coordinator_token(metadata)
         batch_after = build_batch(rotate_coordinator_token(dict(metadata)))
         assert batch_before.request_sha256 == batch_after.request_sha256
+
+def test_stale_interrupt_idempotent(client):
+    _add_run(client, "run_gpu", "local_gpu", "running")
+    with client.app.state.database.session_factory() as session:
+        first = mark_stale_local_runs_interrupted(session)
+    with client.app.state.database.session_factory() as session:
+        second = mark_stale_local_runs_interrupted(session)
+    assert first == 1
+    assert second == 0
+    assert _get_run_status(client, "run_gpu")[0] == "interrupted"

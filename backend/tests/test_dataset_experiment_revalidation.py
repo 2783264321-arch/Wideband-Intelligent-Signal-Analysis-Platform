@@ -286,19 +286,25 @@ def test_release_no_longer_resolves_fails(client):
 def test_certificate_drift_fails(client):
     _seed_dataset(client)
     experiment = _create(_service(client))
-    unmatched = _service(client, registry=_registry(certs=[]))
+    definition = ExpTestPipeline().definition
+    frozen = RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)
+    # Plan A1: certificate/provider authority is revalidated per item at launch.
     with pytest.raises(PlatformError) as exc:
-        unmatched.revalidate_frozen_identity(experiment.id)
-    assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+        _registry(certs=[]).validate_frozen_execution_authority(
+            definition, None, "local_cpu", frozen
+        )
+    assert exc.value.code == "EXECUTION_NOT_CERTIFIED"
 
 
 def test_runtime_descriptor_drift_fails(client):
     _seed_dataset(client)
     experiment = _create(_service(client))
-    drifting = _service(client, registry=_registry(provider=DriftingProvider("local_cpu", runtime_ref=LOCAL_REF)))
+    definition = ExpTestPipeline().definition
+    frozen = RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)
+    drifting = _registry(provider=DriftingProvider("local_cpu", runtime_ref=LOCAL_REF))
     with pytest.raises(PlatformError) as exc:
-        drifting.revalidate_frozen_identity(experiment.id)
-    assert exc.value.code == "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED"
+        drifting.validate_frozen_execution_authority(definition, None, "local_cpu", frozen)
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
 
 
 def test_missing_experiment_fails_closed(client):

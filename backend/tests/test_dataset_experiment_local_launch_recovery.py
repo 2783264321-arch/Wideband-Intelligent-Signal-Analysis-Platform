@@ -60,6 +60,7 @@ def _seed_pending_local(session, experiment, *, order=0, marker=None, worker_pid
         id=f"run_p_{key}", recording_id=target.recording_id, pipeline_id="g3_local",
         pipeline_version="1.0", executor="local_cpu", status="pending",
         parameters_json={}, worker_pid=worker_pid,
+        execution_metadata_json={"runtime_descriptor": experiment.runtime_descriptor_json},
     ))
     session.add(DatasetExperimentAttemptModel(
         id=f"att_p_{key}", experiment_item_id=target.id, attempt_number=1,
@@ -503,3 +504,24 @@ def test_repair_skips_foreign_executor(client, monkeypatch):
     calls, report = _repair_with_spy(client, monkeypatch, executor="remote_gpu")
     assert calls == []
     assert report.repaired_first_launch == 0
+
+
+def test_fail_closed_unlaunched_run_idempotent(client):
+    session, experiment, target, _, _ = _manual_pending_experiment(
+        client, executor="local_gpu"
+    )
+    ds = DatasetExperimentService(
+        session, PipelineRegistry([G3LocalPipeline()]), None, FakeRegistry({})
+    )
+    first = ds.fail_closed_unlaunched_run(
+        experiment_id=experiment.id, coordinator_token="T",
+        item_id=target.id, attempt_id="att_m", run_id="run_m",
+        error_type="EXECUTION_CAPABILITY_UNAVAILABLE", error_message="gone",
+    )
+    second = ds.fail_closed_unlaunched_run(
+        experiment_id=experiment.id, coordinator_token="T",
+        item_id=target.id, attempt_id="att_m", run_id="run_m",
+        error_type="EXECUTION_CAPABILITY_UNAVAILABLE", error_message="gone",
+    )
+    assert first == "interrupted"
+    assert second == "already_interrupted"
