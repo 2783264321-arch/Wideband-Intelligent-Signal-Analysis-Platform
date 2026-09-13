@@ -52,7 +52,22 @@ See Task 1.
 **Immutable local-GPU runtime reference (Task 6):**
 `local:autodl_primary:gpu:7b958347b5af`
 
-**Acceptance evidence refs (Task 10):**
+**Two-stage evidence lifecycle (no circular dependency):**
+
+```text
+Tasks 1–9
+  → C6  PRE-CERT QUALIFICATION EVIDENCE   (docs/superpowers/acceptance/... , pre-cert facts only)
+  → C7  certificates (evidence_ref point at IDs frozen by C6)
+  → Task 11 post-cert real production AnalysisRuns
+  → Task 12 full regression
+  → Task 13 scope audit
+  → C8  FINAL BHQ-3 ACCEPTANCE EVIDENCE    (finalizes/updates the same document)
+```
+
+The final BHQ-3 seal is based on **C8**, not C6. C6 must contain only facts that
+already exist before certificate issuance (it must never reference post-cert runs).
+
+**Certificate `evidence_ref`s (stable identifiers frozen by C6):**
 `m9_2_bhq3_cpn_local_gpu_acceptance`,
 `m9_2_bhq3_zoomspec_local_gpu_acceptance`
 
@@ -83,6 +98,19 @@ See Task 1.
     `cpu_supported` or raw plugin declaration.
 18. One real ML case at a time (never concurrent); each real case in its own
     subprocess.
+19. **Cgroup memory gate:** before EVERY real model case in Task 8 and Task 11,
+    require `headroom = memory.max - memory.current >= 4 GiB`; otherwise STOP
+    `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`. Never auto-kill OpenCode / Jupyter /
+    TensorBoard / autopanel or unrelated processes to free memory.
+20. **Honest resource evidence:** a controller process cannot read another
+    process's torch CUDA allocator peaks. Record only what is externally
+    observable (controller wall time; `/proc/<worker_pid>/status` RSS where
+    observable; external `nvidia-smi` GPU process memory where observable);
+    otherwise record `unavailable`. Never invent a value and never modify
+    `local_inference_worker` just to expose test metrics.
+21. **Recovery scope:** BHQ-3 certifies only the normal local_gpu execution path.
+    local_gpu crash/startup recovery is NOT qualified here and is deferred to
+    BHQ-5 (§Task 14 final evidence must state this).
 
 ---
 
@@ -93,15 +121,16 @@ PRECISION_CONTRACT_UNRESOLVED          Task 1 cannot reconcile local_gpu precisi
 CUDA_PROBE_FAILED                      Task 2 probe cannot detect/prove CUDA readiness in the configured interpreter.
 ASSET_MISMATCH                         Task 8/9 asset manifest or bytes differ from the frozen golden manifests.
 PRE_CERT_GATE_FAILED                   Task 7: provider+capability without a certificate does NOT report EXECUTION_NOT_CERTIFIED.
+BHQ_3_BLOCKED_BY_CGROUP_MEMORY         Task 8/11 pre-launch gate: memory.max - memory.current < 4 GiB before a real ML worker.
 REAL_LOCAL_GPU_ACCEPTANCE_FAILED       Task 8: real worker run does not reach completed with persisted DetectionResults.
-BHQ2_PARITY_FAILED                     Task 9: gross divergence from BHQ-2 CUDA outputs (counts alone insufficient).
+BHQ2_PARITY_FAILED                     Task 9: gross divergence between the committed direct-science oracle and the production local_gpu worker outputs.
 PRODUCTION_PATH_FAILED                 Task 11: post-cert real AnalysisRun fails or falls back to CPU/remote.
 REGRESSION_FAILED                      Task 12: any pytest failed/error.
 SCOPE_VIOLATION                        Task 13: a frozen scientific / remote / DB / frontend file changed.
 ```
 
 If a stop triggers: STOP immediately, do not issue/modify any certificate, record
-the exact failure in the acceptance doc, and end the run with
+the exact failure in the appropriate evidence stage, and end the run with
 `BHQ_3_BLOCKED_BY_<reason>`.
 
 ---
@@ -401,15 +430,34 @@ Do not touch `preprocessing.py`, `detector.py`, `ahlp.py`, `frn.py`,
   technical capability/certificate is still not runnable (projection empty).
 - Do **not** deprecate/remove `cpu_supported` (out of BHQ-3 scope).
 
+**Commit owner:** the Task 5 tests are added to
+`backend/tests/test_local_gpu_pre_cert_gate.py` and committed in **C4**
+(`test: add local_gpu pre-certificate fail-closed gate`). There is no separate
+Task 5 commit; C4 is the deterministic boundary for Tasks 5 and 7.
+
 ---
 
 ## Task 6 — Immutable Local-GPU Runtime Identity
 
 **Files**
 
-- No production file change. Recorded in the acceptance doc and used verbatim in
+- No production file change. Recorded in the C6 evidence doc and used verbatim in
   `execution_certificates.json` (Task 10).
 - Acceptance tool: `scripts/bhq3_local_gpu_runtime_identity.py` (prints/verifies).
+
+**Execution (must inspect the ML interpreter, never the torch-free `.venv`):**
+
+```bash
+PYTHONPATH="$PWD/backend" \
+/root/miniconda3/bin/python \
+scripts/bhq3_local_gpu_runtime_identity.py
+```
+
+The repo `.venv` must remain torch/ultralytics-free; the identity tool must run
+under `/root/miniconda3/bin/python` (it imports torch/ultralytics to compute the
+material). It must print the material JSON, the 12-hex generation, and the full
+`runtime_ref`, and exit non-zero if the recomputed `runtime_ref` differs from the
+expected value below.
 
 Define generation material and digest exactly as computed at plan time:
 
@@ -504,42 +552,125 @@ No certificate may be committed before this gate is green.
    where the temp cert tuple is
    `(plugin_id, "1.0.0", "golden", "local_gpu", "cuda", "float16", runtime_ref)`.
 4. `registry = ExecutorRegistry(providers, temp_store)`.
-5. `app = create_app(settings)`; then override
+5. **Pre-launch cgroup memory gate (per case, immediately before launch):**
+
+   ```python
+   headroom = int(Path("/sys/fs/cgroup/memory.max").read_text()) - int(Path("/sys/fs/cgroup/memory.current").read_text())
+   if headroom < 4 * 1024**3:
+       raise SystemExit("BHQ_3_BLOCKED_BY_CGROUP_MEMORY")
+   ```
+
+   Never auto-kill OpenCode/Jupyter/TensorBoard/autopanel or unrelated processes.
+6. **Create provider work roots before `create_app`/availability:**
+
+   ```python
+   settings.local_inference_work_root.mkdir(parents=True, exist_ok=True)
+   settings.data_root.mkdir(parents=True, exist_ok=True)
+   ```
+
+   Note: `local_inference_work_root` is provider configuration; the actual local
+   worker result workspace is under the configured `data_root` /
+   `StorageService` artifact path (`StorageService.artifact_dir(run.id)`).
+7. `app = create_app(settings)`; then override
    `app.state.executor_registry = registry` (real production seams, temp cert
    injected at runtime).
-6. Register the real SpaceNet Recording via external-path semantics (no IQ copy):
+8. Register the real SpaceNet Recording via external-path semantics (no IQ copy):
    use `app.datasets.spacenet.SpaceNetAdapter` to load `test/<stem>`, then insert
    `RecordingModel` with `external_path` + metadata + `GroundTruthModel` rows.
-7. Launch via the real API path: `POST /api/analysis-runs`
+9. Launch via the real API path: `POST /api/analysis-runs`
    `{recording_id, pipeline_id, executor:"local_gpu", model_release_id:"golden", parameters:{}}`.
-8. Poll `GET /api/analysis-runs/{id}` until terminal.
-9. Assert: `status == "completed"`, `executor == "local_gpu"`, no error, no
-   CPU/remote fallback; persisted `DetectionResult` rows with correct output label
-   space; `execution_metadata_json.runtime_descriptor` is the exact tuple.
-10. Capture per case: run id, stem, plugin/version/release, runtime descriptor,
-    runtime_ref, asset manifest SHA, status, DetectionResult count, class
-    histogram, wall time, peak RSS, peak CUDA allocated/reserved.
+10. Poll `GET /api/analysis-runs/{id}` until terminal.
+11. Assert: `status == "completed"`, `executor == "local_gpu"`, no error, no
+    CPU/remote fallback; persisted `DetectionResult` rows with correct output label
+    space; `execution_metadata_json.runtime_descriptor` is the exact tuple.
+
+**Resource evidence (honest, externally observable only).** For each production
+worker case capture:
+
+- `wall_time_s`: measured by the controller around the API launch→terminal wait;
+- `worker_pid`: `AnalysisRunModel.worker_pid`;
+- `worker_peak_rss_kb`: controller or external observer reads
+  `/proc/<worker_pid>/status` `VmHWM` **while the worker is alive**; if the worker
+  has already exited or the value is unavailable, record `"unavailable"`;
+- `gpu_process_memory`: external `nvidia-smi --query-compute-apps=pid,used_memory
+  --format=csv` polled during the run (no new required dependency); if the run is
+  too short to observe, record `"unavailable"`;
+- **never** claim the controller read the child's
+  `torch.cuda.max_memory_allocated/reserved` — that is not observable from the
+  controller. BHQ-2 direct-science torch-allocator peaks remain the
+  allocator-level reference only.
+
+Do not modify `local_inference_worker` to expose test metrics.
 
 **Runner:** `scripts/bhq3_local_gpu_acceptance.py` runs the same steps for
 `{cpn, zoomspec} × {stem 2, stem 0}` in separate processes (one case at a time),
 writes `/tmp/bhq3_work/bhq3_temp_cert_evidence.json`, and prints a summary.
 
+**STOP `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`** on the pre-launch gate, and
 **STOP `REAL_LOCAL_GPU_ACCEPTANCE_FAILED`** if any case is not `completed` with
 persisted detections, or if the worker did not run under
 `/root/miniconda3/bin/python`.
 
 **Commit C4:** `test: add local_gpu pre-certificate fail-closed gate`
+(includes Task 5 legacy-metadata boundary tests + Task 7 gate in
+`backend/tests/test_local_gpu_pre_cert_gate.py`).
+
 **Commit C5:** `test: add real local_gpu hardware acceptance harness`
-(include `scripts/bhq3_precision_dtype_probe.py`,
+(includes `backend/tests/test_local_gpu_acceptance.py` and ALL acceptance
+tooling: `scripts/bhq3_precision_dtype_probe.py`,
 `scripts/bhq3_local_gpu_runtime_identity.py`,
-`scripts/bhq3_local_gpu_acceptance.py`.)
+`scripts/bhq3_direct_science_oracle.py`,
+`scripts/bhq3_local_gpu_acceptance.py`,
+`scripts/bhq3_local_gpu_production_acceptance.py`.)
 
 ---
 
-## Task 9 — Parity Against BHQ-2
+## Task 9 — Reproducible Parity via the Direct-Science Oracle
 
-Compare the Task 8 `local_gpu` worker outputs against BHQ-2 frozen-science CUDA
-outputs for matching stems:
+Task 9 must be self-contained and reproducible even if `/tmp` (and the BHQ-2
+scratch output) is gone. It compares two artifacts produced from the SAME frozen
+code, stems, assets, and CUDA device:
+
+1. the **committed direct-science oracle** (fresh, current tree), and
+2. the **production `local_gpu` worker** outputs from Task 8.
+
+### 9.1 Committed oracle tooling
+
+`scripts/bhq3_direct_science_oracle.py` (committed in C5), run with
+`/root/miniconda3/bin/python`, must rerun the SAME frozen direct-science
+pipelines in fresh subprocesses (one case per process) for
+`{cpn, zoomspec} × {stem 2, stem 0}` and emit full JSON to
+`/tmp/bhq3_work/direct_science_oracle_<plugin>_stem<stem>.json`:
+
+- `CPNBandwidthTierPipeline(detector_checkpoint_path, normalization, label_space, device=0)`
+  on `app.datasets.spacenet.SpaceNetAdapter`-derived `RecordingInput`;
+- `ZoomSpecFrozenPipeline(detector_checkpoint_path, frn_checkpoint_path, normalization,
+  label_space, device=0)`;
+- each detection: `t_start_s`, `t_end_s`, `f_low_hz`, `f_high_hz`, `class_id`,
+  `class_name`, `confidence`, `scores`;
+- `run_metadata` (CPN: `cpn_proposal_count`/`detection_count`; ZoomSpec:
+  `cpn_proposal_count`, `frn_valid_count`, `score_threshold_survivor_count`,
+  `post_nms_count`).
+
+No `RuntimeDescriptor`, no `build_runtime()`, no worker, no DB. This reruns the
+same frozen composition accepted in BHQ-2, but produces full committed-provenance
+JSON rather than relying on the BHQ-2 `/tmp` scratch.
+
+### 9.2 Comparison
+
+Compare `current direct-science oracle` vs `production local_gpu worker` per
+matching stem:
+
+- physical TF boxes (`t_start_s`, `t_end_s`, `f_low_hz`, `f_high_hz`) matched by
+  TF IoU;
+- class ids and class names;
+- confidence;
+- ZoomSpec stage counts (`cpn_proposal_count`, `frn_valid_count`,
+  `score_threshold_survivor_count`, `post_nms_count`), read from the real run's
+  artifact workspace `run_metadata.json`
+  (`StorageService.artifact_dir(run.id) / "run_metadata.json"`), not from a log.
+
+### 9.3 Historical sanity counts (not the primary parity evidence)
 
 ```text
 CPN      stem 2: 13 detections (Narrow 10 / Mid 2 / Wide 1)
@@ -548,19 +679,13 @@ ZoomSpec stem 2: 11 detections
 ZoomSpec stem 0: 13 detections
 ```
 
-Do **not** use counts alone. Compare, per matching stem:
+These BHQ-2 counts remain sanity checks. The authoritative BHQ-3 parity evidence
+is the oracle-vs-worker comparison above.
 
-- physical TF boxes (`t_start_s`, `t_end_s`, `f_low_hz`, `f_high_hz`), matched by
-  TF IoU;
-- class ids and class names;
-- confidence;
-- ZoomSpec stage counts (`cpn_proposal_count`, `frn_valid_count`,
-  `score_threshold_survivor_count`, `post_nms_count`).
-
-Because the production worker and the BHQ-2 path execute the same frozen code, a
-gross divergence (count mismatch beyond NMS ties, class/label disagreement,
-systematic confidence shift) is a blocker. CPU-vs-GPU bitwise equality is NOT
-required.
+Because the production worker and the oracle execute the same frozen code, a gross
+divergence (count mismatch beyond NMS ties, class/label disagreement, systematic
+confidence shift) is a blocker. CPU-vs-GPU bitwise equality is NOT required. No
+scientific code change is permitted.
 
 **STOP `BHQ2_PARITY_FAILED`** on gross divergence.
 
@@ -599,45 +724,81 @@ Append two certificates exactly:
 }
 ```
 
-`evidence_ref` points to the committed acceptance document (Task 14). The four
-existing certificates must remain byte-identical. Add a focused test
-(`test_local_gpu_certificates_exact.py`) asserting the two new tuples are present
-and the four existing tuples are unchanged.
+`evidence_ref` points to the **C6 PRE-CERT QUALIFICATION EVIDENCE** document,
+which must already exist before this commit. The four existing certificates must
+remain byte-identical. Add a focused test (`test_local_gpu_certificates_exact.py`)
+asserting the two new tuples are present and the four existing tuples are
+unchanged.
 
-**Commit C6:** `docs: add bhq-3 local gpu acceptance evidence` (evidence doc first)
-**Commit C7:** `feat: certify cpn and zoomspec local_gpu execution` (certificate
-file only)
+**Commit C6 (pre-cert evidence):** `docs: add bhq-3 local gpu pre-cert qualification evidence`
+**Commit C7 (certificates):** `feat: certify cpn and zoomspec local_gpu execution`
+(certificate file only)
 
-Order: the evidence commit must exist before/with the certificate commit so the
-`evidence_ref` is real.
+Ordering invariant (no future-evidence cycle): C6 contains only facts that exist
+before certificate issuance (Tasks 1–9). The `evidence_ref` identifiers are frozen
+by C6. C7 only adds the two certificates. All post-cert facts are recorded
+exclusively in C8 (Task 14).
 
 ---
 
 ## Task 11 — Post-Certification Real Production AnalysisRun
 
-**No injected certificate.** Use the real production store.
+**No injected certificate.** Use the real production store and real app state.
 
-**Driver:** `scripts/bhq3_local_gpu_production_acceptance.py` (committed), or the
-`backend/tests/test_local_gpu_acceptance.py` production mode.
+**Driver:** `scripts/bhq3_local_gpu_production_acceptance.py` (committed in C5).
 
 1. Build `Settings` with a dedicated DB (`/tmp/bhq3_work/postcert/...`), real
    SpaceNet external-path recording, `WSP_LOCAL_GPU_PYTHON_PATH=/root/miniconda3/bin/python`,
    `WSP_LOCAL_GPU_RUNTIME_REF=local:autodl_primary:gpu:7b958347b5af`,
    `WSP_LOCAL_INFERENCE_WORK_ROOT`, and the namespaced `WSP_LOCAL_ASSET_PATHS_JSON`
    for each golden manifest.
-2. `app = create_app(settings)` — builds the real `ExecutorRegistry` from the
+2. **Pre-launch cgroup memory gate** (same as Task 8 step 5; `>= 4 GiB`, else STOP
+   `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`). Never auto-kill unrelated processes.
+3. **Create work roots before `create_app`:**
+
+   ```python
+   settings.local_inference_work_root.mkdir(parents=True, exist_ok=True)
+   settings.data_root.mkdir(parents=True, exist_ok=True)
+   ```
+4. `app = create_app(settings)` — builds the real `ExecutorRegistry` from the
    committed certificate file + `build_local_providers`.
-3. `POST /api/analysis-runs` with `executor:"local_gpu"` for CPN and ZoomSpec.
-4. Require: `status == "completed"`, `executor == "local_gpu"`, separate ML
+5. `POST /api/analysis-runs` with `executor:"local_gpu"` for CPN and ZoomSpec.
+6. Require: `status == "completed"`, `executor == "local_gpu"`, separate ML
    interpreter execution, exact runtime descriptor tuple, `model_release_id == "golden"`,
    exact manifest SHA, persisted DetectionResults, no CPU/remote fallback.
-5. `GET /api/pipelines`: require `local_gpu` to appear in `executors_supported`
-   (and `recommended_executor` stays `None` for CPN/ZoomSpec because
-   `recommended_execution` is `remote_gpu`, which is not a local_gpu recommendation).
-6. `GET /api/executor-availability?executor=local_gpu` returns available when the
+7. **Executor projection (correct invariant).** `GET /api/pipelines`: require
+   `local_gpu ∈ executors_supported` for CPN and ZoomSpec. For
+   `recommended_executor`, assert the **M9.2 deployment-qualified projection for
+   the actually configured providers/certificates** — i.e.
+   `recommended_executor == definition.recommended_execution if that executor is in
+   executors_supported else None`. Do **not** unconditionally require `None`.
+   If the BHQ harness intentionally disables `remote_gpu` (no remote provider
+   configured), then `remote_gpu` is absent from `executors_supported`, so
+   `recommended_executor is None` — this must be asserted **with that condition
+   stated explicitly**.
+8. `GET /api/executor-availability?executor=local_gpu` returns available when the
    probe passes.
 
+**Resource evidence:** capture the same externally observable metrics as Task 8
+(controller wall time; `/proc/<worker_pid>/status` `VmHWM` while alive;
+external `nvidia-smi` compute-apps memory; else `"unavailable"`). Never claim the
+controller read the child's torch allocator peaks.
+
+**Recovery limitation (must be recorded, not fixed):**
+
+```text
+BHQ-3 certifies the normal local_gpu execution path.
+local_gpu crash/startup recovery is not qualified here and is deferred to BHQ-5.
+```
+
+BHQ-3 must not claim "complete local_gpu lifecycle qualification." Startup
+recovery continues to handle only stale `local_cpu` runs; do not modify recovery.
+
 **STOP `PRODUCTION_PATH_FAILED`** on any failure or fallback.
+
+**Commit C8 (final acceptance evidence):** `docs: finalize bhq-3 local gpu acceptance evidence`
+(update/finalize the C6 document with post-cert facts, final projection,
+regression, scope audit, and final accepted HEAD).
 
 ---
 
@@ -709,32 +870,59 @@ file, STOP and classify instead of widening scope.
 
 ---
 
-## Task 14 — Acceptance Evidence Document
+## Task 14 — Two-Stage Acceptance Evidence Document
 
 **File:** `docs/superpowers/acceptance/2026-09-14-bhq-3-local-gpu-production-qualification.md`
+(created in C6, finalized in C8; same path).
 
-Record:
+### 14.1 C6 — PRE-CERT QUALIFICATION EVIDENCE (Tasks 1–9 facts only)
+
+Must contain only facts that already exist before C7 certificate issuance:
 
 ```text
-accepted commit (post-cert HEAD)
 GPU identity (RTX 5090, 32607 MiB, compute cap 12.0, driver 580.105.08, CUDA 12.8)
 runtime_ref (local:autodl_primary:gpu:7b958347b5af) + generation material
 runtime environment versions (python/torch/ultralytics/numpy/scipy)
 precision-semantics conclusion (Task 1: answer B, effective dtype evidence)
 asset hashes (cpn + zoomspec manifest + logical assets)
 SpaceNet provenance (test stems 2/0 paths, sample metadata)
-pre-cert fail-closed evidence (Task 7)
-temporary-certificate acceptance evidence (Task 8, temp cert never persisted)
+pre-cert fail-closed evidence (Task 7 + Task 5 boundary)
+temporary-certificate hardware acceptance evidence (Task 8, temp cert never persisted)
+direct-science-oracle-vs-worker parity (Task 9)
+pre-cert latency/resource evidence (externally observable only; else "unavailable")
+```
+
+- `evidence_ref` identifiers `m9_2_bhq3_cpn_local_gpu_acceptance` and
+  `m9_2_bhq3_zoomspec_local_gpu_acceptance` are defined here and then reused
+  verbatim by C7.
+- C6 must NOT reference post-cert runs, final projections, regression results, or
+  the final accepted HEAD.
+
+**Commit C6:** `docs: add bhq-3 local gpu pre-cert qualification evidence`
+
+### 14.2 C8 — FINAL BHQ-3 ACCEPTANCE EVIDENCE (finalization)
+
+After Task 11 (post-cert runs), Task 12 (regression), and Task 13 (scope audit),
+update the same document with the post-cert finalization:
+
+```text
+exact certificate commit SHA (C7)
 production certificate tuples (Task 10)
-post-cert real AnalysisRun ids + DetectionResult counts (Task 11)
-BHQ-2 parity (Task 9)
-latency, peak RSS, peak VRAM per case
-full pytest result (0 failed / 0 errors)
-scope audit (SCOPE_OK)
+post-cert real AnalysisRun ids + results + DetectionResult counts (Task 11)
+final executor projections (local_gpu in executors_supported; recommended_executor
+  = deployment-qualified projection for configured providers)
+final full regression result (0 failed / 0 errors)
+final scope audit (SCOPE_OK)
+final accepted BHQ-3 HEAD
+recovery limitation statement:
+  "BHQ-3 certifies the normal local_gpu execution path. local_gpu crash/startup
+   recovery is not qualified here and is deferred to BHQ-5."
 limitations (mixed precision; generation identity is material, not exhaustive)
 ```
 
-**Commit C6:** `docs: add bhq-3 local gpu acceptance evidence`
+The final BHQ-3 seal is based on **C8**, not C6.
+
+**Commit C8:** `docs: finalize bhq-3 local gpu acceptance evidence`
 
 ---
 
@@ -758,10 +946,15 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 # task 7 pre-cert gate (must be green BEFORE task 10)
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests/test_local_gpu_pre_cert_gate.py -q
 
-# task 1/8/9/11 acceptance tooling (operator-run, dedicated work root)
+# cgroup memory gate (MANDATORY before every real model case)
+headroom=$(( $(cat /sys/fs/cgroup/memory.max) - $(cat /sys/fs/cgroup/memory.current) ))
+[ "$headroom" -ge $((4*1024*1024*1024)) ] || { echo BHQ_3_BLOCKED_BY_CGROUP_MEMORY; exit 1; }
+
+# task 1/6/8/9/11 acceptance tooling (operator-run, dedicated work root)
 mkdir -p /tmp/bhq3_work
 PYTHONPATH="$PWD/backend" /root/miniconda3/bin/python scripts/bhq3_precision_dtype_probe.py
-PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" scripts/bhq3_local_gpu_runtime_identity.py
+PYTHONPATH="$PWD/backend" /root/miniconda3/bin/python scripts/bhq3_local_gpu_runtime_identity.py
+PYTHONPATH="$PWD/backend" /root/miniconda3/bin/python scripts/bhq3_direct_science_oracle.py
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" scripts/bhq3_local_gpu_acceptance.py
 PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" scripts/bhq3_local_gpu_production_acceptance.py
 
@@ -776,19 +969,37 @@ git diff --name-only c809eb02a5286737819136f9391d13949e8a117b..HEAD
 
 ## Self-Review (mandatory before committing the plan / after implementation)
 
-1. Every M9.2 local_gpu/certificate invariant checked against the authoritative
-   spec (§5.6/5.8/5.9, §8.2/8.4, §11.1–11.4, §18). ✅
-2. The plan never allows plugin self-certification: Task 7 gate + Task 10
-   platform-owned certificates only. ✅
-3. Certificate issuance occurs strictly after real hardware evidence
-   (Tasks 7–9 before Task 10). ✅
-4. No frozen scientific code change is planned (scope audit Task 13). ✅
-5. No remote/Phase-G change is planned. ✅
-6. Precision semantics resolved before certificate creation (Task 1 → answer B
-   = `float16`). ✅
-7. No placeholders/TODOs: runtime_ref, precision, file paths, test names, and
-   commands are all concrete. ✅
-8. Exact file paths / test commands / commit boundaries provided. ✅
+1. C6/C7/C8 ordering has no future-evidence cycle: C6 = pre-cert facts only,
+   C7 = certificates referencing C6 IDs, C8 = post-cert finalization; C6 never
+   references post-cert facts. ✅
+2. No certificate exists before C6 pre-cert evidence (Task 7 gate + C6 → C7). ✅
+3. Task 9 is self-contained/reproducible via the committed
+   `scripts/bhq3_direct_science_oracle.py`; it does not depend on `/tmp/bhq2_cuda`. ✅
+4. Resource claims are actually observable: controller wall time +
+   `/proc/<pid>/status` RSS + external `nvidia-smi`; child torch allocator peaks
+   are explicitly NOT claimed; unavailable is recorded honestly. ✅
+5. Cgroup memory gate is explicit (`>= 4 GiB`) and wired into Tasks 8 and 11 with
+   STOP `BHQ_3_BLOCKED_BY_CGROUP_MEMORY`. ✅
+6. Every acceptance script has a commit owner (all in C5); Task 5 tests fold into
+   C4. ✅
+7. Every task has a deterministic commit boundary (C1–C8). ✅
+8. `executors_supported` invariant (`local_gpu ∈`) is asserted; `recommended_executor`
+   is asserted as the deployment-qualified projection (never unconditionally
+   `None`; `None` only with the remote-disabled condition stated). ✅
+9. local_gpu recovery limitation recorded and explicitly deferred to BHQ-5; no
+   recovery code change. ✅
+10. Precision conclusion preserved (`float16` = CUDA mixed-precision deployment
+    mode; no science change). ✅
+11. Every M9.2 local_gpu/certificate invariant checked against the authoritative
+    spec (§5.6/5.8/5.9, §8.2/8.4, §11.1–11.4, §18). ✅
+12. Plan never allows plugin self-certification (Task 7 gate + Task 10
+    platform-owned certificates). ✅
+13. No frozen scientific code change planned (scope audit Task 13). ✅
+14. No remote/Phase-G change planned. ✅
+15. Sealed branch `feature/m9-2-implementation @ c809eb0` remains untouched; no
+    production implementation has occurred in this pass. ✅
+16. No placeholders/TODOs: runtime_ref, precision, file paths, test names, and
+    commands are all concrete. ✅
 
 ---
 
@@ -796,13 +1007,15 @@ git diff --name-only c809eb02a5286737819136f9391d13949e8a117b..HEAD
 
 | Commit | Message | Scope |
 |---|---|---|
-| C0 | `docs: add BHQ-3 local GPU qualification plan` | this plan (already committed on `feature/bhq-local-gpu`) |
+| C0 | `docs: add BHQ-3 local GPU qualification plan` | initial plan (`feature/bhq-local-gpu`) |
+| C0b | `docs: harden BHQ-3 local GPU qualification evidence and acceptance ordering` | this corrective plan pass |
 | C1 | `feat: add local_gpu CUDA health probe to local inference provider` | `local_executor.py` + provider tests |
 | C2 | `feat: declare and gate local_gpu capability for cpn_bandwidth_tier` | CPN definition/plugin + tests |
 | C3 | `feat: declare and gate local_gpu capability for zoomspec pipeline` | ZoomSpec definition/plugin + tests |
-| C4 | `test: add local_gpu pre-certificate fail-closed gate` | new test only |
-| C5 | `test: add real local_gpu hardware acceptance harness` | acceptance tests + `scripts/bhq3_*.py` |
-| C6 | `docs: add bhq-3 local gpu acceptance evidence` | acceptance doc |
+| C4 | `test: add local_gpu pre-certificate fail-closed gate` | Task 5 boundary tests + Task 7 gate (`test_local_gpu_pre_cert_gate.py`) |
+| C5 | `test: add real local_gpu hardware acceptance harness` | acceptance test + ALL scripts (`bhq3_precision_dtype_probe.py`, `bhq3_local_gpu_runtime_identity.py`, `bhq3_direct_science_oracle.py`, `bhq3_local_gpu_acceptance.py`, `bhq3_local_gpu_production_acceptance.py`) |
+| C6 | `docs: add bhq-3 local gpu pre-cert qualification evidence` | pre-cert acceptance doc (Tasks 1–9 facts only) |
 | C7 | `feat: certify cpn and zoomspec local_gpu execution` | `execution_certificates.json` only |
+| C8 | `docs: finalize bhq-3 local gpu acceptance evidence` | post-cert finalization of the same doc |
 
-No other production file may change.
+No other production file may change. The final BHQ-3 seal is based on C8.
