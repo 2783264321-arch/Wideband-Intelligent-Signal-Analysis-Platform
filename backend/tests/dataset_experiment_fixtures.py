@@ -97,6 +97,37 @@ def running_experiment_with_token(client, token, *, max_concurrency=1, count=3, 
     return session, ds, analysis, provider, experiment
 
 
+def completed_with_failures_experiment(client, *, failed=1, completed=0):
+    from datetime import datetime, timezone
+
+    count = failed + completed
+    seed_dataset(client, count=count)
+    session, ds, analysis, provider = local_services(client)
+    experiment = create_experiment(ds, max_concurrency=1)
+    experiment.status = "running"
+    experiment.coordinator_token = "coord_old"
+    session.commit()
+    targets = list(
+        session.query(DatasetExperimentItemModel)
+        .filter_by(experiment_id=experiment.id)
+        .order_by(DatasetExperimentItemModel.manifest_order)
+        .all()
+    )
+    for index, target in enumerate(targets):
+        if index < failed:
+            target.status = "failed"
+            target.last_error_type = "ANALYSIS_FAILED"
+            target.last_error_message = "boom"
+        else:
+            target.status = "completed"
+    experiment = session.get(DatasetExperimentModel, experiment.id)
+    experiment.status = "completed_with_failures"
+    experiment.completed_at = datetime.now(timezone.utc)
+    session.commit()
+    session.refresh(experiment)
+    return session, ds, experiment, provider
+
+
 def rotate_token(client, experiment_id, new_token):
     with client.app.state.database.session_factory() as session:
         session.get(DatasetExperimentModel, experiment_id).coordinator_token = new_token

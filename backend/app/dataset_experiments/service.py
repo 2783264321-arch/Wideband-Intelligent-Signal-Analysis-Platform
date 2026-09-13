@@ -1039,6 +1039,231 @@ class DatasetExperimentService:
             raise
         return int(result.rowcount or 0) == 1
 
+    def retry_failed(self, experiment_id, job_manager):
+        """G4 explicit Retry Failed. Valid only from ``completed_with_failures``.
+
+        One durable transaction: revalidate status, requeue failed Items only,
+        clear retryable Item error projection, transition the Experiment back to
+        ``running`` under a fresh coordinator generation, and clear the terminal
+        orchestration projection. Creates NO Attempt and NO AnalysisRun.
+
+        Then, outside the transaction: spawn the new coordinator, then persist
+        ``worker_pid`` under the fresh-generation guard. A spawn failure
+        generation-fenced-restores the pre-retry terminal Experiment projection
+        and the requeued Items, but ONLY if this generation still owns the
+        Experiment (see ``_restore_retry_failed``).
+        """
+        experiment = self.session.get(DatasetExperimentModel, experiment_id)
+        if experiment is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_NOT_FOUND", "Dataset experiment was not found.", 404
+            )
+        if experiment.status != "completed_with_failures":
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVALID_TRANSITION",
+                "Only a completed_with_failures experiment can retry failed items.",
+                409,
+            )
+
+        terminal_snapshot = {
+            "completed_at": experiment.completed_at,
+            "heartbeat_at": experiment.heartbeat_at,
+            "coordinator_token": experiment.coordinator_token,
+            "worker_pid": experiment.worker_pid,
+            "error_type": experiment.error_type,
+            "error_message": experiment.error_message,
+        }
+
+        failed_rows = self.session.execute(
+            select(
+                DatasetExperimentItemModel.id,
+                DatasetExperimentItemModel.last_error_type,
+                DatasetExperimentItemModel.last_error_message,
+            ).where(
+                DatasetExperimentItemModel.experiment_id == experiment_id,
+                DatasetExperimentItemModel.status == "failed",
+            )
+        ).all()
+        if not failed_rows:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_INVALID_TRANSITION",
+                "Experiment has no failed items to retry.",
+                409,
+            )
+        snapshot = [(row[0], row[1], row[2]) for row in failed_rows]
+
+        token = f"coord_{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        try:
+            claimed_count = 0
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "completed_with_failures",
+                    )
+                    .values(
+                        status="running",
+                        coordinator_token=token,
+                        worker_pid=None,
+                        heartbeat_at=now,
+                        completed_at=None,
+                        error_type=None,
+                        error_message=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                claimed_count = int(claimed.rowcount or 0)
+                if claimed_count == 1:
+                    self.session.execute(
+                        update(DatasetExperimentItemModel)
+                        .where(
+                            DatasetExperimentItemModel.experiment_id == experiment_id,
+                            DatasetExperimentItemModel.status == "failed",
+                        )
+                        .values(
+                            status="queued",
+                            last_error_type=None,
+                            last_error_message=None,
+                            updated_at=now,
+                        )
+                        .execution_options(synchronize_session=False)
+                    )
+            if claimed_count != 1:
+                self.session.rollback()
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_INVALID_TRANSITION",
+                    "Only a completed_with_failures experiment can retry failed items.",
+                    409,
+                )
+            self.session.commit()
+        except PlatformError:
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+
+        try:
+            worker_pid = job_manager.start(experiment_id, token)
+        except Exception as exc:
+            restored = self._restore_retry_failed(
+                experiment_id, token, snapshot, terminal_snapshot
+            )
+            if not restored:
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_FENCE_LOST",
+                    "Retry Failed lost its coordinator generation before the spawn "
+                    "failure could be compensated; a newer generation owns the "
+                    "experiment and no Item was mutated.",
+                    409,
+                ) from exc
+            raise PlatformError(
+                "DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                "Unable to start DatasetExperiment coordinator for retry.",
+            ) from exc
+
+        try:
+            with self.session.no_autoflush:
+                self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        self.session.expire_all()
+        return self.session.get(DatasetExperimentModel, experiment_id)
+
+    def _restore_retry_failed(self, experiment_id, coordinator_token,
+                              item_snapshot, terminal_snapshot):
+        """Generation-fenced compensation for a Retry Failed spawn failure.
+
+        The compensation transaction FIRST must durably re-acquire ownership of
+        the retry generation:
+
+            CAS UPDATE dataset_experiments
+                SET status='completed_with_failures',
+                    coordinator_token = terminal_snapshot token,
+                    worker_pid = terminal_snapshot pid,
+                    heartbeat_at = terminal_snapshot heartbeat,
+                    completed_at = terminal_snapshot completed_at,
+                    error_type = terminal_snapshot error_type,
+                    error_message = terminal_snapshot error_message
+                WHERE id=:id AND coordinator_token=:retry_token AND status='running'
+
+        Only when that UPDATE affects exactly one row (rowcount == 1) does this
+        caller still own the generation, and only THEN are the requeued Items
+        restored inside the SAME transaction. Each Item UPDATE also requires
+        ``id`` AND ``experiment_id`` AND the expected retry-created state
+        ``status='queued'``.
+
+        If the ownership CAS affects zero rows (a newer generation already took
+        over), the transaction is rolled back immediately, ZERO Items are
+        mutated, and this returns ``False`` so the caller raises
+        ``DATASET_EXPERIMENT_FENCE_LOST`` instead of clobbering the newer owner.
+
+        Restoring ``completed_at``/``heartbeat_at``/``coordinator_token``/
+        ``worker_pid``/``error_type``/``error_message`` from the pre-retry
+        terminal snapshot makes this a genuine terminal-projection restore, not a
+        normalized re-write.
+
+        Used only when ``job_manager.start`` raises, which proves no coordinator
+        process was created.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(
+                        status="completed_with_failures",
+                        coordinator_token=terminal_snapshot["coordinator_token"],
+                        worker_pid=terminal_snapshot["worker_pid"],
+                        heartbeat_at=terminal_snapshot["heartbeat_at"],
+                        completed_at=terminal_snapshot["completed_at"],
+                        error_type=terminal_snapshot["error_type"],
+                        error_message=terminal_snapshot["error_message"],
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if int(claimed.rowcount or 0) != 1:
+                    self.session.rollback()
+                    return False
+                for item_id, error_type, error_message in item_snapshot:
+                    self.session.execute(
+                        update(DatasetExperimentItemModel)
+                        .where(
+                            DatasetExperimentItemModel.id == item_id,
+                            DatasetExperimentItemModel.experiment_id == experiment_id,
+                            DatasetExperimentItemModel.status == "queued",
+                        )
+                        .values(
+                            status="failed",
+                            last_error_type=error_type,
+                            last_error_message=error_message,
+                            updated_at=now,
+                        )
+                        .execution_options(synchronize_session=False)
+                    )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return True
+
     def _fail_experiment(self, experiment_id, coordinator_token, error_type, error_message):
         try:
             with self.session.no_autoflush:
