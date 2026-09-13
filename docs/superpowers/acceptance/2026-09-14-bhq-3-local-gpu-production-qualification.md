@@ -212,3 +212,121 @@ PYTHONPATH="$PWD/backend" /root/miniconda3/bin/python scripts/bhq3_direct_scienc
   environment hash (section C).
 - Resource peaks are externally observable only; the controller cannot read the
   child's torch allocator peaks (worker VmHWM and external `nvidia-smi` are used).
+
+---
+
+# C8 — FINAL BHQ-3 ACCEPTANCE EVIDENCE (finalization)
+
+Date: 2026-09-14
+Stage: **FINAL (C8)**. This finalizes the pre-certification evidence (C6) above
+with post-certificate facts. It does **not** contain its own commit SHA; the final
+BHQ-3 seal SHA is determined externally after this commit via `git rev-parse HEAD`.
+
+## N. Provenance (all known before this finalization commit)
+
+```text
+Sealed Phase-G baseline:               c809eb02a5286737819136f9391d13949e8a117b
+Original sealed BHQ-3 plan SHA:        589bf642b08276e6146cde4d1beb68e02cb39287
+Amendment A1 (docs):                   8c3f04d15f38e32b034eaf06067f2dcb7cd43573
+Amendment A1 (tooling):                ceeb70958431524ba884126b791fc509e5964d36
+C1 local_gpu CUDA health probe:        bc1cbd4ae1f5d4508d1d3b4cd0a681646dec846c
+C2 CPN capability/gate:                562f23b9c9d72c307ea8d6b1504fa4cc0679eb4d
+C3 ZoomSpec capability/gate:           3df7beaa99f4e5328690424ecb33bdf6e32b2c49
+C4 pre-cert fail-closed gate:          842529fe5aa7d30431563943609e20f7187ed2fd
+C5 acceptance harness/tooling:         c0362993b57f5f4bc9ee379472eec195eb839c16
+C6 pre-cert evidence:                  659f02afdb999f239a96918dc0343735254e22c0
+C7 certificate candidate:              6e7aa096e116104846ee462df9070cf565c98cb4
+C7A legacy test alignment:             2393677a1ffb1f78f45b1b2eb5af9e75a656999e
+
+implementation_head_before_final_evidence = 2393677a1ffb1f78f45b1b2eb5af9e75a656999e
+```
+
+## O. Post-certificate production AnalysisRun (Task 11)
+
+Real production path with the committed C7 certificate store
+(`scripts/bhq3_local_gpu_production_acceptance.py --all`); fresh Amendment-A1
+admission per case; live A1 monitor active.
+
+| case | stem | run_id | status | executor | device_type | index | precision | runtime_ref | detections | wall s | worker VmHWM | GPU peak | gate |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| CPN | 2 | run_45f525d57da040bfb0444dfb1a5174aa | completed | local_gpu | cuda | 0 | float16 | local:autodl_primary:gpu:7b958347b5af | 13 | 6.90 | 1,653,704 KB | 760 MiB | cache_guarded |
+| ZoomSpec | 2 | run_0bee48ffa7124c5f945ff11d3625603b | completed | local_gpu | cuda | 0 | float16 | local:autodl_primary:gpu:7b958347b5af | 11 | 8.17 | 2,147,036 KB | 834 MiB | cache_guarded |
+
+Provenance per run: `model_release_id = golden`; asset manifest
+`7ab8a6a4…` (CPN) / `16cc0534…` (ZoomSpec); runtime descriptor
+`local_gpu / cuda / 0 / float16` with
+`environment_label = local:autodl_primary:gpu:7b958347b5af`. **No** `local_cpu`
+fallback, **no** `remote_gpu` fallback. CPN class histogram Narrow 10 / Mid 2 /
+Wide 1; ZoomSpec stage counts 13/13/13/11.
+
+## P. Post-certificate Amendment-A1 memory evidence (Task 11)
+
+| case | samples | Δmax | Δoom | Δoom_kill | Δhigh | PSI full peak | PSI some peak | max committed_floor | min effective_headroom |
+|---|---|---|---|---|---|---|---|---|---|
+| CPN stem 2 | 16 | 0 | 0 | 0 | 4767 | 1.22 | 1.22 | 3.291 GiB | 86.709 GiB |
+| ZoomSpec stem 2 | 22 | 0 | 0 | 0 | 1800 | 1.00 | 1.00 | 3.695 GiB | 86.305 GiB |
+
+No `max`/oom/oom_kill; no live-monitor abort. `high` increments and page-cache
+reclaim are expected. Pre-Task-11 quiescence: three consecutive clean A1
+admissions (mode `cache_guarded`, PSI some/full avg10 ≤ 0.39, `high` stable).
+
+## Q. Executor projection (Task 11)
+
+For both plugins, the live `/api/pipelines` read model and an independent registry
+recomputation agree:
+
+| plugin | read_model_executors_supported | recomputed_supported | read_model_recommended_executor | recomputed_recommended |
+|---|---|---|---|---|
+| cpn_bandwidth_tier | ["local_gpu"] | ["local_gpu"] | null | null |
+| zoomspec_yolo26n_aug_combined_frn_v3 | ["local_gpu"] | ["local_gpu"] | null | null |
+
+`local_gpu` is deployment-qualified because the intersection exists
+(capability ∩ registered local_gpu provider ∩ exact C7 certificate).
+`recommended_execution` is `remote_gpu`, which is not in the supported set in this
+local-only harness, so `recommended_executor` is `null` (matches the recomputation).
+Qualification is derived from the certificate intersection, not the declaration.
+
+## R. Full backend regression (Task 12)
+
+```text
+1759 passed, 29 skipped, 0 failed, 0 errors, 3 warnings in 84.42s
+```
+Skipped tests are hardware/acceptance-gated (require explicit env/assets) and are
+not counted as passes.
+
+Control-plane import boundary:
+
+```text
+.venv: find_spec('torch') is None; find_spec('ultralytics') is None  -> VENV_NO_ML_OK
+```
+
+## S. Scope audit (Task 13)
+
+Full branch delta `c809eb0..HEAD` is limited to: `local_executor.py`; CPN/ZoomSpec
+`definition.py` + `plugin.py`; `execution_certificates.json`; focused backend
+tests; `scripts/bhq3_*.py`; the plan and this evidence document.
+
+```text
+NO_FROZEN_SCIENCE_CHANGED   (preprocessing/detector/ahlp/frn/postprocess untouched)
+NO_FORBIDDEN_AREAS_CHANGED  (no db/migrations/remote_execution/dataset_experiments/evaluation/frontend/label_spaces/assets)
+```
+Post-C7 delta (`6e7aa09..HEAD`) is only the three legacy test-expectation
+corrections (C7A).
+
+## T. Known limitations
+
+- `precision="float16"` denotes the certified CUDA mixed-precision deployment
+  mode, not all-FP16 (section D).
+- The runtime generation identity is generation material, not an exhaustive
+  environment hash (section C).
+- **`local_gpu` crash/startup recovery is NOT qualified here and is deferred to
+  BHQ-5.** BHQ-3 certifies only the normal `local_gpu` execution path.
+- The temporary pre-cert certificate was never persisted; only the C7 production
+  certificates are committed.
+- Resource peaks are externally observable only (controller wall time, worker
+  VmHWM, external `nvidia-smi`).
+
+## U. Final seal
+
+The final BHQ-3 seal SHA is the SHA of the commit that adds this C8 finalization,
+determined externally via `git rev-parse HEAD` after committing (not embedded here).
