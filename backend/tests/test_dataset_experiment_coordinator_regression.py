@@ -42,8 +42,8 @@ def test_coordinator_has_no_direct_execution_or_g5_behavior():
     source = inspect.getsource(coordinator_module)
     assert "prepare_run(" not in source
     assert "provider.launch(" not in source
-    assert "DatasetEvaluation" not in source
-    assert 'status="evaluating"' not in source
-    assert "status = \"evaluating\"" not in source
+    # G5 intentionally adds the evaluation branch (DatasetEvaluation linking and
+    # status="evaluating" transitions) via the service layer. The coordinator must
+    # still never directly assign a terminal status or rotate tokens.
     assert 'status="completed"' not in source
     assert "rotate_coordinator_token" not in source

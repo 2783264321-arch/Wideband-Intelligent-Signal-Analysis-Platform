@@ -481,3 +481,19 @@ def test_retry_evaluation_pid_cas_loss_returns_fence_lost(client):
             experiment.id, RecordingCoordinatorJobManager(on_start=rotate)
         )
     assert exc.value.code == "DATASET_EXPERIMENT_FENCE_LOST"
+
+
+def test_manual_vs_automatic_start_one_claim(client):
+    session, ds, experiment, evaluation, provider = _completed_experiment_with_evaluation(client)
+    manual_manager = RecordingExperimentJobManager()
+    DatasetBenchmarkService(session).start_evaluation(evaluation.id, manual_manager)
+    assert len(manual_manager.calls) == 1
+
+    automatic_manager = RecordingExperimentJobManager()
+    result = ds.start_linked_evaluation(
+        experiment.id, evaluation.id, "T", automatic_manager
+    )
+    assert result == "already_started"
+    assert automatic_manager.calls == []
+    with _fresh(client) as fresh:
+        assert fresh.get(DatasetEvaluationModel, evaluation.id).status == "running"

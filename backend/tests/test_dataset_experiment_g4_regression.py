@@ -49,20 +49,19 @@ def test_recovery_module_boundaries():
     assert "remote_execution" not in source
     assert "prepare_run(" not in source
     assert "provider.launch(" not in source
-    assert "DatasetEvaluation" not in source
     assert "paramiko" not in source
     assert "startup_recovery_cutoff" in source
     assert "exists()" in source
-    assert recovery_module._ACTIVE_RECOVERY_STATUSES == ("running",)
+    # G5 intentionally makes recovery evaluation-aware.
+    assert recovery_module._ACTIVE_RECOVERY_STATUSES == ("running", "evaluating")
 
 
 def test_coordinator_unchanged_by_g4():
     source = inspect.getsource(coordinator_module)
     assert "prepare_run(" not in source
     assert "provider.launch(" not in source
-    assert "DatasetEvaluation" not in source
     assert "rotate_coordinator_token" not in source
-    assert 'status="evaluating"' not in source
+    # G5 intentionally adds an evaluation branch; scheduling primitives remain absent.
 
 
 def test_recovery_module_is_torch_free():
