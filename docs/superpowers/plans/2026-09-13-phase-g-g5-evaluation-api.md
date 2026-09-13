@@ -121,9 +121,16 @@ and `app.state.benchmark_job_manager`.
 ### Confirmed gaps G5 must fill
 
 - Transaction-neutral benchmark `prepare_evaluation` / `prepare_retry_evaluation`.
+- Benchmark `start_evaluation` refactor: it currently `session.get()`s before
+  `job_manager.start()`, i.e. spawns inside an autobegun transaction.
+- Status-aware `refresh_coordinator_heartbeat` / `_fail_experiment`
+  (`expected_status="running"` default) because the sealed helpers are
+  running-only and cannot serve `evaluating`.
 - Atomic Experiment evaluation-link ownership + coordinator evaluating branch.
+- Generation-fenced evaluation writes (interrupted reset; restart normalization).
 - Status-aware G4 recovery for `evaluating` (claim, PID guard, skip inference).
-- Retry Evaluation service method.
+- Retry Evaluation service method with Experiment+Evaluation snapshots and
+  generation-fenced compensation.
 - DatasetExperiment REST router + `list_experiments` + item `latest_analysis_run_id`.
 
 ---
@@ -141,11 +148,15 @@ DatasetEvaluation COMMIT
 ```
 
 Resolution (no schema change): a transaction-neutral prepare seam + a
-one-commit link.
+one-commit link. `dataset_evaluation_id` is a real FK to
+`dataset_evaluations.id`, so the staged evaluation row MUST be flushed into the
+SAME transaction before the raw Experiment link UPDATE (immediate-FK databases
+would otherwise reject the UPDATE referencing a not-yet-inserted row):
 
 ```text
 Transaction (ONE commit):
     evaluation = benchmarks.prepare_evaluation(...)   # staged, NO commit, NO spawn
+    session.flush()                                    # INSERT evaluation + items, NO COMMIT
     ds.link_evaluation(experiment_id, evaluation.id, coordinator_token)
         CAS UPDATE dataset_experiments
           SET dataset_evaluation_id = evaluation.id, status = 'evaluating'
@@ -157,11 +168,12 @@ Outside transaction:
     benchmarks.start_evaluation(evaluation_id, benchmark_job_manager)
 ```
 
+- If the link CAS misses, the caller `session.rollback()`s; the flushed
+  evaluation + items disappear with the transaction, so no orphan row is ever
+  committed.
 - `dataset_evaluation_id IS NOT NULL` is the durable "already created" marker.
 - `link_evaluation` CAS includes the coordinator generation and
   `status='running'`; an old/stale generation gets rowcount 0 → `FENCE_LOST`.
-- The pre-spawn `session.rollback()` rule still applies before
-  `start_evaluation` (close autobegin).
 - `create_evaluation` public behavior is preserved exactly by composing
   `prepare_evaluation` + commit + refresh.
 - No schema change is required; atomic linking is achieved by the seam.
@@ -223,29 +235,87 @@ if status != "running":     -> EXPERIMENT_TERMINAL
 else:                       -> existing running inference path
 ```
 
-`_step_evaluating` (token-fenced, heartbeat first):
+`_step_evaluating` uses ONLY evaluating-guarded primitives (defined below). Full
+control flow:
 
 ```text
-if experiment.dataset_evaluation_id is None -> invariant fail (ORCHESTRATION_FAILED)
-validate_evaluation_linkage(experiment_id)  -> missing/corrupt/mismatch => invariant fail
-if evaluation.status == "completed":
-    mark_experiment_completed(experiment_id, token)  (token+status='evaluating' guarded)
-    return EXPERIMENT_COMPLETED
-if evaluation.status == "failed":
-    _fail_experiment(experiment_id, token, "DATASET_EXPERIMENT_EVALUATION_FAILED", evaluation.error_message)
-    return INVARIANT_FAILED
-if evaluation.status == "interrupted":
-    benchmarks.prepare_retry_evaluation(evaluation.id)   # reset to pending, NO commit
-    commit                                                # metrics-only reset
-    # fall through to pending handling
-if evaluation.status == "pending" and evaluation.worker_pid is None:
-    session.rollback()                                    # close autobegin before spawn
-    benchmarks.start_evaluation(evaluation.id, benchmark_job_manager)
-    return WAITING
-if evaluation.status in {"pending", "running"}:
-    return WAITING
-raise invariant
+# heartbeat under the evaluating status guard
+if not ds.refresh_coordinator_heartbeat(experiment_id, token, expected_status="evaluating"):
+    return FENCE_LOST
+try:
+    if experiment.dataset_evaluation_id is None:
+        raise PlatformError("DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                            "Evaluating experiment has no linked DatasetEvaluation.", 409)
+    experiment, evaluation = ds.validate_evaluation_linkage(experiment_id)
+    if evaluation.status == "completed":
+        if not ds.mark_experiment_completed(experiment_id, token):
+            return FENCE_LOST
+        return EXPERIMENT_COMPLETED
+    if evaluation.status == "failed":
+        session.rollback()
+        ds._fail_experiment(experiment_id, token,
+                            "DATASET_EXPERIMENT_EVALUATION_FAILED",
+                            evaluation.error_message, expected_status="evaluating")
+        return INVARIANT_FAILED
+    if evaluation.status == "interrupted":
+        ds.reset_interrupted_evaluation(experiment_id, evaluation.id, token)  # one commit
+        return WAITING
+    if evaluation.status == "pending" and evaluation.worker_pid is None:
+        session.rollback()                                  # close autobegin before spawn
+        benchmarks.start_evaluation(evaluation.id, benchmark_job_manager)
+        return WAITING
+    if evaluation.status in {"pending", "running"}:
+        return WAITING
+    raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                        "Linked DatasetEvaluation has an unknown status.", 409)
+except PlatformError as exc:
+    session.rollback()
+    if exc.code == "DATASET_EXPERIMENT_FENCE_LOST":
+        return CoordinatorOutcome.FENCE_LOST
+    ds._fail_experiment(experiment_id, token, exc.code, exc.message,
+                        expected_status="evaluating")
+    return CoordinatorOutcome.INVARIANT_FAILED
+except Exception:
+    session.rollback()
+    ds._fail_experiment(experiment_id, token,
+                        "DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                        "Unexpected evaluating coordinator error.",
+                        expected_status="evaluating")
+    return CoordinatorOutcome.INVARIANT_FAILED
 ```
+
+### Status-aware coordinator primitives (backward compatible)
+
+The sealed G3-C/G4 helpers are running-only. G5 makes them status-aware via an
+OPTIONAL keyword whose default preserves sealed behavior exactly. It does NOT
+globally widen any old helper to `status IN ("running","evaluating")`.
+
+Signatures and the ONLY change vs the sealed bodies:
+
+```python
+    def refresh_coordinator_heartbeat(self, experiment_id, coordinator_token,
+                                      *, expected_status="running"):
+        # seam body unchanged EXCEPT the WHERE adds `status == expected_status`
+        # in place of the literal `status == "running"`; still commits and
+        # returns rowcount == 1.
+
+    def _fail_experiment(self, experiment_id, coordinator_token, error_type,
+                         error_message, *, expected_status="running"):
+        # seam body unchanged EXCEPT the WHERE adds `status == expected_status`
+        # in place of the literal `status == "running"`; still commits and
+        # returns rowcount == 1.
+
+    def mark_experiment_completed(self, experiment_id, coordinator_token):
+        # evaluating-only by design (only reached from the evaluating branch):
+        # WHERE id AND coordinator_token AND status == 'evaluating';
+        # SET status='completed', completed_at=now, error_type=NULL,
+        #     error_message=NULL; commits; returns rowcount == 1.
+```
+
+The COMPLETE executable bodies for all three are given in TASK 2 below. Existing
+G1-G4 callers omit `expected_status`, so their running-only behavior is
+byte-identical. The evaluating branch always passes
+`expected_status="evaluating"`.
 
 Guarantees: every evaluating path performs zero `reconcile_items` inference
 scheduling, zero `start_item_attempt`, zero `launch_item_attempt`.
@@ -260,11 +330,24 @@ that construct a coordinator without benchmark dependencies):
 if summary.queued == 0 and summary.running == 0 and summary.failed == 0 and summary.completed > 0:
     if benchmark_services_factory is None or benchmark_job_manager is None:
         return CoordinatorOutcome.INFERENCE_COMPLETE      # sealed G3-C/G4 behavior
-    evaluation = self._ensure_evaluation(...)             # G5 atomic link
+    evaluation = self._ensure_evaluation(...)             # G5 atomic link (status now evaluating)
     session.rollback()                                    # autobegin boundary
-    benchmarks.start_evaluation(evaluation.id, benchmark_job_manager)
+    try:
+        benchmarks.start_evaluation(evaluation.id, benchmark_job_manager)
+    except PlatformError:
+        # link already committed => Experiment.status == 'evaluating'
+        session.rollback()
+        ds._fail_experiment(experiment_id, token,
+                            "DATASET_EXPERIMENT_EVALUATION_FAILED",
+                            "Unable to start formal DatasetEvaluation.",
+                            expected_status="evaluating")
+        return CoordinatorOutcome.INVARIANT_FAILED
     return CoordinatorOutcome.WAITING
 ```
+
+Special-case: this handoff is the ONLY place where a `running` step can mutate a
+now-`evaluating` Experiment. Benchmark start failure is therefore projected with
+`expected_status="evaluating"`, never through the running-only catch.
 
 Production coordinators (spawned by `run_coordinator`) always pass both benchmark
 dependencies, so they create and start the formal evaluation. Unwired coordinators
@@ -313,6 +396,7 @@ _ACTIVE_RECOVERY_STATUSES = ("running", "evaluating")
 
 claim_experiment_generation(..., statuses=("running", "evaluating"))
     CAS WHERE status IN :statuses AND token = :expected AND cutoff predicate
+    ON success writes coordinator_token=<fresh>, worker_pid=NULL, heartbeat_at=now
 
 start_recovered_coordinator(..., statuses=("running", "evaluating"))
     PID guard WHERE token = :fresh AND status IN :statuses
@@ -320,13 +404,48 @@ start_recovered_coordinator(..., statuses=("running", "evaluating"))
 recover_dataset_experiments:
     for each claimed experiment:
         if status == "evaluating":
-            benchmarks.mark_linked_evaluation_interrupted(evaluation_id)   # only when pending + pid set
+            normalize_orphaned_evaluation(
+                experiment_id, evaluation_id, claimed_token)   # atomic, generation-fenced
             # NO reconcile_items, NO repair_local_pending_runs, NO AnalysisRun
         else:  # running
             existing reconcile + local repair
         session.rollback()                 # autobegin boundary
         start_recovered_coordinator(...)   # status-aware
 ```
+
+### Generation-fenced restart normalization (`normalize_orphaned_evaluation`)
+
+This is a DatasetExperiment-recovery-owned write, NOT a plain benchmark helper,
+because it must prove current Experiment generation ownership in the SAME atomic
+UPDATE. One DB-side statement:
+
+```python
+        update(DatasetEvaluationModel)
+        .where(
+            DatasetEvaluationModel.id == evaluation_id,
+            DatasetEvaluationModel.status == "pending",
+            DatasetEvaluationModel.worker_pid.is_not(None),
+            exists().where(
+                DatasetExperimentModel.id == experiment_id,
+                DatasetExperimentModel.status == "evaluating",
+                DatasetExperimentModel.coordinator_token == coordinator_token,
+                DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+            ),
+        )
+        .values(status="interrupted",
+                error_type="BENCHMARK_INTERRUPTED",
+                error_message="Benchmark worker did not survive platform restart.",
+                completed_at=now)
+        .execution_options(synchronize_session=False)
+```
+
+`rowcount == 1` → normalized. On `rowcount == 0`:
+
+1. fresh generation check on the Experiment:
+   `status == "evaluating" AND coordinator_token == coordinator_token
+   AND dataset_evaluation_id == evaluation_id`;
+2. missing/mismatched → `DATASET_EXPERIMENT_FENCE_LOST` (rollback, zero mutation);
+3. otherwise legitimate no-op (the evaluation is no longer `pending` + PID), return.
 
 Preserved: fixed startup cutoff, same-startup takeover protection, stale-token
 fencing, no subprocess spawn inside a DB transaction. Evaluating recovery creates
@@ -364,36 +483,85 @@ enter membership because selection is per-Experiment Item's latest Attempt.
 
 ## RETRY EVALUATION
 
-Explicit Retry Evaluation preconditions:
+Explicit Retry Evaluation preconditions (checked BEFORE any write):
 
 ```text
 Experiment.status == "failed"
 Experiment.dataset_evaluation_id is not None
-all Items completed
-no queued/running/failed Items
+ds.validate_evaluation_linkage(experiment_id) succeeds   # exact linkage required
+all Items completed; no queued/running/failed Items
 linked evaluation status in {"failed", "interrupted"}
 ```
 
-Durable order (metrics only):
+Durable order (metrics only), symmetric with G4 Retry Failed:
 
 ```text
-snapshot = benchmarks.snapshot_retry_evaluation(evaluation_id)
-Transaction (ONE commit):
-    benchmarks.prepare_retry_evaluation(evaluation_id)   # staged reset to pending
+experiment_snapshot = {status, completed_at, heartbeat_at, coordinator_token,
+                       worker_pid, error_type, error_message,
+                       dataset_evaluation_id}
+evaluation_snapshot = benchmarks.snapshot_retry_evaluation(evaluation_id)
+
+TRANSACTION 1 (ONE commit):
+    benchmarks.prepare_retry_evaluation(evaluation_id)   # staged reset to pending, NO commit
     CAS UPDATE dataset_experiments
         SET status='evaluating', coordinator_token=<fresh>, worker_pid=NULL,
             heartbeat_at=now, completed_at=NULL, error_type=NULL, error_message=NULL
-        WHERE id=:id AND status='failed'
+        WHERE id=:id AND status='failed' AND dataset_evaluation_id=:evaluation_id
     IF rowcount != 1: rollback; raise DATASET_EXPERIMENT_INVALID_TRANSITION
     COMMIT
+
 Outside transaction:
     pid = job_manager.start(experiment_id, fresh_token)
-    ON raise: generation-fenced compensation (Experiment -> failed, evaluation
-              restored from snapshot); raise DATASET_EXPERIMENT_ORCHESTRATION_FAILED
-    guarded PID persist (token + status='evaluating')
+    ON raise: _restore_retry_evaluation(...)   # generation-fenced compensation below
+    guarded PID persist:
+        UPDATE dataset_experiments SET worker_pid=:pid
+        WHERE id=:id AND coordinator_token=:fresh AND status='evaluating'
 ```
 
-Crash after the transaction commit before/at spawn: Experiment `evaluating` with
+### Retry Evaluation compensation (generation-fenced, G4-equivalent)
+
+```text
+_restore_retry_evaluation(experiment_id, retry_token, evaluation_id,
+                          experiment_snapshot, evaluation_snapshot):
+    ONE transaction:
+      1. FIRST acquire ownership ===
+         UPDATE dataset_experiments
+         SET status = experiment_snapshot.status,
+             completed_at = experiment_snapshot.completed_at,
+             heartbeat_at = experiment_snapshot.heartbeat_at,
+             coordinator_token = experiment_snapshot.coordinator_token,
+             worker_pid = experiment_snapshot.worker_pid,
+             error_type = experiment_snapshot.error_type,
+             error_message = experiment_snapshot.error_message
+         WHERE id == experiment_id
+           AND status == 'evaluating'
+           AND coordinator_token == retry_token
+           AND dataset_evaluation_id == evaluation_id
+      2. IF rowcount != 1:
+             rollback
+             ZERO DatasetEvaluation mutation
+             return False          # caller raises DATASET_EXPERIMENT_FENCE_LOST
+      3. ONLY the CAS winner, in the SAME transaction:
+             benchmarks.restore_retry_evaluation(evaluation_id, evaluation_snapshot)
+      4. COMMIT
+    return True
+```
+
+`restore_retry_evaluation` itself stays transaction-neutral; the ownership CAS is
+what makes the compensation safe. If a newer generation already owns the
+Experiment, the compensation performs zero writes to EITHER object.
+
+### PID-persist CAS miss after a successful spawn
+
+If `_restore` is not involved (spawn succeeded) but the guarded PID UPDATE
+affects zero rows because a newer generation already owns the Experiment:
+
+- do NOT compensate;
+- the stale spawned coordinator is fenced by the newer token and exits with
+  `FENCE_LOST` on its next step;
+- `retry_evaluation` re-reads and raises `DATASET_EXPERIMENT_FENCE_LOST`.
+
+Crash after Transaction 1 commit before/at spawn: Experiment `evaluating` with
 fresh token, evaluation `pending`; the next startup recovery starts a coordinator
 which starts the evaluation. Crash-resume is the accepted retry outcome.
 
@@ -452,20 +620,27 @@ column.
 
 | Durable transition | Commit boundary | Must NOT span |
 |---|---|---|
-| Evaluation prepare + Experiment link + `evaluating` | one commit | benchmark spawn |
-| Benchmark start | sealed `start_evaluation` commits | coordinator/inference spawn beyond the worker |
+| Evaluation prepare + flush + Experiment link + `evaluating` | one commit | benchmark spawn |
+| Benchmark start (`start_evaluation` refactor) | one commit for guarded PID persist | SELECT/autobegin and subprocess spawn: read→rollback→spawn→new txn |
 | Evaluating completion projection | `mark_experiment_completed` one commit | — |
-| Evaluating failure projection | `_fail_experiment` one commit | — |
-| Interrupted evaluation reset (metrics retry) | one commit | benchmark spawn |
+| Evaluating failure projection | `_fail_experiment(expected_status="evaluating")` one commit | — |
+| Interrupted evaluation reset (metrics retry) | one commit: Experiment generation fence FIRST, then evaluation reset | benchmark spawn |
 | Retry Evaluation (evaluation reset + Experiment `evaluating` + token) | one commit | coordinator spawn |
-| Retry Evaluation compensation | one commit | — |
+| Retry Evaluation compensation | one commit: ownership CAS FIRST, then restore both | — |
 | Retry Evaluation PID persist | one commit | — |
-| Evaluating recovery claim / normalization / PID | one commit each | coordinator spawn |
+| Evaluating recovery claim | one commit | — |
+| Evaluating restart normalization | one commit: generation-fenced atomic UPDATE | — |
+| Evaluating recovery PID persist | one commit | coordinator spawn |
 
 Autobegin rule: `_step_evaluating` closes the Session (`session.rollback()`)
-before `start_evaluation`; `recover_dataset_experiments` closes before
-`start_recovered_coordinator`; `start_evaluation`/`start_recovered_coordinator`
-never open a SELECT before their spawn call.
+immediately before `start_evaluation`, and `recover_dataset_experiments` closes
+before `start_recovered_coordinator`. A caller-side rollback is NOT sufficient on
+its own for the benchmark start: the sealed `start_evaluation` performs
+`session.get(...)` (autobegin) internally. G5 therefore refactors
+`start_evaluation` itself to read/validate, rollback, then spawn with NO open
+transaction (see below). After the refactor, the statement "`start_evaluation`
+does not spawn inside a transaction" is TRUE by construction; it is NOT true of
+the sealed pre-G5 implementation.
 
 ---
 
@@ -481,11 +656,65 @@ Add:
     def prepare_evaluation(self, *, name, dataset_name, dataset_split, label_space,
                            recording_manifest_hash, items, allow_incomplete=False,
                            evaluation_protocol=DEFAULT_PHYSICAL_TF_PROTOCOL):
-        # body of create_evaluation through `self.session.add_all(item_rows)`,
-        # returning `evaluation` WITHOUT commit/refresh
+        # MOVE the existing create_evaluation body VERBATIM from
+        #   frozen = self._build_frozen_manifest(...)
+        # through
+        #   self.session.add_all(item_rows)
+        # and then `return evaluation` WITHOUT commit/refresh.
     def create_evaluation(self, **kwargs):
         evaluation = self.prepare_evaluation(**kwargs)
         self.session.commit()
+        self.session.refresh(evaluation)
+        return evaluation
+
+    def start_evaluation(self, evaluation_id, job_manager):
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
+        if evaluation.status != "pending":
+            raise PlatformError("INVALID_BENCHMARK_TRANSITION",
+                                "Only pending evaluations can be started.", 409)
+
+        # Close the read/autobegin transaction BEFORE spawning the subprocess.
+        self.session.rollback()
+
+        try:
+            worker_pid = job_manager.start(evaluation_id)   # ZERO open DB transaction
+        except Exception as exc:
+            now = datetime.now(timezone.utc)
+            try:
+                with self.session.no_autoflush:
+                    self.session.execute(
+                        update(DatasetEvaluationModel)
+                        .where(
+                            DatasetEvaluationModel.id == evaluation_id,
+                            DatasetEvaluationModel.status == "pending",
+                        )
+                        .values(status="failed", error_type="BENCHMARK_FAILED",
+                                error_message=str(exc)[:1000], completed_at=now)
+                        .execution_options(synchronize_session=False)
+                    )
+                self.session.commit()
+            except Exception:
+                self.session.rollback()
+                raise
+            raise PlatformError("BENCHMARK_FAILED",
+                                "Unable to start local benchmark worker.") from exc
+
+        # Parent persists ONLY worker_pid; never overwrite a fast worker's
+        # running/completed/failed status back to pending/running.
+        try:
+            with self.session.no_autoflush:
+                self.session.execute(
+                    update(DatasetEvaluationModel)
+                    .where(DatasetEvaluationModel.id == evaluation_id)
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
         self.session.refresh(evaluation)
         return evaluation
 
@@ -534,33 +763,30 @@ Add:
         self.session.commit()
         self.session.refresh(evaluation)
         return evaluation
-
-    def mark_linked_evaluation_interrupted(self, evaluation_id):
-        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
-        if evaluation is None:
-            raise PlatformError("BENCHMARK_NOT_FOUND", "DatasetEvaluation was not found.", 404)
-        if evaluation.status == "pending" and evaluation.worker_pid is not None:
-            evaluation.status = "interrupted"
-            evaluation.error_type = "BENCHMARK_INTERRUPTED"
-            evaluation.error_message = "Benchmark worker did not survive platform restart."
-            evaluation.completed_at = datetime.now(timezone.utc)
-            self.session.commit()
-            return True
-        return False
 ```
 
 `retry_evaluation` public result is unchanged (status `pending`, metrics cleared).
+`mark_linked_evaluation_interrupted` is intentionally NOT a benchmark helper:
+restart normalization is an Experiment-generation-fenced write owned by
+`dataset_experiments/recovery.py` (see Task 4).
 
 Tests:
 
 - `test_prepare_evaluation_stages_without_commit` — call
   `prepare_evaluation`; a fresh Session sees no evaluation row; no PID/spawn.
 - `test_create_evaluation_composes_prepare_and_commit` — existing public result.
+- `test_start_evaluation_spawns_outside_transaction` — `on_start(evaluation_id)`
+  opens a fresh Session over the SAME `benchmark_session` and asserts
+  `not benchmark_session.in_transaction()` at Popen time.
+- `test_start_evaluation_spawn_failure_fresh_guarded_update` — spawn raises; a
+  fresh Session sees `failed`/`BENCHMARK_FAILED` committed; no stale ORM write.
+- `test_start_evaluation_fast_worker_terminal_not_overwritten` — a fake job
+  manager sets `completed` during `start`; the parent PID write leaves status
+  `completed` and only records `worker_pid`.
 - `test_prepare_retry_evaluation_stages_without_commit` — no commit; fresh Session
   still sees the old status.
 - `test_retry_evaluation_public_behavior_unchanged`.
 - `test_restore_retry_evaluation_roundtrip`.
-- `test_mark_linked_evaluation_interrupted_only_pending_with_pid`.
 - Existing benchmark suites unchanged.
 
 ### Steps
@@ -593,6 +819,51 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
 `DatasetEvaluationModel`, `DatasetEvaluationItemModel`):
 
 ```python
+    # --- status-aware (backward-compatible) primitives ---
+    def refresh_coordinator_heartbeat(self, experiment_id, coordinator_token,
+                                      *, expected_status="running"):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == expected_status,
+                    )
+                    .values(heartbeat_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
+    def _fail_experiment(self, experiment_id, coordinator_token, error_type,
+                         error_message, *, expected_status="running"):
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == expected_status,
+                    )
+                    .values(
+                        status="failed", error_type=error_type,
+                        error_message=(error_message or "")[:1000],
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
     def mark_experiment_completed(self, experiment_id, coordinator_token):
         try:
             with self.session.no_autoflush:
@@ -614,6 +885,7 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
             raise
         return int(result.rowcount or 0) == 1
 
+    # --- evaluation ownership ---
     def link_evaluation(self, experiment_id, evaluation_id, coordinator_token):
         try:
             with self.session.no_autoflush:
@@ -639,16 +911,277 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
         return True
 
     def build_evaluation_membership(self, experiment_id):
-        # returns [{"recording_id":..., "analysis_run_id":...}] in manifest order
-        # enforcing the AUTOMATIC MEMBERSHIP rules; raises DATASET_EXPERIMENT_INVARIANT_VIOLATION
+        experiment = self._get(experiment_id)
+        items = list(self.session.scalars(
+            select(DatasetExperimentItemModel)
+            .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+            .order_by(DatasetExperimentItemModel.manifest_order)
+        ).all())
+        if not items:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Experiment has no items.", 409)
+        attempts_by_item = self._load_attempts_by_item([item.id for item in items])
+        run_ids = {
+            attempt.analysis_run_id
+            for attempts in attempts_by_item.values() for attempt in attempts
+        }
+        runs_by_id = self._load_runs_by_id(run_ids)
+        membership = []
+        for item in items:
+            if item.status != "completed":
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Evaluation requires every item completed.", 409)
+            attempts = attempts_by_item.get(item.id, [])
+            if not attempts:
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Completed item has no attempt.", 409)
+            latest = attempts[-1]
+            run = runs_by_id.get(latest.analysis_run_id)
+            if run is None or run.status != "completed":
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Latest attempt has no completed AnalysisRun.", 409)
+            if run.recording_id != item.recording_id:
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "AnalysisRun recording mismatch.", 409)
+            if (run.pipeline_id != experiment.plugin_id
+                    or run.pipeline_version != experiment.plugin_version
+                    or run.executor != experiment.executor):
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "AnalysisRun identity does not match the frozen experiment.", 409)
+            membership.append({"recording_id": item.recording_id,
+                               "analysis_run_id": run.id})
+        return membership
+
     def validate_evaluation_linkage(self, experiment_id):
-        # returns (experiment, evaluation); enforces EVALUATING linkage validation rules
+        experiment = self._get(experiment_id)
+        evaluation_id = experiment.dataset_evaluation_id
+        if evaluation_id is None:
+            raise PlatformError("DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                                "Experiment has no linked DatasetEvaluation.", 409)
+        evaluation = self.session.get(DatasetEvaluationModel, evaluation_id)
+        if evaluation is None:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked DatasetEvaluation is missing.", 409)
+        if evaluation.recording_manifest_hash != experiment.recording_manifest_hash:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation manifest hash mismatch.", 409)
+        if (evaluation.dataset_name != experiment.dataset_name
+                or evaluation.dataset_split != experiment.dataset_split
+                or evaluation.label_space != experiment.dataset_label_space):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation dataset identity mismatch.", 409)
+        if evaluation.evaluation_protocol != experiment.evaluation_protocol:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation protocol mismatch.", 409)
+        if (evaluation.pipeline_id != experiment.plugin_id
+                or evaluation.pipeline_version != experiment.plugin_version):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation pipeline identity mismatch.", 409)
+        experiment_items = list(self.session.scalars(
+            select(DatasetExperimentItemModel)
+            .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+            .order_by(DatasetExperimentItemModel.manifest_order)
+        ).all())
+        evaluation_items = list(self.session.scalars(
+            select(DatasetEvaluationItemModel)
+            .where(DatasetEvaluationItemModel.evaluation_id == evaluation_id)
+            .order_by(DatasetEvaluationItemModel.manifest_order)
+        ).all())
+        membership = self.build_evaluation_membership(experiment_id)
+        if len(evaluation_items) != len(experiment_items) or len(membership) != len(experiment_items):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation membership size mismatch.", 409)
+        for evaluation_item, expected in zip(evaluation_items, membership):
+            if (evaluation_item.recording_id != expected["recording_id"]
+                    or evaluation_item.analysis_run_id != expected["analysis_run_id"]):
+                raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                    "Linked evaluation membership mismatch.", 409)
+        if (evaluation.expected_recordings != len(experiment_items)
+                or evaluation.missing_recordings != 0
+                or evaluation.coverage != 1.0):
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation is not complete.", 409)
+        return experiment, evaluation
+
+    def reset_interrupted_evaluation(self, experiment_id, evaluation_id,
+                                     coordinator_token):
+        """Generation-fenced metrics-only reset of an interrupted linked evaluation.
+
+        FIRST fence Experiment ownership in the SAME transaction, then stage the
+        evaluation reset. Stale generation -> FENCE_LOST with zero evaluation
+        mutation.
+        """
+        try:
+            with self.session.no_autoflush:
+                fence = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "evaluating",
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                    )
+                    .values(heartbeat_at=datetime.now(timezone.utc))
+                    .execution_options(synchronize_session=False)
+                )
+                if int(fence.rowcount or 0) != 1:
+                    self.session.rollback()
+                    raise PlatformError(
+                        "DATASET_EXPERIMENT_FENCE_LOST",
+                        "Coordinator generation no longer owns the experiment.", 409)
+                DatasetBenchmarkService(self.session).prepare_retry_evaluation(evaluation_id)
+            self.session.commit()
+        except PlatformError:
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+        return True
+
     def list_experiments(self):
-        # DatasetExperimentRead for every experiment, ordered by created_at, id
+        experiments = list(self.session.scalars(
+            select(DatasetExperimentModel)
+            .order_by(DatasetExperimentModel.created_at, DatasetExperimentModel.id)
+        ).all())
+        return [self._to_read(experiment) for experiment in experiments]
+
     def retry_evaluation(self, experiment_id, job_manager):
-        # preconditions + snapshot + one-commit reset/link + spawn + guarded PID
-    def _restore_retry_evaluation(self, experiment_id, coordinator_token, evaluation_id, snapshot):
-        # generation-fenced Experiment -> failed + restore_retry_evaluation(snapshot)
+        experiment = self._get(experiment_id)
+        if experiment.status != "failed":
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Only a failed experiment can retry evaluation.", 409)
+        if experiment.dataset_evaluation_id is None:
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Experiment has no linked evaluation to retry.", 409)
+        items = list(self.session.scalars(
+            select(DatasetExperimentItemModel)
+            .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+        ).all())
+        if not items:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Experiment has no items.", 409)
+        counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0}
+        for item in items:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        if (counts["completed"] != len(items) or counts["failed"] or
+                counts["queued"] or counts["running"]):
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Retry Evaluation requires complete inference.", 409)
+
+        experiment, evaluation = self.validate_evaluation_linkage(experiment_id)
+        if evaluation.status not in {"failed", "interrupted"}:
+            raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                "Linked evaluation is not retryable.", 409)
+
+        experiment_snapshot = {
+            "status": experiment.status,
+            "completed_at": experiment.completed_at,
+            "heartbeat_at": experiment.heartbeat_at,
+            "coordinator_token": experiment.coordinator_token,
+            "worker_pid": experiment.worker_pid,
+            "error_type": experiment.error_type,
+            "error_message": experiment.error_message,
+            "dataset_evaluation_id": experiment.dataset_evaluation_id,
+        }
+        benchmarks = DatasetBenchmarkService(self.session)
+        evaluation_snapshot = benchmarks.snapshot_retry_evaluation(evaluation.id)
+        token = f"coord_{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        try:
+            benchmarks.prepare_retry_evaluation(evaluation.id)
+            claimed = self.session.execute(
+                update(DatasetExperimentModel)
+                .where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.status == "failed",
+                    DatasetExperimentModel.dataset_evaluation_id == evaluation.id,
+                )
+                .values(status="evaluating", coordinator_token=token, worker_pid=None,
+                        heartbeat_at=now, completed_at=None,
+                        error_type=None, error_message=None)
+                .execution_options(synchronize_session=False)
+            )
+            if int(claimed.rowcount or 0) != 1:
+                self.session.rollback()
+                raise PlatformError("DATASET_EXPERIMENT_INVALID_TRANSITION",
+                                    "Retry Evaluation lost its ownership CAS.", 409)
+            self.session.commit()
+        except PlatformError:
+            raise
+        except Exception:
+            self.session.rollback()
+            raise
+
+        try:
+            worker_pid = job_manager.start(experiment_id, token)
+        except Exception as exc:
+            restored = self._restore_retry_evaluation(
+                experiment_id, token, evaluation.id,
+                experiment_snapshot, evaluation_snapshot)
+            if not restored:
+                raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                    "Retry Evaluation lost its generation; no evaluation "
+                                    "was mutated.", 409) from exc
+            raise PlatformError("DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+                                "Unable to start DatasetExperiment coordinator for "
+                                "evaluation retry.") from exc
+
+        try:
+            with self.session.no_autoflush:
+                persisted = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == token,
+                        DatasetExperimentModel.status == "evaluating",
+                    )
+                    .values(worker_pid=worker_pid)
+                    .execution_options(synchronize_session=False)
+                )
+            if int(persisted.rowcount or 0) != 1:
+                self.session.rollback()
+                raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST",
+                                    "A newer generation owns the experiment.", 409)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        self.session.expire_all()
+        return self.session.get(DatasetExperimentModel, experiment_id)
+
+    def _restore_retry_evaluation(self, experiment_id, retry_token, evaluation_id,
+                                  experiment_snapshot, evaluation_snapshot):
+        try:
+            with self.session.no_autoflush:
+                claimed = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.status == "evaluating",
+                        DatasetExperimentModel.coordinator_token == retry_token,
+                        DatasetExperimentModel.dataset_evaluation_id == evaluation_id,
+                    )
+                    .values(
+                        status=experiment_snapshot["status"],
+                        completed_at=experiment_snapshot["completed_at"],
+                        heartbeat_at=experiment_snapshot["heartbeat_at"],
+                        coordinator_token=experiment_snapshot["coordinator_token"],
+                        worker_pid=experiment_snapshot["worker_pid"],
+                        error_type=experiment_snapshot["error_type"],
+                        error_message=experiment_snapshot["error_message"],
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                if int(claimed.rowcount or 0) != 1:
+                    self.session.rollback()
+                    return False
+                DatasetBenchmarkService(self.session).restore_retry_evaluation(
+                    evaluation_id, evaluation_snapshot)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return True
 ```
 
 `list_attempts` gains `*, experiment_id=None` ownership validation.
@@ -656,6 +1189,11 @@ Add to `DatasetExperimentService` (imports: `DatasetBenchmarkService`,
 `DatasetExperimentItemRead` gains `latest_analysis_run_id: str | None = None`.
 
 Tests (`test_dataset_experiment_evaluation_ownership.py`):
+- `test_evaluating_heartbeat_succeeds_current_token`
+- `test_evaluating_heartbeat_stale_token_fence_lost`
+- `test_evaluating_failure_projection_current_token`
+- `test_evaluating_failure_projection_stale_token_noop`
+- `test_running_heartbeat_default_behavior_unchanged`
 - `test_mark_experiment_completed_guards_token_and_status`
 - `test_link_evaluation_cas_sets_link_and_evaluating_once`
 - `test_link_evaluation_stale_token_returns_false`
@@ -663,11 +1201,23 @@ Tests (`test_dataset_experiment_evaluation_ownership.py`):
 - `test_validate_evaluation_linkage_rejects_manifest_mismatch`
 - `test_validate_evaluation_linkage_rejects_protocol_mismatch`
 - `test_validate_evaluation_linkage_rejects_membership_mismatch`
+- `test_reset_interrupted_evaluation_current_generation`
+- `test_reset_interrupted_evaluation_stale_generation_fence_lost` (two Sessions:
+  A loads interrupted under T1; B rotates T1→T2; A reset → `FENCE_LOST`;
+  evaluation remains `interrupted`)
 - `test_retry_evaluation_requires_failed_with_complete_inference`
 - `test_retry_evaluation_rejects_incomplete_inference`
+- `test_retry_evaluation_rejects_invalid_linkage` (membership/manifest/protocol
+  mismatch → rejected, zero spawn)
 - `test_retry_evaluation_resets_evaluation_and_sets_evaluating_one_commit`
 - `test_retry_evaluation_creates_zero_attempts_and_runs`
-- `test_retry_evaluation_spawn_failure_restores_failed`
+- `test_retry_evaluation_spawn_failure_restores_exact_projections` (Experiment
+  terminal snapshot AND Evaluation snapshot restored)
+- `test_retry_evaluation_stale_compensation_zero_mutation` (B rotates T1→T2
+  before compensation; `_restore_retry_evaluation` returns False; ZERO
+  Evaluation and Experiment mutation; `FENCE_LOST`)
+- `test_retry_evaluation_concurrent_one_winner`
+- `test_retry_evaluation_pid_cas_loss_does_not_compensate_newer_generation`
 - `test_list_experiments_derived_counts`
 - `test_list_attempts_ownership_validation`
 
@@ -712,11 +1262,16 @@ evaluation = benchmarks.prepare_evaluation(
     recording_manifest_hash=experiment.recording_manifest_hash,
     items=membership, allow_incomplete=False,
     evaluation_protocol=experiment.evaluation_protocol)
+self.session.flush()          # INSERT evaluation + items into the SAME txn (FK visibility), NO COMMIT
 if not ds.link_evaluation(experiment_id, evaluation.id, coordinator_token):
-    self.session.rollback()
+    self.session.rollback()   # flushed evaluation rows disappear; no orphan
     raise PlatformError("DATASET_EXPERIMENT_FENCE_LOST", "link lost", 409)
 return evaluation
 ```
+
+Note: `prepare_evaluation` returns two staged objects; the flush makes them
+visible to the raw FK-bearing Experiment link UPDATE in the same transaction
+without committing. If the link CAS loses, the rollback discards them.
 
 Worker/wiring: `run_coordinator` builds `LocalBenchmarkJobManager(settings)` and
 `benchmark_services_factory=lambda session: DatasetBenchmarkService(session)`,
@@ -728,9 +1283,14 @@ Tests:
 - `test_all_success_without_benchmark_wiring_returns_inference_complete` (sealed
   G3-C/G4 behavior preserved for unwired coordinators: no evaluation created,
   Experiment stays `running`).
+- `test_prepare_flush_link_rollback_leaves_zero_evaluation_rows` (a stale link
+  CAS → rollback → zero committed `DatasetEvaluation`/item rows).
 - `test_repeated_step_creates_no_duplicate` (one `DatasetEvaluationModel`, same
   `dataset_evaluation_id`).
 - `test_stale_generation_cannot_link_or_complete`.
+- `test_benchmark_start_failure_after_link_fails_evaluating_experiment` (link
+  commits, `start_evaluation` raises; Experiment ends `failed`, never stranded
+  `evaluating`).
 - `test_evaluation_pending_without_pid_is_started_once`.
 - `test_evaluation_pending_with_pid_waits` (no second spawn).
 - `test_evaluation_running_waits`.
@@ -766,8 +1326,9 @@ Change `_ACTIVE_RECOVERY_STATUSES = ("running", "evaluating")`;
 `claim_experiment_generation(..., statuses=("running", "evaluating"))` and
 `start_recovered_coordinator(..., statuses=("running", "evaluating"))` use
 `status IN statuses`; `recover_dataset_experiments` branches per claimed status:
-evaluating → optional `mark_linked_evaluation_interrupted` + skip reconcile/repair;
-running → sealed G4 path.
+evaluating → `normalize_orphaned_evaluation(experiment_id, evaluation_id,
+claimed_token)` (recovery-owned generation-fenced atomic UPDATE defined in
+EVALUATING RESTART RECOVERY) + skip reconcile/repair; running → sealed G4 path.
 
 Tests:
 - `test_evaluating_experiment_receives_fresh_generation_and_coordinator`.
@@ -775,6 +1336,10 @@ Tests:
 - `test_same_startup_cutoff_protects_evaluating`.
 - `test_stale_evaluating_coordinator_fenced`.
 - `test_pending_with_pid_normalized_to_interrupted`.
+- `test_stale_recovery_cannot_normalize_after_generation_rotation` (A claims
+  evaluating under T1; B owns newer T2; A normalization under T1 →
+  `FENCE_LOST`; Evaluation unchanged).
+- `test_normalization_zero_rows_with_current_generation_is_noop`.
 - `test_running_evaluation_stale_handler_then_metrics_retry`.
 - `test_evaluating_completed_after_restart_closes_experiment`.
 - `test_running_experiment_recovery_unchanged`.
@@ -873,6 +1438,49 @@ Baseline before G5: `1599 passed, 28 skipped`; require a fresh summary with
 
 ---
 
+## UPDATED TEST MATRIX
+
+### Status-aware primitives
+- evaluating heartbeat, current token → succeeds;
+- evaluating heartbeat, stale token → `FENCE_LOST`;
+- evaluating failure projection, current token → Experiment `failed`;
+- evaluating failure projection, stale token → zero mutation;
+- running heartbeat/failure default behavior unchanged;
+- benchmark-start failure after link does not strand `evaluating`.
+
+### Benchmark spawn boundary
+- `start_evaluation` calls `job_manager.start` with
+  `benchmark_session.in_transaction() == False` (probe inside `on_start`);
+- fast benchmark worker terminal state is not overwritten by parent PID
+  persistence;
+- spawn failure uses a fresh guarded UPDATE (no stale ORM write).
+
+### Retry Evaluation
+- exact Experiment terminal projection restored on spawn failure;
+- exact Evaluation projection restored on spawn failure;
+- stale compensation after `T1 -> T2` → ZERO Evaluation and Experiment mutation,
+  `FENCE_LOST`;
+- invalid linkage (membership/manifest/protocol) rejected with zero spawn;
+- concurrent Retry Evaluation → exactly one winner;
+- PID CAS loss after successful spawn does not compensate a newer generation;
+- zero new Attempts / AnalysisRuns / Item mutations.
+
+### Evaluating write fencing
+- stale coordinator cannot reset `interrupted -> pending`;
+- stale recovery cannot normalize `pending + PID -> interrupted`;
+- current generation resets/normalizes exactly once.
+
+### Atomic ownership
+- `prepare_evaluation` + `flush` + link is one commit;
+- link CAS failure rollback leaves zero orphan Evaluation/item rows;
+- repeated coordinator step creates exactly one linked Evaluation;
+- evaluating paths create zero AnalysisRuns.
+
+### Retained
+All previously planned G5 tests plus the complete G1-G4 regression suites.
+
+---
+
 ## G4 REGRESSION GUARANTEES
 
 G5 preserves exactly:
@@ -884,7 +1492,9 @@ G5 preserves exactly:
 - local ambiguity fail-closed (`ANALYSIS_LAUNCH_AMBIGUOUS`, zero relaunch);
 - remote GPU recovery delegation and the startup order;
 - the pre-spawn no-open-transaction rule;
-- no duplicate active Attempt, no completed-Item rerun.
+- no duplicate active Attempt, no completed-Item rerun;
+- existing G1-G4 callers of `refresh_coordinator_heartbeat` / `_fail_experiment`
+  keep running-only behavior because `expected_status` defaults to `"running"`.
 
 G5 adds no scheduling path into the evaluating branch and does not weaken any
 running path.
@@ -909,6 +1519,23 @@ running path.
 10. G4 generation/cutoff guarantees intact (additive status awareness only). PASS
 11. No transaction crosses subprocess spawn; autobegin closed before spawn. PASS
 12. No schema/G6/frontend leakage. PASS
+13. evaluating heartbeat/failure actually work through production helpers with
+    `expected_status="evaluating"`. PASS
+14. Evaluating failure can durably persist `Experiment -> failed`; missing/
+    mismatched linkage fails closed. PASS
+15. `start_evaluation` truly spawns with `session.in_transaction() == False`
+    after the refactor. PASS
+16. Old coordinator cannot reset an interrupted Evaluation after token rotation
+    (Experiment generation fence in the same transaction). PASS
+17. Old recovery generation cannot normalize `pending + PID -> interrupted`
+    after token rotation (atomic `EXISTS` generation guard). PASS
+18. Retry Evaluation stale compensation cannot mutate either object. PASS
+19. Retry Evaluation restores the COMPLETE terminal Experiment projection and
+    requires exact valid linked membership. PASS
+20. Automatic Evaluation creation has no FK/order/orphan window (flush + one
+    commit). PASS
+21. All-success benchmark-start failure cannot strand `evaluating`. PASS
+22. No inference path is reachable from evaluating. PASS
 
 ---
 
