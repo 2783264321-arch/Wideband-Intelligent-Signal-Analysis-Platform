@@ -7,6 +7,8 @@ DEFAULT_POLL_INTERVAL = 1.0
 def run_coordinator(experiment_id, coordinator_token, *, settings=None,
                     poll_interval=DEFAULT_POLL_INTERVAL, max_iterations=None):
     from app.analysis.service import AnalysisService
+    from app.benchmarks.job_manager import LocalBenchmarkJobManager
+    from app.benchmarks.service import DatasetBenchmarkService
     from app.core.config import Settings
     from app.dataset_experiments.coordinator import (
         DatasetExperimentCoordinator,
@@ -24,6 +26,7 @@ def run_coordinator(experiment_id, coordinator_token, *, settings=None,
     Base.metadata.create_all(database.engine)
     run_additive_migrations(database.engine)
     deps = build_control_plane_dependencies(settings)
+    benchmark_job_manager = LocalBenchmarkJobManager(settings)
 
     def services_factory(session):
         ds = DatasetExperimentService(
@@ -46,6 +49,8 @@ def run_coordinator(experiment_id, coordinator_token, *, settings=None,
         services_factory=services_factory,
         poll_interval=poll_interval,
         max_iterations=max_iterations,
+        benchmark_services_factory=lambda session: DatasetBenchmarkService(session),
+        benchmark_job_manager=benchmark_job_manager,
     )
     iterations = 0
     while True:
