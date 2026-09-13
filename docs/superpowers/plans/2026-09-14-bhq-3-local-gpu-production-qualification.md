@@ -133,6 +133,11 @@ If a stop triggers: STOP immediately, do not issue/modify any certificate, recor
 the exact failure in the appropriate evidence stage, and end the run with
 `BHQ_3_BLOCKED_BY_<reason>`.
 
+If a stop triggers **after C7** (during Task 11, Task 12, or Task 13), the C7
+certificates are candidate-only: STOP, do NOT create C8, do NOT merge
+`feature/bhq-local-gpu` into the sealed production branch, and do NOT claim BHQ-3
+complete (see Task 10.1).
+
 ---
 
 ## Task 0 — Isolation
@@ -693,10 +698,15 @@ scientific code change is permitted.
 
 ## Task 10 — Certificate Issuance (only after Tasks 7–9 pass)
 
-**File:** `backend/app/pipelines/execution_certificates.json` (the ONLY production
-change in this commit — its own reviewable commit).
+**Files (C7 owns BOTH atomically — certificate store + exact-certificate
+regression test only):**
 
-Append two certificates exactly:
+```text
+backend/app/pipelines/execution_certificates.json
+backend/tests/test_local_gpu_certificates_exact.py
+```
+
+Append two certificates to the store exactly:
 
 ```json
 {
@@ -725,19 +735,46 @@ Append two certificates exactly:
 ```
 
 `evidence_ref` points to the **C6 PRE-CERT QUALIFICATION EVIDENCE** document,
-which must already exist before this commit. The four existing certificates must
-remain byte-identical. Add a focused test (`test_local_gpu_certificates_exact.py`)
-asserting the two new tuples are present and the four existing tuples are
-unchanged.
+which must already exist before this commit.
+
+The C7 test `backend/tests/test_local_gpu_certificates_exact.py` must assert:
+
+- the exact new CPN `local_gpu` certificate exists;
+- the exact new ZoomSpec `local_gpu` certificate exists;
+- `runtime_ref` is exactly `local:autodl_primary:gpu:7b958347b5af`;
+- `precision` is exactly `float16`;
+- `evidence_ref`s are the C6-frozen identifiers
+  (`m9_2_bhq3_cpn_local_gpu_acceptance`, `m9_2_bhq3_zoomspec_local_gpu_acceptance`);
+- all four historical certificates remain byte-identical;
+- no unexpected certificate tuple / widening appears (exact store membership).
 
 **Commit C6 (pre-cert evidence):** `docs: add bhq-3 local gpu pre-cert qualification evidence`
 **Commit C7 (certificates):** `feat: certify cpn and zoomspec local_gpu execution`
-(certificate file only)
+(certificate store + exact certificate regression test only)
 
 Ordering invariant (no future-evidence cycle): C6 contains only facts that exist
 before certificate issuance (Tasks 1–9). The `evidence_ref` identifiers are frozen
-by C6. C7 only adds the two certificates. All post-cert facts are recorded
-exclusively in C8 (Task 14).
+by C6. C7 only adds the two certificates plus their exact regression test. All
+post-cert facts are recorded exclusively in C8 (Task 14).
+
+### Task 10.1 — Post-C7 candidate state is fail-closed (candidate, not sealed)
+
+C7 certificate issuance produces a **candidate certificate state pending
+post-cert production verification**. If Task 11, Task 12, or Task 13 fails:
+
+```text
+STOP BHQ_3_BLOCKED_BY_<reason>
+DO NOT create C8
+DO NOT merge feature/bhq-local-gpu into the sealed production branch
+DO NOT claim BHQ-3 complete
+DO NOT claim complete local_gpu qualification
+```
+
+The branch may retain C7 temporarily for debugging, but it is **unsealed and
+non-mergeable**. If the qualification is abandoned, the candidate local_gpu
+certificates must be reverted/removed before any integration. Only a green
+Task 11 + Task 12 + Task 13, followed by C8 and the final external Git audit,
+produces a sealed BHQ-3 result.
 
 ---
 
@@ -798,7 +835,8 @@ recovery continues to handle only stale `local_cpu` runs; do not modify recovery
 
 **Commit C8 (final acceptance evidence):** `docs: finalize bhq-3 local gpu acceptance evidence`
 (update/finalize the C6 document with post-cert facts, final projection,
-regression, scope audit, and final accepted HEAD).
+regression, scope audit, and known implementation provenance — the C7 SHA — never
+C8's own SHA).
 
 ---
 
@@ -849,9 +887,10 @@ backend/app/pipelines/cpn_bandwidth_tier/definition.py
 backend/app/pipelines/cpn_bandwidth_tier/plugin.py
 backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/definition.py
 backend/app/pipelines/zoomspec_yolo26n_aug_combined_frn_v3/plugin.py
-backend/app/pipelines/execution_certificates.json
-backend/tests/... (focused tests)
-scripts/bhq3_*.py (acceptance tooling)
+backend/app/pipelines/execution_certificates.json          (C7)
+backend/tests/test_local_gpu_certificates_exact.py         (C7)
+backend/tests/... (other focused tests)
+scripts/bhq3_*.py (acceptance tooling, C5)
 docs/superpowers/plans/2026-09-14-bhq-3-local-gpu-production-qualification.md
 docs/superpowers/acceptance/2026-09-14-bhq-3-local-gpu-production-qualification.md
 ```
@@ -902,23 +941,52 @@ pre-cert latency/resource evidence (externally observable only; else "unavailabl
 
 ### 14.2 C8 — FINAL BHQ-3 ACCEPTANCE EVIDENCE (finalization)
 
-After Task 11 (post-cert runs), Task 12 (regression), and Task 13 (scope audit),
-update the same document with the post-cert finalization:
+A Git commit cannot reliably contain its own final SHA in its own file content.
+Therefore the C8 document **MUST NOT** require
+`final accepted BHQ-3 HEAD = <C8's own SHA>` inside itself. C8 records concrete,
+already-known implementation provenance instead (assuming Tasks 11–13 introduce no
+commits):
 
 ```text
-exact certificate commit SHA (C7)
+sealed production baseline                    = c809eb02a5286737819136f9391d13949e8a117b
+BHQ-3 plan SHA                                = <C0b plan commit SHA, known when C8 is written>
+certificate commit SHA                        = <C7 SHA, known when C8 is written>
+implementation_head_before_final_evidence     = <C7 SHA, known when C8 is written>
+```
+
+C8 then adds the post-cert facts (all known before C8 is committed):
+
+```text
 production certificate tuples (Task 10)
 post-cert real AnalysisRun ids + results + DetectionResult counts (Task 11)
 final executor projections (local_gpu in executors_supported; recommended_executor
   = deployment-qualified projection for configured providers)
 final full regression result (0 failed / 0 errors)
 final scope audit (SCOPE_OK)
-final accepted BHQ-3 HEAD
 recovery limitation statement:
   "BHQ-3 certifies the normal local_gpu execution path. local_gpu crash/startup
    recovery is not qualified here and is deferred to BHQ-5."
 limitations (mixed precision; generation identity is material, not exhaustive)
 ```
+
+Then define:
+
+```text
+C8 = final evidence commit
+```
+
+After C8 is committed, the **final external Git verification** runs (NOT part of
+the C8 file content):
+
+```bash
+git rev-parse HEAD
+git status --short
+git diff --check
+git log --oneline --decorate -n 12
+```
+
+The resulting C8 SHA is the **FINAL BHQ-3 SEAL SHA** and is reported in the
+execution report / reviewer audit, NOT self-referenced inside the C8 document.
 
 The final BHQ-3 seal is based on **C8**, not C6.
 
@@ -963,6 +1031,13 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest backend/tests -q
 
 # task 13 scope
 git diff --name-only c809eb02a5286737819136f9391d13949e8a117b..HEAD
+
+# task 14 / C8 — FINAL external Git verification AFTER C8 is committed
+# (yields the FINAL BHQ-3 SEAL SHA; never self-referenced inside the C8 document)
+git rev-parse HEAD
+git status --short
+git diff --check
+git log --oneline --decorate -n 12
 ```
 
 ---
@@ -1000,6 +1075,20 @@ git diff --name-only c809eb02a5286737819136f9391d13949e8a117b..HEAD
     production implementation has occurred in this pass. ✅
 16. No placeholders/TODOs: runtime_ref, precision, file paths, test names, and
     commands are all concrete. ✅
+17. C7 owns BOTH `execution_certificates.json` AND
+    `backend/tests/test_local_gpu_certificates_exact.py`; Task 10 wording, Task 13
+    scope, and the decomposition table agree exactly; no "certificate file only"
+    statement remains. ✅
+18. C8 does not self-reference its own SHA; it records known provenance (sealed
+    baseline, plan SHA, C7 SHA) and the FINAL BHQ-3 SEAL SHA is obtained only via
+    external Git verification AFTER C8 is committed. ✅
+19. Post-C7 failure cannot be mistaken for completed qualification: candidate
+    certificates are unsealed/non-mergeable, C8 is not created, and no completion
+    claim is made (Task 10.1 + STOP section). ✅
+20. New tooling/tests all have deterministic commit owners (C4/C5/C7); every task
+    has a commit boundary. ✅
+21. Only the plan document changed; `feature/m9-2-implementation` remains exactly
+    at `c809eb02a5286737819136f9391d13949e8a117b`. ✅
 
 ---
 
@@ -1015,7 +1104,10 @@ git diff --name-only c809eb02a5286737819136f9391d13949e8a117b..HEAD
 | C4 | `test: add local_gpu pre-certificate fail-closed gate` | Task 5 boundary tests + Task 7 gate (`test_local_gpu_pre_cert_gate.py`) |
 | C5 | `test: add real local_gpu hardware acceptance harness` | acceptance test + ALL scripts (`bhq3_precision_dtype_probe.py`, `bhq3_local_gpu_runtime_identity.py`, `bhq3_direct_science_oracle.py`, `bhq3_local_gpu_acceptance.py`, `bhq3_local_gpu_production_acceptance.py`) |
 | C6 | `docs: add bhq-3 local gpu pre-cert qualification evidence` | pre-cert acceptance doc (Tasks 1–9 facts only) |
-| C7 | `feat: certify cpn and zoomspec local_gpu execution` | `execution_certificates.json` only |
-| C8 | `docs: finalize bhq-3 local gpu acceptance evidence` | post-cert finalization of the same doc |
+| C7 | `feat: certify cpn and zoomspec local_gpu execution` | certificate store + exact certificate regression test only (`execution_certificates.json`, `backend/tests/test_local_gpu_certificates_exact.py`) |
+| C8 | `docs: finalize bhq-3 local gpu acceptance evidence` | post-cert finalization of the same doc (known provenance; not its own SHA) |
 
-No other production file may change. The final BHQ-3 seal is based on C8.
+No other production file may change. The final BHQ-3 seal is based on C8. The
+**FINAL BHQ-3 SEAL SHA** is the C8 commit SHA obtained by external Git
+verification after C8 is committed; it is reported in the execution report /
+reviewer audit and never self-referenced inside the C8 document.
