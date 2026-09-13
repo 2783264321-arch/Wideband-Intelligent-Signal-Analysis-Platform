@@ -195,8 +195,9 @@ before `_fail_experiment`):
 
         Then, outside the transaction: spawn the new coordinator, then persist
         ``worker_pid`` under the fresh-generation guard. A spawn failure
-        compensating-restores the exact pre-retry ``completed_with_failures``
-        state (see ``_restore_retry_failed``).
+        generation-fenced-restores the pre-retry terminal Experiment projection
+        and the requeued Items, but ONLY if this generation still owns the
+        Experiment (see ``_restore_retry_failed``).
         """
         experiment = self.session.get(DatasetExperimentModel, experiment_id)
         if experiment is None:
@@ -209,6 +210,15 @@ before `_fail_experiment`):
                 "Only a completed_with_failures experiment can retry failed items.",
                 409,
             )
+
+        terminal_snapshot = {
+            "completed_at": experiment.completed_at,
+            "heartbeat_at": experiment.heartbeat_at,
+            "coordinator_token": experiment.coordinator_token,
+            "worker_pid": experiment.worker_pid,
+            "error_type": experiment.error_type,
+            "error_message": experiment.error_message,
+        }
 
         failed_rows = self.session.execute(
             select(
@@ -283,7 +293,17 @@ before `_fail_experiment`):
         try:
             worker_pid = job_manager.start(experiment_id, token)
         except Exception as exc:
-            self._restore_retry_failed(experiment_id, token, snapshot)
+            restored = self._restore_retry_failed(
+                experiment_id, token, snapshot, terminal_snapshot
+            )
+            if not restored:
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_FENCE_LOST",
+                    "Retry Failed lost its coordinator generation before the spawn "
+                    "failure could be compensated; a newer generation owns the "
+                    "experiment and no Item was mutated.",
+                    409,
+                ) from exc
             raise PlatformError(
                 "DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
                 "Unable to start DatasetExperiment coordinator for retry.",
@@ -308,20 +328,46 @@ before `_fail_experiment`):
         self.session.expire_all()
         return self.session.get(DatasetExperimentModel, experiment_id)
 
-    def _restore_retry_failed(self, experiment_id, coordinator_token, snapshot):
-        """Compensate a Retry Failed whose coordinator spawn is known to have failed.
+    def _restore_retry_failed(self, experiment_id, coordinator_token,
+                              item_snapshot, terminal_snapshot):
+        """Generation-fenced compensation for a Retry Failed spawn failure.
 
-        The ONLY legal restore is ``running -> completed_with_failures`` (a
-        nominal DatasetExperiment transition). Requoted Items are restored to
-        ``failed`` with their exact pre-retry error projection. Guarded by the
-        fresh token and ``status == running`` so a concurrent actor can never be
-        clobbered. Used only when ``job_manager.start`` raises, which means no
-        coordinator process exists.
+        The compensation transaction FIRST must durably re-acquire ownership of
+        the retry generation:
+
+            CAS UPDATE dataset_experiments
+                SET status='completed_with_failures',
+                    coordinator_token = terminal_snapshot token,
+                    worker_pid = terminal_snapshot pid,
+                    heartbeat_at = terminal_snapshot heartbeat,
+                    completed_at = terminal_snapshot completed_at,
+                    error_type = terminal_snapshot error_type,
+                    error_message = terminal_snapshot error_message
+                WHERE id=:id AND coordinator_token=:retry_token AND status='running'
+
+        Only when that UPDATE affects exactly one row (rowcount == 1) does this
+        caller still own the generation, and only THEN are the requeued Items
+        restored inside the SAME transaction. Each Item UPDATE also requires
+        ``id`` AND ``experiment_id`` AND the expected retry-created state
+        ``status='queued'``.
+
+        If the ownership CAS affects zero rows (a newer generation already took
+        over), the transaction is rolled back immediately, ZERO Items are
+        mutated, and this returns ``False`` so the caller raises
+        ``DATASET_EXPERIMENT_FENCE_LOST`` instead of clobbering the newer owner.
+
+        Restoring ``completed_at``/``heartbeat_at``/``coordinator_token``/
+        ``worker_pid``/``error_type``/``error_message`` from the pre-retry
+        terminal snapshot makes this a genuine terminal-projection restore, not a
+        normalized re-write.
+
+        Used only when ``job_manager.start`` raises, which proves no coordinator
+        process was created.
         """
         now = datetime.now(timezone.utc)
         try:
             with self.session.no_autoflush:
-                self.session.execute(
+                claimed = self.session.execute(
                     update(DatasetExperimentModel)
                     .where(
                         DatasetExperimentModel.id == experiment_id,
@@ -330,20 +376,24 @@ before `_fail_experiment`):
                     )
                     .values(
                         status="completed_with_failures",
-                        coordinator_token=None,
-                        worker_pid=None,
-                        heartbeat_at=now,
-                        completed_at=now,
-                        error_type=None,
-                        error_message=None,
+                        coordinator_token=terminal_snapshot["coordinator_token"],
+                        worker_pid=terminal_snapshot["worker_pid"],
+                        heartbeat_at=terminal_snapshot["heartbeat_at"],
+                        completed_at=terminal_snapshot["completed_at"],
+                        error_type=terminal_snapshot["error_type"],
+                        error_message=terminal_snapshot["error_message"],
                     )
                     .execution_options(synchronize_session=False)
                 )
-                for item_id, error_type, error_message in snapshot:
+                if int(claimed.rowcount or 0) != 1:
+                    self.session.rollback()
+                    return False
+                for item_id, error_type, error_message in item_snapshot:
                     self.session.execute(
                         update(DatasetExperimentItemModel)
                         .where(
                             DatasetExperimentItemModel.id == item_id,
+                            DatasetExperimentItemModel.experiment_id == experiment_id,
                             DatasetExperimentItemModel.status == "queued",
                         )
                         .values(
@@ -358,6 +408,7 @@ before `_fail_experiment`):
         except Exception:
             self.session.rollback()
             raise
+        return True
 ```
 
 ### B. `backend/app/dataset_experiments/recovery.py` (new, final after Task 3)
@@ -369,7 +420,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, or_, select, update
 
 from app.analysis.model import AnalysisRunModel
 from app.analysis.service import AnalysisService
@@ -406,20 +457,37 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def claim_experiment_generation(session, experiment_id, expected_token):
+def claim_experiment_generation(session, experiment_id, expected_token,
+                                startup_recovery_cutoff):
     """Durably take ownership of a running Experiment under a fresh token.
 
     CAS on the previously observed ``coordinator_token`` (or ``IS NULL`` when the
-    observed token is ``None``). Only one racer can win; the loser returns
-    ``None``. Commits the fresh token, clears ``worker_pid``, and refreshes the
-    heartbeat BEFORE any coordinator subprocess may act. Returns the fresh token.
+    observed token is ``None``) AND on the startup recovery cutoff:
+
+        heartbeat_at IS NULL OR heartbeat_at < startup_recovery_cutoff
+
+    The cutoff makes a generation freshly claimed in the CURRENT startup epoch
+    ineligible to be stolen by any other recovery call in the SAME startup (its
+    ``heartbeat_at`` is written as ``now`` and is therefore ``>=`` the cutoff).
+    A later real platform restart uses a later cutoff and can recover a prior
+    crash-after-claim state.
+
+    Timestamp comparison is strictly ``<``; equality is NOT eligible. Commits
+    the fresh token, clears ``worker_pid``, and writes ``heartbeat_at=now``
+    BEFORE any coordinator subprocess may act. Only one racer can win; the loser
+    returns ``None``.
     """
     fresh_token = f"coord_{uuid4().hex}"
+    cutoff_predicate = or_(
+        DatasetExperimentModel.heartbeat_at.is_(None),
+        DatasetExperimentModel.heartbeat_at < startup_recovery_cutoff,
+    )
     statement = (
         update(DatasetExperimentModel)
         .where(
             DatasetExperimentModel.id == experiment_id,
             DatasetExperimentModel.status == "running",
+            cutoff_predicate,
         )
         .values(
             coordinator_token=fresh_token,
@@ -434,23 +502,62 @@ def claim_experiment_generation(session, experiment_id, expected_token):
         statement = statement.where(
             DatasetExperimentModel.coordinator_token == expected_token
         )
-    result = session.execute(statement)
-    session.commit()
+    try:
+        result = session.execute(statement)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     if int(result.rowcount or 0) != 1:
         return None
     return fresh_token
 
 
-def fail_closed_pending_local_run(session, *, run_id):
-    """Terminalize an ambiguous local pending Run without ever relaunching it.
+def fail_closed_pending_local_run(session, *, experiment_id, coordinator_token,
+                                  item_id, attempt_id, run_id):
+    """Generation-fenced ``pending -> interrupted`` for an ambiguous local Run.
 
-    ``pending -> interrupted`` with ``ANALYSIS_LAUNCH_AMBIGUOUS``. The CAS on
-    ``status == 'pending'`` makes concurrent recovery actors idempotent. Returns
-    True iff this caller performed the transition.
+    The FINAL durable UPDATE atomically proves the whole ownership chain in the
+    database; there is no SELECT-then-UPDATE:
+
+        AnalysisRun.id == run_id AND AnalysisRun.status == 'pending'
+        EXISTS Experiment(id == experiment_id AND status == 'running'
+                          AND coordinator_token == coordinator_token)
+        EXISTS Item(id == item_id AND experiment_id == experiment_id
+                    AND status == 'running')
+        EXISTS Attempt(id == attempt_id AND experiment_item_id == item_id
+                       AND analysis_run_id == run_id)
+
+    Returns ``"interrupted"`` iff this caller performed the transition; returns
+    ``"already_interrupted"`` when the Run is already terminal (idempotent
+    concurrent CAS). On a zero-row result it performs a fresh generation check:
+
+      * generation lost -> ``DATASET_EXPERIMENT_FENCE_LOST``;
+      * missing/unknown ownership -> ``DATASET_EXPERIMENT_INVARIANT_VIOLATION``.
+
+    Never silently succeeds on ownership corruption.
     """
     statement = (
         update(AnalysisRunModel)
-        .where(AnalysisRunModel.id == run_id, AnalysisRunModel.status == "pending")
+        .where(
+            AnalysisRunModel.id == run_id,
+            AnalysisRunModel.status == "pending",
+            exists().where(
+                DatasetExperimentModel.id == experiment_id,
+                DatasetExperimentModel.status == "running",
+                DatasetExperimentModel.coordinator_token == coordinator_token,
+            ),
+            exists().where(
+                DatasetExperimentItemModel.id == item_id,
+                DatasetExperimentItemModel.experiment_id == experiment_id,
+                DatasetExperimentItemModel.status == "running",
+            ),
+            exists().where(
+                DatasetExperimentAttemptModel.id == attempt_id,
+                DatasetExperimentAttemptModel.experiment_item_id == item_id,
+                DatasetExperimentAttemptModel.analysis_run_id == run_id,
+            ),
+        )
         .values(
             status="interrupted",
             error_type=_AMBIGUOUS_ERROR_TYPE,
@@ -459,9 +566,42 @@ def fail_closed_pending_local_run(session, *, run_id):
         )
         .execution_options(synchronize_session=False)
     )
-    result = session.execute(statement)
-    session.commit()
-    return int(result.rowcount or 0) == 1
+    try:
+        result = session.execute(statement)
+        rowcount = int(result.rowcount or 0)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    if rowcount == 1:
+        return "interrupted"
+
+    generation = session.execute(
+        select(DatasetExperimentModel.status, DatasetExperimentModel.coordinator_token)
+        .where(DatasetExperimentModel.id == experiment_id)
+    ).one_or_none()
+    if generation is None or generation[0] != "running" or generation[1] != coordinator_token:
+        raise PlatformError(
+            "DATASET_EXPERIMENT_FENCE_LOST",
+            "Coordinator generation no longer owns the experiment.",
+            409,
+        )
+    run_status = session.execute(
+        select(AnalysisRunModel.status).where(AnalysisRunModel.id == run_id)
+    ).scalar_one_or_none()
+    if run_status == "interrupted":
+        return "already_interrupted"
+    if run_status is None:
+        raise PlatformError(
+            "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+            "Ambiguous local run no longer exists.",
+            409,
+        )
+    raise PlatformError(
+        "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+        "Ambiguous local run could not be terminalized from its current state.",
+        409,
+    )
 
 
 def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
@@ -523,7 +663,15 @@ def repair_local_pending_runs(session, ds, analysis, *, experiment_id,
                 raise
             report.repaired_first_launch += 1
         else:
-            if fail_closed_pending_local_run(session, run_id=run.id):
+            outcome = fail_closed_pending_local_run(
+                session,
+                experiment_id=experiment_id,
+                coordinator_token=coordinator_token,
+                item_id=item.id,
+                attempt_id=latest.id,
+                run_id=run.id,
+            )
+            if outcome == "interrupted":
                 report.ambiguous_failed += 1
     return report
 
@@ -541,30 +689,36 @@ def start_recovered_coordinator(session, experiment_id, coordinator_token,
         worker_pid = job_manager.start(experiment_id, coordinator_token)
     except Exception:
         return None
-    with session.no_autoflush:
-        session.execute(
-            update(DatasetExperimentModel)
-            .where(
-                DatasetExperimentModel.id == experiment_id,
-                DatasetExperimentModel.coordinator_token == coordinator_token,
-                DatasetExperimentModel.status == "running",
+    try:
+        with session.no_autoflush:
+            session.execute(
+                update(DatasetExperimentModel)
+                .where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.coordinator_token == coordinator_token,
+                    DatasetExperimentModel.status == "running",
+                )
+                .values(worker_pid=worker_pid)
+                .execution_options(synchronize_session=False)
             )
-            .values(worker_pid=worker_pid)
-            .execution_options(synchronize_session=False)
-        )
-    session.commit()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     session.expire_all()
     return worker_pid
 
 
 def recover_dataset_experiments(session, *, job_manager, registry,
-                                model_release_store, executor_registry):
+                                model_release_store, executor_registry,
+                                startup_recovery_cutoff):
     """Restart recovery for active DatasetExperiments.
 
     Selects only ``running`` Experiments (G5 owns ``evaluating``). For each:
-    claim a fresh generation, reconcile real AnalysisRun state, repair local
-    pending launch gaps, fail closed on invariants, then spawn one coordinator.
-    Never reruns completed Items and never auto-retries failed Items.
+    claim a fresh generation under the fixed ``startup_recovery_cutoff``,
+    reconcile real AnalysisRun state, repair local pending launch gaps, fail
+    closed on invariants, then spawn one coordinator. Never reruns completed
+    Items and never auto-retries failed Items.
     """
     report = RecoveryReport()
     ds = DatasetExperimentService(
@@ -586,7 +740,7 @@ def recover_dataset_experiments(session, *, job_manager, registry,
             .where(DatasetExperimentModel.id == experiment_id)
         ).scalar_one_or_none()
         claimed_token = claim_experiment_generation(
-            session, experiment_id, expected_token
+            session, experiment_id, expected_token, startup_recovery_cutoff
         )
         if claimed_token is None:
             report.skipped += 1
@@ -626,19 +780,33 @@ above EXCEPT `start_recovered_coordinator`, the two report fields
 `coordinators_started`/`spawn_failures`, and the final spawn block in
 `recover_dataset_experiments`. Its signature at Task 2 is
 `recover_dataset_experiments(session, *, registry, model_release_store,
-executor_registry)`. Task 3 adds the deferred pieces exactly as shown.
+executor_registry, startup_recovery_cutoff)`. Task 3 adds the deferred pieces
+exactly as shown. `claim_experiment_generation(..., startup_recovery_cutoff)`
+and the generation-fenced `fail_closed_pending_local_run(...)` are part of the
+Task 2 module.
 
 ### C. `backend/app/main.py` — startup integration (Task 4)
 
 Add to the module-level imports:
 
 ```python
+from datetime import datetime, timezone
+
 from app.dataset_experiments import recovery as dataset_experiment_recovery
 from app.dataset_experiments.job_manager import DatasetExperimentJobManager
 ```
 
-Inside the existing `with app.state.database.session_factory() as
-recovery_session:` block, immediately after the remote-recovery `if` block
+Capture ONE fixed startup recovery cutoff immediately before the existing
+recovery `with` block, then pass it to the DatasetExperiment recovery call:
+
+```python
+    startup_recovery_cutoff = datetime.now(timezone.utc)
+
+    with app.state.database.session_factory() as recovery_session:
+        # existing recovery_session block body (steps 1-3 above) stays unchanged
+```
+
+Inside that `with` block, immediately after the remote-recovery `if` block
 (currently ending at `main.py:144`):
 
 ```python
@@ -648,6 +816,7 @@ recovery_session:` block, immediately after the remote-recovery `if` block
             registry=app.state.pipeline_registry,
             model_release_store=app.state.model_release_store,
             executor_registry=app.state.executor_registry,
+            startup_recovery_cutoff=startup_recovery_cutoff,
         )
 ```
 
@@ -666,8 +835,8 @@ Resulting order inside the block:
 
 | File | Change | Key interfaces |
 |---|---|---|
-| `backend/app/dataset_experiments/service.py` | add | `retry_failed(experiment_id, job_manager)`, `_restore_retry_failed(experiment_id, coordinator_token, snapshot)` |
-| `backend/app/dataset_experiments/recovery.py` | new | `RecoveryReport`, `claim_experiment_generation`, `fail_closed_pending_local_run`, `repair_local_pending_runs`, `start_recovered_coordinator`, `recover_dataset_experiments` |
+| `backend/app/dataset_experiments/service.py` | add | `retry_failed(experiment_id, job_manager)`, `_restore_retry_failed(experiment_id, coordinator_token, item_snapshot, terminal_snapshot)` |
+| `backend/app/dataset_experiments/recovery.py` | new | `RecoveryReport`, `claim_experiment_generation(session, id, expected_token, startup_recovery_cutoff)`, `fail_closed_pending_local_run(session, *, experiment_id, coordinator_token, item_id, attempt_id, run_id)`, `repair_local_pending_runs`, `start_recovered_coordinator`, `recover_dataset_experiments(..., startup_recovery_cutoff)` |
 | `backend/app/main.py` | modify | step-4 startup call + `DatasetExperimentJobManager` wiring |
 | `backend/tests/dataset_experiment_fixtures.py` | add | `G4Recover` job-manager probe helper, `recover_once` |
 | `backend/tests/test_dataset_experiment_retry_failed.py` | new | Retry Failed behavior |
@@ -692,6 +861,9 @@ PRECONDITION (read-only, no writes):
     experiment.status == completed_with_failures
     at least one Item.status == failed
     snapshot failed Items (id, last_error_type, last_error_message)
+    snapshot terminal Experiment projection:
+        completed_at, heartbeat_at, coordinator_token, worker_pid,
+        error_type, error_message
 
 TRANSACTION 1 (one commit):
     CAS UPDATE dataset_experiments
@@ -710,8 +882,11 @@ TRANSACTION 1 (one commit):
 
 OUTSIDE TRANSACTION:
     worker_pid = job_manager.start(experiment_id, fresh_token)
-    ON raise: _restore_retry_failed(...)  # see RETRY SPAWN-FAILURE SEMANTICS
-              raise DATASET_EXPERIMENT_ORCHESTRATION_FAILED
+    ON raise:
+        restored = _restore_retry_failed(
+            experiment_id, fresh_token, item_snapshot, terminal_snapshot)
+        IF restored: raise DATASET_EXPERIMENT_ORCHESTRATION_FAILED
+        ELSE:        raise DATASET_EXPERIMENT_FENCE_LOST  # newer generation owns it
 
 TRANSACTION 2 (one commit):
     UPDATE dataset_experiments SET worker_pid=:pid
@@ -743,21 +918,35 @@ normal G3-C scheduling (`start_item_attempt` → `launch_item_attempt`).
 
 ## RETRY SPAWN-FAILURE SEMANTICS
 
-Chosen design: **compensating restore to the exact pre-retry
-`completed_with_failures` state**, because `job_manager.start` raising proves
-`subprocess.Popen` did not create a coordinator process (the job manager returns
-`.pid` immediately after `Popen`; nothing else can raise). The restore:
+Chosen design: **generation-fenced restore of the pre-retry terminal Experiment
+projection plus the queued Item projection**, because `job_manager.start` raising
+proves `subprocess.Popen` did not create a coordinator process (the job manager
+returns `.pid` immediately after `Popen`; nothing else can raise).
 
-- is the nominal transition `running -> completed_with_failures` (legal per
-  §5.1), so no invented state;
-- restores each requeued Item to `failed` with its exact snapshotted
-  `last_error_type`/`last_error_message` (inverse of the explicit
-  `failed -> queued` retry transition);
-- clears the fresh token (`coordinator_token=NULL`), so any hypothetical
-  concurrent actor is fenced;
-- is guarded by `coordinator_token == fresh AND status == running`, so it cannot
-  clobber any newer generation;
-- then raises `DATASET_EXPERIMENT_ORCHESTRATION_FAILED` to the caller.
+The compensation is a single transaction with a strict ownership claim:
+
+1. `UPDATE dataset_experiments ... WHERE id=:id AND coordinator_token=:retry_token
+   AND status='running'` restores `status='completed_with_failures'` and the
+   snapshotted `completed_at`, `heartbeat_at`, `coordinator_token`,
+   `worker_pid`, `error_type`, `error_message`. This UPDATE is the ownership
+   claim for the entire compensation.
+2. If rowcount != 1: rollback immediately, mutate ZERO Items, return `False`.
+   `retry_failed` then raises `DATASET_EXPERIMENT_FENCE_LOST`, and the newer
+   generation retains untouched ownership.
+3. Only if rowcount == 1: restore each requeued Item inside the SAME transaction
+   to `failed` with its snapshotted `last_error_type`/`last_error_message`.
+   Each Item UPDATE requires `id` AND `experiment_id == experiment_id` AND
+   `status == 'queued'`.
+4. Commit once; on any exception rollback and re-raise.
+
+This is a genuine terminal-projection restore (timestamps, token, PID, and error
+fields are the pre-retry values), not a normalized re-write.
+
+Superseded-compensation semantics: `_restore_retry_failed` returns `True` iff it
+still owned the generation and restored it; `False` (with zero Item mutation)
+when a newer generation already owns the Experiment. The caller maps `False` to
+`DATASET_EXPERIMENT_FENCE_LOST`; it never reports
+`DATASET_EXPERIMENT_ORCHESTRATION_FAILED` for a compensation that did nothing.
 
 Rejected alternative: marking the Experiment `failed`. It would strand the
 requeued Items as `queued` under a terminal status that cannot be retried
@@ -772,9 +961,11 @@ Crash-window distinction (documented, intentional):
   retry intent remains (`running`, fresh token, queued failed Items). The next
   startup recovery claims a new generation and spawns a coordinator, so the
   retry takes effect. This is a valid, recoverable outcome — not a lost update.
-- **Observed spawn exception (no crash)**: no process exists and no generation
-  can act, so the compensating restore runs synchronously. The retry is undone
-  with zero coordinator side effects.
+- **Observed spawn exception (no crash)**: no coordinator process was created.
+  The compensation runs synchronously ONLY while the retry generation still owns
+  the Experiment; if a newer generation has taken over, the compensation is
+  abandoned with zero Item mutation and `DATASET_EXPERIMENT_FENCE_LOST` is
+  raised instead of writing under a stale generation.
 
 Both windows preserve: no hidden queued Items under a terminal status, no
 invented state, no illegal transition, and retryability.
@@ -787,11 +978,13 @@ Exact durable order for taking ownership of an already-active Experiment:
 
 ```text
 READ: expected_token = dataset_experiments.coordinator_token of the running Experiment
+      startup_recovery_cutoff = ONE fixed datetime captured by application startup
 
 TRANSACTION (one commit) — claim_experiment_generation:
     CAS UPDATE dataset_experiments
         SET coordinator_token=<fresh>, worker_pid=NULL, heartbeat_at=now
         WHERE id=:id AND status='running'
+          AND (heartbeat_at IS NULL OR heartbeat_at < startup_recovery_cutoff)
           AND coordinator_token = :expected_token     # or IS NULL if expected is NULL
     COMMIT
     IF rowcount != 1: return None (loser; no token, no spawn)
@@ -830,6 +1023,10 @@ Requirements mapping:
      coordinator, then spawns a replacement. Accepted transient older
      coordinator, fenced before side effects.
    - crash after PID commit: normal.
+9. Same-startup re-entry protected: the claim additionally requires
+   `heartbeat_at IS NULL OR heartbeat_at < startup_recovery_cutoff`, so a
+   generation claimed in the current startup is not stealable by another
+   recovery call in the same epoch.
 
 ### Stale Session and two-session race analysis
 
@@ -845,13 +1042,113 @@ token, not a blind `WHERE status='running'` update:
 - `expected_token IS NULL` is handled with
   `coordinator_token IS NULL`; the same serialization applies.
 
-### Deployment assumption
+### Startup recovery cutoff (epoch)
 
-The deployment assumes a single FastAPI startup process. Even if concurrent
-startup recovery actors are possible, the token CAS guarantees only one current
-generation retains write authority. An older spawned coordinator may exist
-transiently, but the newer token fences it before any side effect; the orphan
-observes `FENCE_LOST` on its next step.
+Application startup captures exactly ONE cutoff:
+
+```python
+startup_recovery_cutoff = datetime.now(timezone.utc)
+```
+
+and passes it to `recover_dataset_experiments`, which passes the SAME value to
+every `claim_experiment_generation` call in that startup pass. It is never
+regenerated per Experiment.
+
+Eligibility predicate:
+
+```text
+heartbeat_at IS NULL OR heartbeat_at < startup_recovery_cutoff
+```
+
+Strict `<`; equality is not eligible. A successful claim writes
+`heartbeat_at = now`, which is `>=` the cutoff, so:
+
+- a stale pre-restart running Experiment (old heartbeat or NULL) is eligible;
+- a generation freshly claimed in the CURRENT startup cannot be stolen by any
+  other recovery call in the SAME startup;
+- the NEXT real platform restart uses a later cutoff, so a prior
+  crash-after-claim state (fresh token + fresh heartbeat) becomes eligible again
+  and is recoverable.
+
+### Deployment concurrency statement
+
+WISA V1 startup recovery is a **hard single-actor invariant**: exactly one
+FastAPI startup process performs recovery against a given database. The token CAS
+alone does NOT make arbitrary sequential recovery actors safe — a later actor can
+read a just-written fresh token and attempt to take over — which is exactly why
+the startup cutoff exists. Under one startup process, cutoff plus token CAS
+guarantees a single current generation.
+
+If multi-process concurrent application startup must be supported, a stronger
+cross-process startup leader/lease is required; token CAS plus cutoff is not
+claimed to elect a cross-process recovery owner. That is out of G4 scope and
+would be reported as an architectural STOP rather than solved with a weak
+in-process lease.
+
+---
+
+## B→C CROSS-GENERATION RACE RESOLUTION
+
+The dangerous window is inside the sealed G3-B seam:
+
+```text
+Actor A owns generation T1
+A: Transaction B commit  ->  launch_requested_at != NULL
+A: physical launch       ->  not yet called
+```
+
+Sealed G3-B intentionally does NOT cancel an already-authorized post-B physical
+launch merely because the DatasetExperiment coordinator token later rotates.
+Therefore no recovery pass may rotate A's fresh current generation and then
+classify A's durable B-commit as crash ambiguity.
+
+Failure mode if a second same-epoch recovery pass were allowed to take over:
+
+```text
+B reads T1
+B rotates T1 -> T2
+B sees local Run pending + marker != NULL
+B classifies it as restart ambiguity and interrupts the Run
+A still proceeds from its already-durable B commit to physical launch
+=> one actor says "ZERO launch" while another physically launches
+```
+
+Resolution (no schema change):
+
+1. The startup cutoff makes a generation claimed in the current startup
+   ineligible for re-claim in the SAME startup epoch (its `heartbeat_at` is
+   `>=` the cutoff).
+2. A second recovery pass in the SAME startup therefore cannot rotate A's fresh
+   generation, cannot observe A's Run as "ambiguous", and performs zero launch
+   and zero Run mutation. A's single physical first launch remains authoritative.
+3. A genuine NEXT platform restart captures a later cutoff, so it can recover a
+   truly crashed crash-after-claim state (fresh token + old-enough heartbeat).
+4. With a single startup process (hard deployment invariant), no concurrent
+   same-epoch recovery pass exists at all; the cutoff additionally protects
+   against accidental same-process re-entry.
+
+`expire_on_commit=False` matters here: Actor A's Session may hold an identity-map
+`AnalysisRun` that is still `pending` even if another Session wrote to it, so G4
+never relies on `launch_prepared_run()` re-reading fresh state. The cutoff keeps
+B from writing at all, which is what makes A's post-B launch deterministic.
+
+---
+
+## TRANSACTION HYGIENE
+
+Every G4 recovery write follows the sealed G3-C standard — explicit
+`try / commit / except rollback / raise`, never reusing a failed Session:
+
+| Write | Hygiene |
+|---|---|
+| `claim_experiment_generation` | `try: session.execute(CAS); session.commit()` / `except: session.rollback(); raise` |
+| `fail_closed_pending_local_run` | `try: session.execute(generation-fenced UPDATE); session.commit()` / `except: session.rollback(); raise` |
+| `start_recovered_coordinator` PID persist | `try: session.execute(guarded UPDATE); session.commit()` / `except: session.rollback(); raise` |
+| `retry_failed` Transaction 1 | guarded CAS + Item requeue, `commit`; `except PlatformError: raise`; `except Exception: rollback; raise` |
+| `retry_failed` Transaction 2 (PID) | `try: ...; commit` / `except: rollback; raise` |
+| `_restore_retry_failed` | ownership CAS first; `rowcount != 1 -> rollback; return False`; else Item restore + `commit`; `except: rollback; raise` |
+
+Spawn and provider physical launch stay outside every DB transaction.
 
 ---
 
@@ -929,8 +1226,11 @@ Attempt.launch_requested_at IS NOT NULL
 For `local_cpu` the physical launch outcome is unknowable. Recovery:
 
 1. performs ZERO provider launch and never calls same-Run relaunch;
-2. CAS `pending -> interrupted` with `error_type="ANALYSIS_LAUNCH_AMBIGUOUS"`
-   (bounded, new, non-scientific) and a fixed message;
+2. generation-fenced `pending -> interrupted` with
+   `error_type="ANALYSIS_LAUNCH_AMBIGUOUS"` (bounded, new, non-scientific) and a
+   fixed message. The FINAL UPDATE atomically proves the ownership chain
+   `Experiment(token/status) -> Item -> Attempt -> Run` with `EXISTS` predicates;
+   a stale generation gets `DATASET_EXPERIMENT_FENCE_LOST` with zero mutation;
 3. preserves all Attempt/Run history (no deletes, no resets, no new Attempt);
 
 The terminal state is `interrupted` (not `failed`) because the outcome is
@@ -1001,7 +1301,8 @@ G4 does not duplicate this logic; it delegates to the sealed reconciliation.
    coordinate_orphaned_remote_runs(recovery_session, launcher=..., ...)
 4. DatasetExperiment recovery
    recover_dataset_experiments(recovery_session, job_manager=..., registry=...,
-                               model_release_store=..., executor_registry=...)
+                               model_release_store=..., executor_registry=...,
+                               startup_recovery_cutoff=captured_once_before_the_with_block)
 ```
 
 DatasetExperiment recovery runs last so it observes the post-recovery
@@ -1151,12 +1452,23 @@ Tests:
   raises `DATASET_EXPERIMENT_INVALID_TRANSITION`, `B_job_manager.calls == []`.
 - `test_retry_stale_session_loser_zero_spawn` — B loaded
   `completed_with_failures` before A committed.
-- `test_retry_spawn_failure_restores_pre_retry_state` —
+- `test_retry_spawn_failure_restores_terminal_projection` —
   `RecordingJobManager(fail=True)`; raises
   `DATASET_EXPERIMENT_ORCHESTRATION_FAILED`; fresh DB: status
-  `completed_with_failures`, `coordinator_token is None`, `worker_pid is None`,
-  `completed_at is not None`; failed Items are `failed` with their original
+  `completed_with_failures`; `coordinator_token`/`heartbeat_at`/`completed_at`/
+  `worker_pid`/`error_type`/`error_message` equal the pre-retry terminal
+  snapshot; failed Items are `failed` with their original
   `last_error_type`/`last_error_message`; zero new Attempt/Run.
+- `test_retry_compensation_loses_generation_zero_item_mutation` — after
+  Transaction 1 commits under `T_retry`, a `RecordingJobManager` `on_start`
+  callback opens a fresh Session and takes over the generation via
+  `claim_experiment_generation(..., startup_recovery_cutoff=now+5s)`, then
+  raises; `retry_failed` raises `DATASET_EXPERIMENT_FENCE_LOST`; fresh DB:
+  Experiment owned by the newer token; every retried Item is still `queued`;
+  ZERO `queued -> failed` restoration.
+- `test_retry_compensation_ownership_cas_required_before_item_restore` —
+  `_restore_retry_failed(...)` called directly with a token that does not own
+  the Experiment returns `False` and performs zero Item UPDATEs.
 
 ### Steps
 
@@ -1191,7 +1503,7 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -m pytest \
 Test scaffolding (local to the file):
 
 ```python
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dataset_experiment_fixtures import (
     G3LocalPipeline, create_experiment, item, local_services, seed_dataset,
@@ -1206,13 +1518,18 @@ from app.analysis.model import AnalysisRunModel
 from app.pipelines.registry import PipelineRegistry
 
 
-def _recover(client, *, provider):
+def _cutoff():
+    return datetime.now(timezone.utc) + timedelta(seconds=5)
+
+
+def _recover(client, *, provider, cutoff=None):
     registry = PipelineRegistry([G3LocalPipeline()])
     executor_registry = FakeRegistry({"local_cpu": provider})
     with client.app.state.database.session_factory() as session:
         return rec.recover_dataset_experiments(
             session, registry=registry, model_release_store=None,
             executor_registry=executor_registry,
+            startup_recovery_cutoff=cutoff or _cutoff(),
         )
 
 
@@ -1235,10 +1552,19 @@ def _seed_pending_local(client, session, experiment, order=0, marker=None, worke
 Tests:
 
 - `test_claim_generation_rotates_token_clears_pid` — running Experiment with
-  token `T` and `worker_pid=9999`; `claim_experiment_generation(session, id, "T")`
-  returns a new token; fresh DB: new token, `worker_pid is None`.
-- `test_claim_generation_stale_expected_token_loses` — two Sessions; actor A
-  claims with `T`; actor B claims with `T` → `None`, zero spawn.
+  token `T`, old/NULL `heartbeat_at`, and `worker_pid=9999`;
+  `claim_experiment_generation(session, id, "T", cutoff)` returns a new token;
+  fresh DB: new token, `worker_pid is None`, `heartbeat_at >= cutoff`.
+- `test_claim_generation_stale_expected_token_loses` — two Sessions both observe
+  `T`; actor A claims with `T`; actor B claims with `T` → `None`, zero spawn.
+- `test_claim_generation_ineligible_when_heartbeat_after_cutoff` — Experiment
+  `heartbeat_at = now`; `claim_experiment_generation(..., cutoff = now - 1s)`
+  returns `None` (same-startup re-entry guarded).
+- `test_claim_generation_eligible_when_heartbeat_null_or_before_cutoff` — a NULL
+  heartbeat and an old heartbeat both claim successfully under a later cutoff.
+- `test_claim_generation_commit_failure_rolls_back` — monkeypatch `session.commit`
+  to raise; `claim_experiment_generation` rolls back and re-raises; fresh DB
+  keeps the original token (no partial ownership write).
 - `test_safe_first_launch_reuses_same_attempt_and_run` — marker `NULL`;
   `recover_first` path; fresh DB: Attempt count and Run count unchanged, same ids,
   `launch_requested_at is not None`, provider launch once.
@@ -1252,6 +1578,14 @@ Tests:
 - `test_ambiguous_pending_local_run_fails_closed_zero_launch` — marker set;
   after recovery: Run `interrupted`, `error_type == "ANALYSIS_LAUNCH_AMBIGUOUS"`,
   `provider.launches == []`, same Attempt/Run history.
+- `test_ambiguous_fail_close_stale_generation_fence_lost` — generation `T1` owns
+  the Experiment; another actor claims `T1 -> T2`; then
+  `fail_closed_pending_local_run(..., coordinator_token="T1", ...)` raises
+  `DATASET_EXPERIMENT_FENCE_LOST`; the Run stays `pending`; zero Item/Run
+  mutation.
+- `test_ambiguous_fail_close_idempotent_under_current_generation` — first call
+  returns `"interrupted"`; a second call under the same current token returns
+  `"already_interrupted"`; the Run is `interrupted` exactly once.
 - `test_ambiguous_run_projects_item_failed` — after recovery, call
   `ds.reconcile_items(experiment_id)`; Item `failed` with
   `last_error_type == "ANALYSIS_LAUNCH_AMBIGUOUS"`.
@@ -1318,21 +1652,34 @@ Tests:
   `RecordingJobManager(fail=True)`; `spawn_failures == 1`; fresh DB:
   status `running`, fresh token, `worker_pid is None`; a second recovery with a
   healthy manager then starts a coordinator.
-- `test_restart_second_recovery_pass_fences_first` — recovery pass A starts a
-  coordinator under token `T1`; a second recovery pass B reads `T1`, claims `T2`,
-  and starts a second coordinator; stepping with `T1` →
-  `CoordinatorOutcome.FENCE_LOST`, proving only the newest generation retains
-  write authority (the accepted transient older-coordinator case).
+- `test_same_startup_second_recovery_cannot_steal_fresh_generation` — capture
+  one cutoff `C`; recovery pass A with `C` claims and starts a coordinator under
+  `T1`; recovery pass B with the SAME `C` reads `T1`, attempts to claim, is
+  ineligible because `heartbeat_at >= C`, and is `skipped`; zero second
+  coordinator spawn.
+- `test_next_restart_later_cutoff_recovers_crash_after_claim` — pass A with
+  cutoff `C1` claims `T1` but its spawn fails, leaving `running` + fresh
+  heartbeat; pass B with a LATER cutoff `C2 = now + 5s` claims `T2` and starts a
+  coordinator, proving a genuine next restart can recover crash-after-claim.
+- `test_b_committed_c_not_launched_same_epoch_recovery_cannot_interrupt` —
+  pass A with cutoff `C` claims `T1`; persist `launch_requested_at != NULL` on
+  the item's Attempt to simulate the durable Transaction B commit with the
+  physical launch not yet invoked; pass B runs with the SAME `C` → cannot rotate
+  `T1`, cannot classify the Run as ambiguity; the Run remains `pending` and pass
+  B performs zero launch.
 - `test_restart_claim_two_sessions_same_expected_token_one_winner` — two
   Sessions both read token `T`; both call
-  `claim_experiment_generation(session, id, "T")`; exactly one returns a fresh
-  token and the other returns `None` (the direct CAS race).
+  `claim_experiment_generation(session, id, "T", cutoff)`; exactly one returns a
+  fresh token and the other returns `None` (the direct CAS race).
 - `test_all_success_seam_restart_no_new_run_and_still_running` — running
   Experiment, all Items completed with completed Runs; recovery; then
   `step_once` with the spawned token → `INFERENCE_COMPLETE`; fresh DB: status
   `running`, no `DatasetEvaluationModel`, Run/Attempt counts unchanged.
 - `test_evaluating_experiment_not_selected_by_g4` — `status="evaluating"`;
   recovery returns all-zero counts, no spawn; status unchanged.
+- `test_recover_pid_commit_failure_rolls_back` — monkeypatch `session.commit` to
+  raise on the PID-persist transaction; the error propagates after rollback and
+  the coordinator token/generation is not silently half-written.
 
 ### Steps
 
@@ -1376,7 +1723,8 @@ Tests:
   `["local_stale", "evaluation_stale", "remote_recovery", "dataset_recovery"]`.
 - `test_dataset_recovery_receives_built_executor_registry` — monkeypatch
   `recover_dataset_experiments` to capture kwargs; assert `job_manager` is a
-  `DatasetExperimentJobManager` and `executor_registry` is not `None`.
+  `DatasetExperimentJobManager`, `executor_registry` is not `None`, and
+  `startup_recovery_cutoff` is a `datetime`.
 
 ### Steps
 
@@ -1414,6 +1762,9 @@ Guards:
 - `coordinator.py` still contains no `prepare_run(`, `provider.launch(`,
   `DatasetEvaluation`, `evaluating`, or token rotation.
 - `recovery.py` is torch/ultralytics-free (fresh subprocess import).
+- Static guard on `recovery.py` source: `"startup_recovery_cutoff"` present;
+  the ambiguous fail-close uses database-side `exists()` predicates (no
+  SELECT-then-UPDATE ownership check).
 - Guard that `_ACTIVE_RECOVERY_STATUSES == ("running",)` (G5 not enabled).
 
 Regression commands:
@@ -1475,7 +1826,7 @@ errors. Commit: `test: add phase G G4 regression matrix`.
 | `DATASET_EXPERIMENT_NOT_FOUND` | retry preflight, recovery read | missing Experiment (404). |
 | `DATASET_EXPERIMENT_INVALID_TRANSITION` | retry preflight/CAS; no failed Items | Retry Failed outside `completed_with_failures`. |
 | `DATASET_EXPERIMENT_ORCHESTRATION_FAILED` | retry spawn failure | coordinator process could not be spawned; state compensating-restored. |
-| `DATASET_EXPERIMENT_FENCE_LOST` | recovery reconcile/repair | newer generation owns the Experiment; loser stops. |
+| `DATASET_EXPERIMENT_FENCE_LOST` | recovery reconcile/repair; stale ambiguous fail-close; superseded retry compensation | a newer generation owns the Experiment; loser stops with zero mutation. |
 | `DATASET_EXPERIMENT_INVARIANT_VIOLATION` | recovery reconcile/repair | ownership/membership corruption; Experiment fails closed. |
 | `ANALYSIS_LAUNCH_AMBIGUOUS` | ambiguous local pending Run | AnalysisRun `interrupted`, projected to `Item.failed`. |
 
@@ -1512,6 +1863,25 @@ mutated. DetectionResults are never touched.
     ("running",)`; no DatasetEvaluation/evaluating code. PASS
 14. no schema/migration change: exact-column guards in Task 5. PASS
 15. no `remote_execution` production change: G4 never imports or edits it. PASS
+16. retry compensation is generation-claimed: the Experiment ownership CAS is
+    required (rowcount == 1) before any Item UPDATE; a superseded compensation
+    rolls back with ZERO Item writes and raises `DATASET_EXPERIMENT_FENCE_LOST`.
+    PASS
+17. retry compensation restores the pre-retry terminal projection
+    (`completed_at`/`heartbeat_at`/`coordinator_token`/`worker_pid`/
+    `error_type`/`error_message`), not a normalized `now`/`None` rewrite. PASS
+18. ambiguous local fail-close is generation-bound in the FINAL Run UPDATE via
+    `EXISTS` predicates over Experiment/Item/Attempt/Run; a stale generation gets
+    `FENCE_LOST` with zero mutation. PASS
+19. same-startup second recovery cannot steal a freshly claimed generation
+    (cutoff predicate `heartbeat_at IS NULL OR heartbeat_at < cutoff`). PASS
+20. a B-committed/C-not-yet-launched Run cannot be interrupted by a same-epoch
+    recovery pass; the original first physical launch remains authoritative. PASS
+21. a genuine next restart with a later cutoff can recover crash-after-claim.
+    PASS
+22. recovery writes use explicit `try / commit / except rollback / raise` and
+    never reuse a failed Session; spawn/provider launch stay outside
+    transactions. PASS
 
 ---
 
