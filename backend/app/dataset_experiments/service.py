@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session
 
 from app.analysis.model import AnalysisRunModel
@@ -416,7 +416,8 @@ class DatasetExperimentService:
 
     # ---------- Transaction A: durable execution ownership (G3-A) ----------
 
-    def start_item_attempt(self, *, experiment_id, item_id, analysis_service):
+    def start_item_attempt(self, *, experiment_id, item_id, analysis_service,
+                           coordinator_token=None):
         """G3-A Transaction A: durably bind one queued Item to a newly prepared Run.
 
         Requires the Experiment to already be ``running`` (G3-C owns
@@ -476,8 +477,13 @@ class DatasetExperimentService:
 
             with self.session.no_autoflush:
                 # 1. Acquire ownership: conditional queued->running CAS.
-                claimed = self._claim_queued_item(item_id=item_id, experiment_id=experiment.id)
+                claimed = self._claim_queued_item(
+                    item_id=item_id, experiment_id=experiment.id,
+                    coordinator_token=coordinator_token,
+                )
                 if claimed != 1:
+                    if coordinator_token is not None:
+                        self._require_experiment_generation(experiment.id, coordinator_token)
                     raise PlatformError(
                         "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
                         "Item is no longer queued; another start won or it is not eligible.",
@@ -502,8 +508,20 @@ class DatasetExperimentService:
         self.session.refresh(attempt)
         return attempt
 
-    def _claim_queued_item(self, *, item_id, experiment_id):
-        result = self.session.execute(
+    def _require_experiment_generation(self, experiment_id, coordinator_token):
+        row = self.session.execute(
+            select(DatasetExperimentModel.status, DatasetExperimentModel.coordinator_token)
+            .where(DatasetExperimentModel.id == experiment_id)
+        ).one_or_none()
+        if row is None or row[0] != "running" or row[1] != coordinator_token:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_FENCE_LOST",
+                "Coordinator generation no longer owns the experiment.",
+                409,
+            )
+
+    def _claim_queued_item(self, *, item_id, experiment_id, coordinator_token=None):
+        statement = (
             update(DatasetExperimentItemModel)
             .where(
                 DatasetExperimentItemModel.id == item_id,
@@ -513,6 +531,15 @@ class DatasetExperimentService:
             .values(status="running")
             .execution_options(synchronize_session=False)
         )
+        if coordinator_token is not None:
+            statement = statement.where(
+                exists().where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.status == "running",
+                    DatasetExperimentModel.coordinator_token == coordinator_token,
+                )
+            )
+        result = self.session.execute(statement)
         return int(result.rowcount or 0)
 
     def _next_attempt_number(self, item_id):
@@ -525,7 +552,8 @@ class DatasetExperimentService:
 
     # ---------- Transaction B + durable first launch (G3-B) ----------
 
-    def launch_item_attempt(self, *, experiment_id, item_id, attempt_id, analysis_service):
+    def launch_item_attempt(self, *, experiment_id, item_id, attempt_id, analysis_service,
+                            coordinator_token=None):
         """G3-B: durably claim first launch for ANY executor, then physically launch once.
 
         Revalidates frozen identity, validates the complete ownership chain
@@ -629,9 +657,12 @@ class DatasetExperimentService:
         try:
             with self.session.no_autoflush:
                 claimed = self._claim_launch_intent(
-                    attempt_id=attempt_id, item_id=item_id, requested_at=now
+                    attempt_id=attempt_id, item_id=item_id, requested_at=now,
+                    experiment_id=experiment.id, coordinator_token=coordinator_token,
                 )
                 if claimed != 1:
+                    if coordinator_token is not None:
+                        self._require_experiment_generation(experiment.id, coordinator_token)
                     raise PlatformError(
                         "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
                         "Launch intent is already recorded or the attempt is not eligible.",
@@ -646,8 +677,9 @@ class DatasetExperimentService:
         self.session.refresh(attempt)
         return attempt
 
-    def _claim_launch_intent(self, *, attempt_id, item_id, requested_at):
-        result = self.session.execute(
+    def _claim_launch_intent(self, *, attempt_id, item_id, requested_at,
+                             experiment_id=None, coordinator_token=None):
+        statement = (
             update(DatasetExperimentAttemptModel)
             .where(
                 DatasetExperimentAttemptModel.id == attempt_id,
@@ -657,4 +689,13 @@ class DatasetExperimentService:
             .values(launch_requested_at=requested_at)
             .execution_options(synchronize_session=False)
         )
+        if coordinator_token is not None:
+            statement = statement.where(
+                exists().where(
+                    DatasetExperimentModel.id == experiment_id,
+                    DatasetExperimentModel.status == "running",
+                    DatasetExperimentModel.coordinator_token == coordinator_token,
+                )
+            )
+        result = self.session.execute(statement)
         return int(result.rowcount or 0)
