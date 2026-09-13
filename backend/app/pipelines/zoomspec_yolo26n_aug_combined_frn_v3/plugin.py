@@ -72,7 +72,7 @@ def _load_normalization(path: Path):
 def _require_device_index(runtime_descriptor):
     """Resolve the scientific-pipeline device from the deployment descriptor.
 
-    ZoomSpec declares TWO technical execution capabilities and its factory matches
+    ZoomSpec declares THREE technical execution capabilities and its factory matches
     that claim exactly:
 
     - ``remote_gpu``/``cuda``/``float16`` with an explicit non-negative integer
@@ -80,6 +80,8 @@ def _require_device_index(runtime_descriptor):
       (E1-A plumbing maps it to ``cuda:N``; ``0`` keeps the historical path).
     - ``local_cpu``/``cpu``/``float32`` with a canonical ``device_index=None`` ->
       the ``"cpu"`` device string is passed to the frozen pipeline.
+    - ``local_gpu``/``cuda``/``float16`` with an explicit non-negative integer
+      ``device_index`` -> that CUDA index (int).
 
     Technical executability is NOT certification: the platform still requires an
     exact ExecutionCertificate before either capability becomes runnable. Any
@@ -106,10 +108,17 @@ def _require_device_index(runtime_descriptor):
                 "local_cpu requires the canonical CPU descriptor (device_index is null).",
             )
         return "cpu"
+    if (executor, device_type, precision) == ("local_gpu", "cuda", "float16"):
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            raise PlatformError(
+                "EXECUTOR_UNAVAILABLE",
+                "local_gpu requires an explicit non-negative integer CUDA device index.",
+            )
+        return index
     raise PlatformError(
         "EXECUTOR_UNAVAILABLE",
         "ZoomSpec supports only the certified remote_gpu/cuda/float16 or the "
-        "technical local_cpu/cpu/float32 runtime descriptor.",
+        "technical local_cpu/cpu/float32 / local_gpu/cuda/float16 runtime descriptor.",
     )
 
 

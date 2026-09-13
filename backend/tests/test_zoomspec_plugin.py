@@ -581,6 +581,49 @@ def test_local_worker_cpu_descriptor_matches_factory_contract(monkeypatch, tmp_p
     assert captured["device"] == "cpu"
 
 
+def test_definition_declares_local_gpu_technical_capability():
+    caps = {
+        (c.executor, c.device_type, c.precision)
+        for c in ZOOMSPEC_FROZEN_DEFINITION.technical_execution_capabilities
+    }
+    assert ("local_gpu", "cuda", "float16") in caps
+    assert ("remote_gpu", "cuda", "float16") in caps
+    assert ("local_cpu", "cpu", "float32") in caps
+
+
+def _local_gpu_descriptor(index: int = 0) -> RuntimeDescriptor:
+    return RuntimeDescriptor("local_gpu", "cuda", index, "float16")
+
+
+@pytest.mark.parametrize("index", [0, 3])
+def test_build_runtime_accepts_local_gpu_descriptor(monkeypatch, tmp_path, index):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    captured = _patch_pipeline(monkeypatch)
+    zp.build_runtime(
+        assets=_factory_assets(tmp_path), runtime_descriptor=_local_gpu_descriptor(index),
+        output_label_space=_label_space(),
+    )
+    assert captured["device"] == index
+
+
+@pytest.mark.parametrize("bad", [
+    RuntimeDescriptor("local_gpu", "cpu", 0, "float16"),
+    RuntimeDescriptor("local_gpu", "cuda", None, "float16"),
+    RuntimeDescriptor("local_gpu", "cuda", -1, "float16"),
+    RuntimeDescriptor("local_gpu", "cuda", 0, "float32"),
+    RuntimeDescriptor("local_gpu", "cuda", True, "float16"),
+])
+def test_build_runtime_rejects_invalid_local_gpu_descriptor(monkeypatch, tmp_path, bad):
+    zp = importlib.import_module(PLUGIN_MODULE)
+    _patch_pipeline(monkeypatch)
+    with pytest.raises(PlatformError) as exc:
+        zp.build_runtime(
+            assets=_factory_assets(tmp_path), runtime_descriptor=bad,
+            output_label_space=_label_space(),
+        )
+    assert exc.value.code == "EXECUTOR_UNAVAILABLE"
+
+
 class _StubProvider:
     def __init__(self, name, runtime_ref, descriptor, *, calls):
         self.name = name
