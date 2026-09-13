@@ -16,9 +16,22 @@ BACKEND = REPO / "backend"
 LABELS = REPO / "label_spaces"
 PIPELINES = BACKEND / "app" / "pipelines"
 CERT_PATH = PIPELINES / "execution_certificates.json"
+SCRIPTS = Path(__file__).resolve().parent
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+import bhq3_memory_gate as memory_gate  # noqa: E402
+
+# Re-exported acceptance-only memory gate API (Amendment A1).
+MemoryMonitor = memory_gate.MemoryMonitor
+derive_memory = memory_gate.derive
+evaluate_memory_gate = memory_gate.evaluate
+read_memory_snapshot = memory_gate.read_snapshot
+run_guarded_subprocess = memory_gate.run_guarded_subprocess
+MEMORY_GATE_CONFIG = memory_gate.DEFAULT_CONFIG
 
 SPACENET_ROOT = Path("/root/autodl-tmp/SpaceNet_Dataset/advanced")
 DETECTOR = Path("/root/autodl-tmp/release/weights/yolo26n_ls_stft_aug_best.pt")
@@ -118,13 +131,27 @@ def cgroup_headroom_bytes() -> int:
 
 
 def require_headroom_gib(minimum_gib: int = MIN_HEADROOM_GIB) -> int:
-    """Mandatory pre-launch cgroup gate. STOP BHQ_3_BLOCKED_BY_CGROUP_MEMORY."""
+    """Raw-only compatibility helper (semantics unchanged).
+
+    Retained for callers that explicitly want the literal
+    ``memory.max - memory.current`` check. New acceptance admission uses
+    ``require_memory_admission()`` (Amendment A1 two-path gate).
+    """
     headroom = cgroup_headroom_bytes()
     if headroom < minimum_gib * GIB:
         raise SystemExit(
             f"BHQ_3_BLOCKED_BY_CGROUP_MEMORY: headroom={headroom} < {minimum_gib} GiB"
         )
     return headroom
+
+
+def require_memory_admission(config=None):
+    """Amendment A1 two-path admission gate.
+
+    Returns ``(result, snapshot)``; blocks with SystemExit if neither Path A nor
+    the guarded Path B admits. Always reads a fresh cgroup snapshot.
+    """
+    return memory_gate.require_memory_admission(config=config)
 
 
 def gpu_compute_apps() -> list:

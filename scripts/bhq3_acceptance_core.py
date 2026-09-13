@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import time
 from pathlib import Path
 
@@ -26,16 +27,48 @@ from bhq3_common import (
     LABELS,
     MANIFEST_PATH,
     ML_PYTHON,
+    MemoryMonitor,
     PLUGIN_VERSION,
     REPO,
     SPACENET_ROOT,
     WORK_ROOT,
+    derive_memory,
     ensure_work_root,
     gpu_compute_apps,
     proc_peak_rss_kb,
-    require_headroom_gib,
+    read_memory_snapshot,
+    require_memory_admission,
     write_json,
 )
+
+
+def _worker_cmdline(pid: int):
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\0") if p]
+    return parts or None
+
+
+def _terminate_verified_worker(pid: int, run_id: str) -> bool:
+    """SIGTERM the exact local inference worker only when identity is proven."""
+    argv = _worker_cmdline(pid)
+    if not argv:
+        return False
+    try:
+        index = argv.index("-m")
+    except ValueError:
+        return False
+    if not (len(argv) > index + 2
+            and argv[index + 1] == "app.analysis.local_inference_worker"
+            and argv[index + 2] == run_id):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 def _bootstrap_env_before_app_import() -> None:
@@ -180,8 +213,19 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
             providers, _temp_certificate_store(plugin_id)
         )
 
-    # Mandatory pre-launch cgroup gate.
-    headroom = require_headroom_gib()
+    # Amendment A1: two-path admission (Path A raw OR guarded Path B) + live monitor.
+    admission, baseline = require_memory_admission()
+    monitor = MemoryMonitor(baseline)
+    event_baseline = dict(baseline.get("events") or {})
+    baseline_derived = derive_memory(baseline)
+    baseline_pressure = baseline.get("pressure") or {}
+    psi_full_peak = float(baseline_pressure.get("full_avg10", 0.0) or 0.0)
+    psi_some_peak = float(baseline_pressure.get("some_avg10", 0.0) or 0.0)
+    max_committed_floor = baseline_derived["committed_floor"]
+    min_effective_headroom = baseline_derived["effective_headroom"]
+    max_anon = int((baseline.get("stat") or {}).get("anon", 0) or 0)
+    mem_samples = 0
+    abort_reason = None
 
     client = TestClient(app)
     payload = {
@@ -191,6 +235,7 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
         "model_release_id": "golden",
         "parameters": {},
     }
+    out = WORK_ROOT / f"bhq3_{mode}_evidence_{plugin_id}_stem{stem}.json"
     t0 = time.perf_counter()
     created = client.post("/api/analysis-runs", json=payload)
     if created.status_code != 201:
@@ -211,6 +256,29 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
         body = polled.json()
         status = body.get("status")
         worker_pid = body.get("worker_pid") or worker_pid
+
+        # Live cgroup monitor at the existing ~0.2 s cadence.
+        snapshot = read_memory_snapshot()
+        mem_samples += 1
+        try:
+            derived = derive_memory(snapshot)
+            max_committed_floor = max(max_committed_floor, derived["committed_floor"])
+            min_effective_headroom = min(min_effective_headroom, derived["effective_headroom"])
+        except Exception:  # noqa: BLE001 - monitor check reports malformed snapshots
+            derived = None
+        max_anon = max(max_anon, int((snapshot.get("stat") or {}).get("anon", 0) or 0))
+        pressure = snapshot.get("pressure") or {}
+        psi_full_peak = max(psi_full_peak, float(pressure.get("full_avg10", 0.0) or 0.0))
+        psi_some_peak = max(psi_some_peak, float(pressure.get("some_avg10", 0.0) or 0.0))
+
+        reason = monitor.check(snapshot)
+        if reason:
+            abort_reason = reason
+            if worker_pid:
+                if not _terminate_verified_worker(int(worker_pid), run_id):
+                    abort_reason += " (worker PID identity unverified; not signalled)"
+            break
+
         if worker_pid:
             rss = proc_peak_rss_kb(int(worker_pid))
             if rss is not None:
@@ -223,10 +291,48 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
         time.sleep(0.2)
     wall = time.perf_counter() - t0
 
+    final_snapshot = read_memory_snapshot()
+    final_events = dict(final_snapshot.get("events") or {})
+    event_deltas = {
+        key: int(final_events.get(key, 0) or 0) - int(event_baseline.get(key, 0) or 0)
+        for key in ("max", "oom", "oom_kill", "high")
+    }
+    memory_gate_evidence = {
+        "mode": admission["mode"],
+        "reasons": admission["reasons"],
+        "pre_launch_derived": baseline_derived,
+        "pre_launch_snapshot": baseline,
+        "thresholds": admission["thresholds"],
+        "event_baseline": event_baseline,
+        "final_events": final_events,
+        "event_deltas": event_deltas,
+        "samples": mem_samples,
+        "max_committed_floor": max_committed_floor,
+        "min_effective_headroom": min_effective_headroom,
+        "max_anon": max_anon,
+        "psi_full_peak_avg10": psi_full_peak,
+        "psi_some_peak_avg10": psi_some_peak,
+        "abort_reason": abort_reason,
+    }
+
+    if abort_reason is not None:
+        write_json(out, {
+            "mode": mode, "plugin_id": plugin_id, "stem": stem, "run_id": run_id,
+            "status": status, "memory_gate": memory_gate_evidence,
+        })
+        raise SystemExit(f"BHQ_3_BLOCKED_BY_CGROUP_MEMORY: {abort_reason} (run {run_id})")
+
     if status != "completed":
         raise SystemExit(
             f"BHQ_3_BLOCKED_BY_REAL_LOCAL_GPU_ACCEPTANCE_FAILED: run {run_id} status={status}"
         )
+
+    for key in ("max", "oom", "oom_kill"):
+        if event_deltas.get(key, 0) > 0:
+            raise SystemExit(
+                f"BHQ_3_BLOCKED_BY_CGROUP_MEMORY: post-case {key} delta "
+                f"{event_deltas[key]} > 0 (run {run_id})"
+            )
 
     detections = _detections(app, run_id)
     histogram: dict[str, int] = {}
@@ -241,7 +347,6 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
         run_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
     body = client.get(f"/api/analysis-runs/{run_id}").json()
-    descriptor = (body.get("execution_metadata_json") or {}) if isinstance(body.get("execution_metadata_json"), dict) else {}
     evidence = {
         "mode": mode,
         "plugin_id": plugin_id,
@@ -253,7 +358,7 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
         "executor": body.get("executor"),
         "worker_pid": worker_pid,
         "wall_time_s": wall,
-        "cgroup_headroom_bytes_before_launch": headroom,
+        "memory_gate": memory_gate_evidence,
         "peak_worker_rss_kb": max_rss_kb if max_rss_kb is not None else "unavailable",
         "peak_gpu_process_mib": max_gpu_mib if max_gpu_mib is not None else "unavailable",
         "detection_count": len(detections),
@@ -261,7 +366,6 @@ def run_case(plugin_id: str, stem: str, mode: str, *, inject_temp_cert: bool) ->
         "run_metadata": run_metadata,
         "artifact_workspace": str(workspace),
     }
-    out = WORK_ROOT / f"bhq3_{mode}_evidence_{plugin_id}_stem{stem}.json"
     write_json(out, evidence)
     print(json.dumps({k: evidence[k] for k in (
         "mode", "plugin_id", "stem", "run_id", "status", "executor",

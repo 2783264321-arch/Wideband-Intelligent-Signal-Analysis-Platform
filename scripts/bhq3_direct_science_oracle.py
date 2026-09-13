@@ -74,35 +74,65 @@ def run_zoomspec(stem: str, workspace: Path) -> dict:
     return {"plugin": "zoomspec", "stem": stem, "wall_time_s": wall, **_serialize(out)}
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--plugin", choices=["cpn", "zoomspec"], required=True)
-    parser.add_argument("--stem", required=True)
-    parser.add_argument("--out", required=True)
-    args = parser.parse_args(argv)
-
+def _run_child(plugin: str, stem: str, out_path: Path) -> int:
+    """Child: run exactly the frozen science and write the result JSON."""
     common.ensure_work_root()
-    common.require_headroom_gib()
-    workspace = common.WORK_ROOT / "oracle" / f"{args.plugin}_stem{args.stem}"
+    workspace = common.WORK_ROOT / "oracle" / f"{plugin}_stem{stem}"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    plugin_id = "cpn_bandwidth_tier" if args.plugin == "cpn" else "zoomspec_yolo26n_aug_combined_frn_v3"
+    plugin_id = "cpn_bandwidth_tier" if plugin == "cpn" else "zoomspec_yolo26n_aug_combined_frn_v3"
     result = {
-        "plugin": args.plugin,
-        "stem": args.stem,
+        "plugin": plugin,
+        "stem": stem,
         "assets": common.verify_assets(plugin_id),
     }
-    if args.plugin == "cpn":
-        result.update(run_cpn(args.stem, workspace))
+    if plugin == "cpn":
+        result.update(run_cpn(stem, workspace))
     else:
-        result.update(run_zoomspec(args.stem, workspace))
+        result.update(run_zoomspec(stem, workspace))
 
-    common.write_json(Path(args.out), result)
+    common.write_json(out_path, result)
     print(json.dumps({
         "plugin": result["plugin"], "stem": result["stem"],
         "detection_count": len(result["detections"]),
         "run_metadata": result["run_metadata"],
         "wall_time_s": round(result["wall_time_s"], 3),
+    }, indent=2))
+    return 0
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--plugin", choices=["cpn", "zoomspec"], required=True)
+    parser.add_argument("--stem", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--child", action="store_true", default=False,
+                        help="internal: run exactly one science case (no admission/guard)")
+    args = parser.parse_args(argv)
+
+    if args.child:
+        return _run_child(args.plugin, args.stem, Path(args.out))
+
+    # Controller: two-path admission + live cgroup guard around ONE science child.
+    common.ensure_work_root()
+    child_argv = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--child", "--plugin", args.plugin, "--stem", args.stem, "--out", args.out,
+    ]
+    outcome = common.run_guarded_subprocess(child_argv)
+    if outcome["abort_reason"]:
+        raise SystemExit("BHQ_3_BLOCKED_BY_CGROUP_MEMORY: " + outcome["abort_reason"])
+    if outcome["returncode"] != 0:
+        raise SystemExit(f"BHQ_3 oracle child failed rc={outcome['returncode']}")
+
+    result = json.loads(Path(args.out).read_text(encoding="utf-8"))
+    print(json.dumps({
+        "plugin": result["plugin"], "stem": result["stem"],
+        "detection_count": len(result["detections"]),
+        "run_metadata": result["run_metadata"],
+        "wall_time_s": round(result["wall_time_s"], 3),
+        "memory_gate_mode": outcome["gate"]["mode"],
+        "memory_gate_samples": outcome["samples"],
     }, indent=2))
     return 0
 
