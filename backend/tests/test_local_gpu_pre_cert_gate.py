@@ -65,8 +65,12 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _production_store() -> ExecutionCertificateStore:
-    return ExecutionCertificateStore(load_execution_certificates(CERT_PATH))
+def _pre_cert_store() -> ExecutionCertificateStore:
+    """Pre-certificate gate store: production certs with any local_gpu certificate
+    removed, so the 'capability + provider but no certificate' property stays
+    testable independently of whether local_gpu has since been certified."""
+    certs = [c for c in load_execution_certificates(CERT_PATH) if c.executor != "local_gpu"]
+    return ExecutionCertificateStore(certs)
 
 
 def _release_store() -> ModelReleaseStore:
@@ -78,12 +82,19 @@ def _release_store() -> ModelReleaseStore:
 def _registry(settings: Settings) -> ExecutorRegistry:
     providers = dict(build_local_providers(settings))
     assert "local_gpu" in providers, "local_gpu provider must be configured for this gate"
-    return ExecutorRegistry(providers, _production_store())
+    return ExecutorRegistry(providers, _pre_cert_store())
 
 
-def test_no_local_gpu_certificate_exists_in_production_store():
-    certs = load_execution_certificates(CERT_PATH)
-    assert [c for c in certs if c.executor == "local_gpu"] == []
+def test_pre_cert_store_excludes_local_gpu():
+    assert _pre_cert_store().is_certified(
+        plugin_id="cpn_bandwidth_tier",
+        plugin_version="1.0.0",
+        model_release_id="golden",
+        executor="local_gpu",
+        device_type="cuda",
+        precision="float16",
+        runtime_ref=GPU_REF,
+    ) is False
 
 
 @pytest.mark.parametrize("plugin_id,version", PLUGINS)
