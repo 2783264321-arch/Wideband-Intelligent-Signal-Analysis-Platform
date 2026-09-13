@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -22,6 +23,8 @@ from app.analysis.router import router as analysis_router
 from app.benchmarks.job_manager import LocalBenchmarkJobManager
 from app.benchmarks.router import router as benchmarks_router
 from app.benchmarks.service import mark_stale_running_evaluations_interrupted
+from app.dataset_experiments import recovery as dataset_experiment_recovery
+from app.dataset_experiments.job_manager import DatasetExperimentJobManager
 from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
@@ -127,6 +130,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     run_additive_migrations(app.state.database.engine)
     _wire_remote_lifecycle(app, settings)
     app.state.executor_registry = _build_executor_registry(app, settings)
+    startup_recovery_cutoff = datetime.now(timezone.utc)
+
     with app.state.database.session_factory() as recovery_session:
         from app.remote_execution.recovery import (
             coordinate_orphaned_remote_runs,
@@ -142,6 +147,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 remote_config_available=True,
                 seen_run_ids=set(),
             )
+        dataset_experiment_recovery.recover_dataset_experiments(
+            recovery_session,
+            job_manager=DatasetExperimentJobManager(settings),
+            registry=app.state.pipeline_registry,
+            model_release_store=app.state.model_release_store,
+            executor_registry=app.state.executor_registry,
+            startup_recovery_cutoff=startup_recovery_cutoff,
+        )
 
     app.add_middleware(
         CORSMiddleware,
