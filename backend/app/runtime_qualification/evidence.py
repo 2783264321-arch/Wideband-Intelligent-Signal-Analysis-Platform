@@ -22,6 +22,7 @@ EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_FILENAME = "evidence.json"
 
 _EXECUTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 _PAYLOAD_FIELDS = (
     "schema_version",
@@ -140,6 +141,11 @@ def write_evidence(data_root: Path, evidence: QualificationEvidence) -> Path:
         raise _invalid("Evidence must contain at least one qualification result.")
     if evidence.passed is not validated_passed(evidence.results):
         raise _invalid("Evidence 'passed' disagrees with its results.")
+    if evidence.asset_manifest_sha256 is not None and (
+        not isinstance(evidence.asset_manifest_sha256, str)
+        or _SHA256_RE.fullmatch(evidence.asset_manifest_sha256) is None
+    ):
+        raise _invalid("asset_manifest_sha256 must be null or a 64-character lowercase SHA256.")
     directory = evidence_directory(
         data_root, executor=evidence.executor, runtime_ref=evidence.runtime_ref
     )
@@ -205,6 +211,13 @@ def _reconstruct(payload: dict) -> QualificationEvidence:
     runtime_descriptor = payload["runtime_descriptor"]
     if not isinstance(runtime_descriptor, dict):
         raise _invalid("runtime_descriptor must be an object.")
+
+    asset_manifest_sha256 = payload["asset_manifest_sha256"]
+    if asset_manifest_sha256 is not None and (
+        not isinstance(asset_manifest_sha256, str)
+        or _SHA256_RE.fullmatch(asset_manifest_sha256) is None
+    ):
+        raise _invalid("asset_manifest_sha256 must be null or a 64-character lowercase SHA256.")
 
     raw_results = payload["results"]
     if not isinstance(raw_results, list):

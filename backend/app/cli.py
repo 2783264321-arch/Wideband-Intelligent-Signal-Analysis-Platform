@@ -105,31 +105,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _make_identity_resolver(repo_refs: frozenset[str]):
+def _make_identity_resolver(repo_provenance: frozenset[tuple[str, str]]):
     """Derive and compare each provider's identity against the interpreter material.
 
-    Never rewrites ``WSP_LOCAL_*_RUNTIME_REF``; never pattern-matches the ref shape
-    to decide ``legacy_opaque``.
+    ``legacy_opaque`` is provenance-based, keyed by ``(executor, runtime_ref)``, and
+    is only ever assigned to an existing repo-default identity that has no supported
+    A3 derivation scheme. ``local_gpu`` always uses ``bhq3_gpu_v1`` and is never
+    ``legacy_opaque`` merely because its ref appears in repo defaults. The operator
+    ``runtime_family`` is the family authority, never the family embedded in the ref.
     """
 
-    def resolver(spec, settings):
-        configured = spec.runtime_ref
-        if configured is None:
-            return (None, None, spec.identity_scheme, "not_configured")
-        if configured in repo_refs:
-            # Existing repo-default identity with platform certificate provenance
-            # and no new A3 derivation: provenance-based, never string-based.
-            return (configured, None, identity_module.LEGACY_OPAQUE, "legacy_opaque")
-        scheme = (
-            identity_module.BHQ3_GPU_V1
-            if spec.executor == "local_gpu"
-            else identity_module.LOCAL_CPU_V1
-        )
-        parsed = identity_module.parse_local_runtime_ref(configured)
-        if parsed is None:
-            return (configured, None, scheme, "mismatch")
-        family, kind = parsed
-        python_path = getattr(settings, f"{spec.executor}_python_path", None)
+    def _derive(configured, scheme, settings, python_attr, family, kind):
+        python_path = getattr(settings, python_attr, None)
         try:
             material = identity_module.collect_identity_material(python_path)
             generation = identity_module.derive_generation_for_scheme(scheme=scheme, material=material)
@@ -138,32 +125,50 @@ def _make_identity_resolver(repo_refs: frozenset[str]):
         derived = identity_module.derive_local_runtime_ref(family=family, kind=kind, generation=generation)
         return (configured, derived, scheme, "match" if derived == configured else "mismatch")
 
+    def resolver(spec, settings):
+        configured = spec.runtime_ref
+        if configured is None:
+            return (None, None, spec.identity_scheme, "not_configured")
+        parsed = identity_module.parse_local_runtime_ref(configured)
+
+        if spec.executor == "local_gpu":
+            if parsed is None:
+                return (configured, None, identity_module.BHQ3_GPU_V1, "mismatch")
+            family, kind = parsed
+            return _derive(configured, identity_module.BHQ3_GPU_V1, settings, "local_gpu_python_path", family, kind)
+
+        if spec.executor != "local_cpu":
+            return (configured, None, identity_module.UNAVAILABLE, "unavailable")
+
+        if (spec.executor, configured) in repo_provenance:
+            return (configured, None, identity_module.LEGACY_OPAQUE, "legacy_opaque")
+
+        if settings.runtime_family is None:
+            return (configured, None, identity_module.LOCAL_CPU_V1, "unavailable")
+        if parsed is None:
+            return (configured, None, identity_module.LOCAL_CPU_V1, "mismatch")
+        family, _kind = parsed
+        if family != settings.runtime_family:
+            return (configured, None, identity_module.LOCAL_CPU_V1, "mismatch")
+        return _derive(
+            configured, identity_module.LOCAL_CPU_V1, settings, "local_cpu_python_path", settings.runtime_family, "cpu"
+        )
+
     return resolver
 
 
 def _cmd_runtime_doctor(ctx: CliContext, out) -> int:
-    repo_refs = frozenset(
-        certificate.runtime_ref for certificate in load_execution_certificates(ctx.repo_certificate_path)
+    repo_provenance = frozenset(
+        (certificate.executor, certificate.runtime_ref)
+        for certificate in load_execution_certificates(ctx.repo_certificate_path)
     )
-
-    def scheme_for(executor: str, runtime_ref: str) -> str:
-        return identity_module.resolve_identity_scheme(
-            executor=executor,
-            runtime_ref=runtime_ref,
-            qualification_context=None,
-            repo_default_runtime_refs=repo_refs,
-            material_available=True,
-        )
-
-    specs = doctor_module.build_provider_specs(
-        ctx.settings, _providers_of(ctx.executor_registry), scheme_for=scheme_for
-    )
+    specs = doctor_module.build_provider_specs(ctx.settings, _providers_of(ctx.executor_registry))
     report = doctor_module.build_runtime_doctor_report(
         settings=ctx.settings,
         provider_specs=specs,
         interpreter_probe=doctor_module.SubprocessInterpreterProbe(),
         gpu_probe=doctor_module.NvidiaSmiGpuProbe(),
-        identity_resolver=_make_identity_resolver(repo_refs),
+        identity_resolver=_make_identity_resolver(repo_provenance),
     )
     print(json.dumps(report.to_operator_json(), indent=2), file=out)
     return 0
@@ -179,6 +184,7 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
             args.plugin, definition.plugin_version, args.model_release
         )
         model_release_id: str | None = resolved.release.model_release_id
+        asset_manifest_sha256: str | None = resolved.manifest.asset_manifest_sha256
     else:
         if args.model_release is not None:
             raise PlatformError(
@@ -186,6 +192,7 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
                 "Release-less plugin must not carry a model release identity.",
             )
         model_release_id = None
+        asset_manifest_sha256 = None
 
     provider = _providers_of(ctx.executor_registry).get(args.executor)
     if provider is None:
@@ -214,7 +221,7 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
     else:
         runner = select_runner(executor=args.executor, target_probe=None)
 
-    evidence = run_qualification(target=target, runner=runner)
+    evidence = run_qualification(target=target, runner=runner, asset_manifest_sha256=asset_manifest_sha256)
     path = write_evidence(ctx.data_root, evidence)
     print(
         json.dumps(

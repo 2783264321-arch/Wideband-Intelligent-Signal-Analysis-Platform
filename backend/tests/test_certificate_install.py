@@ -327,6 +327,52 @@ def test_restart_semantics_in_memory_registry_unchanged(tmp_path: Path) -> None:
     assert fresh.certified_capability(definition, None, "local_cpu") is not None
 
 
+def test_live_authority_rejects_miswired_provider(tmp_path: Path) -> None:
+    definition = _definition()
+
+    # Case A: registry key/name = local_cpu but descriptor.executor = local_gpu.
+    from dataclasses import replace as dc_replace
+
+    bad = _Provider(runtime_ref=_runtime_ref())
+    original = bad.runtime_descriptor
+    bad.runtime_descriptor = lambda: dc_replace(original(), executor="local_gpu")
+    with pytest.raises(PlatformError):
+        _authority(definition, bad, tmp_path)
+
+    # Case B: registry key = local_cpu but provider.name = local_gpu.
+    wrong_name = _Provider(runtime_ref=_runtime_ref(), name="local_gpu")
+    with pytest.raises(PlatformError):
+        _authority(definition, wrong_name, tmp_path)
+
+    # Case C: exact identity preserved.
+    assert _authority(definition, _Provider(runtime_ref=_runtime_ref()), tmp_path).provider_present is True
+
+
+def test_release_bound_manifest_sha_must_freeze_and_match(tmp_path: Path) -> None:
+    definition = _definition()
+    provider = _Provider(runtime_ref=_runtime_ref())
+    authority = _authority(definition, provider, tmp_path)
+    base = _evidence(provider, definition, Settings(runtime_family="autodl_primary"))
+
+    release_authority = replace(authority, model_release_id="golden", asset_manifest_sha256="c" * 64)
+    matching = replace(base, model_release_id="golden", asset_manifest_sha256="c" * 64, evidence_sha256="")
+    validate_evidence_for_install(evidence=matching, authority=release_authority)
+
+    stale = replace(base, model_release_id="golden", asset_manifest_sha256="b" * 64, evidence_sha256="")
+    with pytest.raises(PlatformError):
+        validate_evidence_for_install(evidence=stale, authority=release_authority)
+
+
+def test_release_less_evidence_has_no_manifest_sha(tmp_path: Path) -> None:
+    definition = _definition()
+    provider = _Provider(runtime_ref=_runtime_ref())
+    authority = _authority(definition, provider, tmp_path)
+    evidence = _evidence(provider, definition, Settings(runtime_family="autodl_primary"))
+    assert evidence.asset_manifest_sha256 is None
+    assert authority.asset_manifest_sha256 is None
+    validate_evidence_for_install(evidence=evidence, authority=authority)
+
+
 def test_operator_path_under_data_root_and_no_secrets(tmp_path: Path) -> None:
     path = operator_certificate_path(tmp_path)
     assert path == tmp_path / "runtime_certificates.json"

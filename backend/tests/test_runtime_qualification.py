@@ -277,6 +277,46 @@ def test_production_probe_enforces_every_check() -> None:
         good(_target(provider, plugin_version="9.9"))
 
 
+def test_production_probe_requires_runtime_family_and_cpu_kind() -> None:
+    definition = _definition()
+    provider = _Provider(runtime_ref=_runtime_ref())
+    good = _probe(definition, provider, _ReleaseStore())
+
+    # runtime_family missing -> fail closed even for an otherwise-valid target.
+    with pytest.raises(PlatformError):
+        _probe(definition, provider, _ReleaseStore(), settings=Settings(runtime_family=None))(_target(provider))
+
+    generation = derive_generation_for_scheme(scheme=LOCAL_CPU_V1, material=_CPU_MATERIAL)
+
+    # kind must be exactly "cpu" for a local_cpu qualification.
+    gpu_ref = derive_local_runtime_ref(family="autodl_primary", kind="gpu", generation=generation)
+    gpu_provider = _Provider(runtime_ref=gpu_ref)
+    with pytest.raises(PlatformError):
+        _probe(definition, gpu_provider, _ReleaseStore())(_target(gpu_provider))
+
+    # family must equal the operator-owned runtime_family.
+    other_ref = derive_local_runtime_ref(family="other_family", kind="cpu", generation=generation)
+    other_provider = _Provider(runtime_ref=other_ref)
+    with pytest.raises(PlatformError):
+        _probe(definition, other_provider, _ReleaseStore())(_target(other_provider))
+
+    # valid family + kind=cpu preserved.
+    good(_target(provider))
+
+
+def test_production_probe_requires_exact_descriptor_executor() -> None:
+    from dataclasses import replace as dc_replace
+
+    definition = _definition()
+    provider = _Provider(runtime_ref=_runtime_ref())
+    miswired = _Provider(runtime_ref=_runtime_ref())
+    original = miswired.runtime_descriptor
+    miswired.runtime_descriptor = lambda: dc_replace(original(), executor="local_gpu")
+    with pytest.raises(PlatformError):
+        _probe(definition, miswired, _ReleaseStore())(_target(miswired))
+    _probe(definition, provider, _ReleaseStore())(_target(provider))
+
+
 def test_production_probe_release_semantics(tmp_path: Path) -> None:
     asset_file = tmp_path / "model.bin"
     asset_file.write_bytes(b"payload")

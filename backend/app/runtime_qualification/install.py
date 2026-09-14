@@ -45,6 +45,7 @@ class LiveAuthority:
     plugin_id: str
     plugin_version: str
     model_release_id: str | None
+    asset_manifest_sha256: str | None
     executor: str
     runtime_ref: str
     runtime_descriptor: dict
@@ -100,6 +101,7 @@ def resolve_live_authority(
     if getattr(definition, "model_release_required", False):
         resolved = model_release_store.resolve(plugin_id, plugin_version, requested_model_release_id)
         model_release_id: str | None = resolved.release.model_release_id
+        asset_manifest_sha256: str | None = resolved.manifest.asset_manifest_sha256
     else:
         if requested_model_release_id is not None:
             raise PlatformError(
@@ -107,18 +109,26 @@ def resolve_live_authority(
                 "Release-less plugin must not carry a model release identity.",
             )
         model_release_id = None
+        asset_manifest_sha256 = None
 
     provider = _providers_of(executor_registry).get(executor)
     provider_present = provider is not None
-    runtime_ref = provider.runtime_ref if provider is not None else ""
-    runtime_descriptor = (
-        provider.runtime_descriptor().to_metadata() if provider is not None else {}
-    )
-
+    runtime_ref = ""
+    runtime_descriptor: dict = {}
     technical_capability: ExecutionCapability | None = None
     if provider is not None:
         descriptor = provider.runtime_descriptor()
-        wanted = ExecutionCapability(descriptor.executor, descriptor.device_type, descriptor.precision)
+        if (
+            getattr(provider, "name", None) != executor
+            or descriptor is None
+            or descriptor.executor != executor
+        ):
+            raise _not_certified(
+                "Provider executor identity does not match the requested executor."
+            )
+        runtime_ref = provider.runtime_ref
+        runtime_descriptor = descriptor.to_metadata()
+        wanted = ExecutionCapability(executor, descriptor.device_type, descriptor.precision)
         for capability in definition.technical_execution_capabilities:
             if capability.key() == wanted.key():
                 technical_capability = capability
@@ -129,6 +139,7 @@ def resolve_live_authority(
         plugin_id=plugin_id,
         plugin_version=plugin_version,
         model_release_id=model_release_id,
+        asset_manifest_sha256=asset_manifest_sha256,
         executor=executor,
         runtime_ref=runtime_ref,
         runtime_descriptor=runtime_descriptor,
@@ -171,6 +182,8 @@ def validate_evidence_for_install(
         raise _invalid("Evidence plugin/version does not match the current definition.")
     if evidence.model_release_id != authority.model_release_id:
         raise _invalid("Evidence model release does not match the current deployment.")
+    if evidence.asset_manifest_sha256 != authority.asset_manifest_sha256:
+        raise _invalid("Evidence asset manifest does not match the current deployment.")
     if evidence.executor != authority.executor:
         raise _invalid("Evidence executor does not match the current provider.")
     if evidence.runtime_ref != authority.runtime_ref:

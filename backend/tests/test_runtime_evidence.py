@@ -154,6 +154,20 @@ def test_path_safety_rejects_unsafe_executor(tmp_path: Path) -> None:
         assert exc.value.code == "QUALIFICATION_EVIDENCE_INVALID"
 
 
+def test_asset_manifest_sha_must_be_hex_or_none(tmp_path: Path) -> None:
+    directory = evidence_directory(tmp_path, executor=_EXECUTOR, runtime_ref=_RUNTIME_REF)
+    directory.mkdir(parents=True)
+    payload = evidence_payload(_evidence())
+    payload["asset_manifest_sha256"] = "not-a-sha"
+    payload["evidence_sha256"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    (directory / EVIDENCE_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(PlatformError) as exc:
+        load_evidence_dir(directory)
+    assert exc.value.code == "QUALIFICATION_EVIDENCE_INVALID"
+
+
 def test_schema_has_no_secrets(tmp_path: Path) -> None:
     payload = evidence_payload(_evidence())
     forbidden = {"private_key", "ssh_key", "password", "token", "secret", "credential"}

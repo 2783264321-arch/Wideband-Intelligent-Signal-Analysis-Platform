@@ -108,6 +108,23 @@ def _control_plane_ref() -> str:
     return derive_local_runtime_ref(family="autodl_primary", kind="cpu", generation=generation)
 
 
+_LEGACY_CPU_REF = "local:autodl_primary:cpu:a1237f8faae7"
+_SEALED_GPU_REF = "local:autodl_primary:gpu:7b958347b5af"
+
+
+def _cert_dict(executor: str, runtime_ref: str, device_type: str, precision: str) -> dict:
+    return {
+        "plugin_id": "dummy",
+        "plugin_version": "1.0",
+        "model_release_id": None,
+        "executor": executor,
+        "device_type": device_type,
+        "precision": precision,
+        "runtime_ref": runtime_ref,
+        "evidence_ref": "repo-default",
+    }
+
+
 def _context(tmp_path: Path, definition: PipelineDefinition, providers, release_store=None) -> CliContext:
     repo_path = tmp_path / "repo_certificates.json"
     repo_path.write_text(json.dumps({"certificates": []}), encoding="utf-8")
@@ -185,6 +202,7 @@ def test_qualify_release_required_records_resolved_default(tmp_path: Path, capsy
     evidence_dir = next((tmp_path / "qualification" / "remote_gpu").iterdir())
     evidence = load_evidence_dir(evidence_dir)
     assert evidence.model_release_id == "golden"
+    assert evidence.asset_manifest_sha256 == "a" * 64
     assert evidence.passed is False
 
 
@@ -275,3 +293,46 @@ def test_certificate_install_corrupt_evidence_has_no_traceback(tmp_path: Path, c
     err = capsys.readouterr().err
     assert "QUALIFICATION_EVIDENCE_INVALID" in err
     assert "Traceback" not in err
+
+
+def _repo_with(context, certificates) -> None:
+    context.repo_certificate_path.write_text(
+        json.dumps({"certificates": list(certificates)}), encoding="utf-8"
+    )
+
+
+def test_runtime_doctor_provenance_marks_legacy_cpu_not_gpu(tmp_path: Path, capsys) -> None:
+    cpu = _Provider(name="local_cpu", runtime_ref=_LEGACY_CPU_REF, device_type="cpu", precision="float32")
+    gpu = _Provider(name="local_gpu", runtime_ref=_SEALED_GPU_REF, device_type="cuda", precision="float16")
+    context = _context(tmp_path, _definition(), {"local_cpu": cpu, "local_gpu": gpu})
+    _repo_with(context, [
+        _cert_dict("local_cpu", _LEGACY_CPU_REF, "cpu", "float32"),
+        _cert_dict("local_gpu", _SEALED_GPU_REF, "cuda", "float16"),
+    ])
+    assert _run(["runtime", "doctor"], context, capsys) == 0
+    body = json.loads(capsys.readouterr().out)
+    by = {p["executor"]: p for p in body["providers"]}
+    assert by["local_cpu"]["identity_scheme"] == "legacy_opaque"
+    assert by["local_cpu"]["identity_status"] == "legacy_opaque"
+    assert by["local_gpu"]["identity_scheme"] == "bhq3_gpu_v1"
+    assert by["local_gpu"]["identity_status"] != "legacy_opaque"
+
+
+def test_runtime_doctor_derivable_cpu_requires_runtime_family(tmp_path: Path, capsys) -> None:
+    provider = _Provider(name="local_cpu", runtime_ref=_control_plane_ref(), device_type="cpu", precision="float32")
+    context = _context(tmp_path, _definition(), {"local_cpu": provider})
+    context.settings = Settings(runtime_family=None, local_cpu_python_path=Path(sys.executable), data_root=tmp_path)
+    assert _run(["runtime", "doctor"], context, capsys) == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["providers"][0]["identity_status"] == "unavailable"
+
+
+def test_runtime_doctor_family_mismatch(tmp_path: Path, capsys) -> None:
+    material = collect_identity_material(Path(sys.executable))
+    generation = derive_generation_for_scheme(scheme=LOCAL_CPU_V1, material=material)
+    other_ref = derive_local_runtime_ref(family="other_family", kind="cpu", generation=generation)
+    provider = _Provider(name="local_cpu", runtime_ref=other_ref, device_type="cpu", precision="float32")
+    context = _context(tmp_path, _definition(), {"local_cpu": provider})
+    assert _run(["runtime", "doctor"], context, capsys) == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["providers"][0]["identity_status"] == "mismatch"

@@ -100,7 +100,9 @@ class LocalCpuTargetProbe:
         if provider.runtime_ref != target.runtime_ref:
             raise _probe_error("Current provider runtime_ref does not match the qualification target.")
         descriptor = provider.runtime_descriptor()
-        if descriptor is None or descriptor.to_metadata() != target.runtime_descriptor:
+        if descriptor is None or descriptor.executor != "local_cpu":
+            raise _probe_error("Provider runtime descriptor executor is not local_cpu.")
+        if descriptor.to_metadata() != target.runtime_descriptor:
             raise _probe_error("Provider runtime descriptor does not match the qualification target.")
 
         capability = ExecutionCapability(
@@ -110,17 +112,21 @@ class LocalCpuTargetProbe:
         if capability.key() not in declared:
             raise _probe_error("Definition declares no exact technical execution capability.")
 
+        if self._settings.runtime_family is None:
+            raise _probe_error("runtime_family is not configured for a new local_cpu qualification.")
         parsed = parse_local_runtime_ref(target.runtime_ref)
         if parsed is None:
             raise _probe_error("runtime_ref is not a well-formed local runtime reference.")
         family, kind = parsed
-        if self._settings.runtime_family is not None and family != self._settings.runtime_family:
+        if kind != "cpu":
+            raise _probe_error("local_cpu qualification requires a cpu runtime kind.")
+        if family != self._settings.runtime_family:
             raise _probe_error("runtime_ref family does not match the configured runtime_family.")
         material = self._material()
         validate_runtime_ref_against_material(
             runtime_ref=target.runtime_ref,
-            family=family,
-            kind=kind,
+            family=self._settings.runtime_family,
+            kind="cpu",
             scheme=LOCAL_CPU_V1,
             material=material,
         )
