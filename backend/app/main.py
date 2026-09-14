@@ -26,6 +26,7 @@ from app.benchmarks.service import mark_stale_running_evaluations_interrupted
 from app.dataset_experiments import recovery as dataset_experiment_recovery
 from app.dataset_experiments.job_manager import DatasetExperimentJobManager
 from app.dataset_experiments.router import router as dataset_experiments_router
+from app.execution_selection.router import router as execution_selection_router
 from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
@@ -183,6 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(evaluation_router)
     app.include_router(benchmarks_router)
     app.include_router(dataset_experiments_router)
+    app.include_router(execution_selection_router)
 
     spectrogram_cache = settings.data_root / "cache" / "spectrograms"
     spectrogram_cache.mkdir(parents=True, exist_ok=True)
