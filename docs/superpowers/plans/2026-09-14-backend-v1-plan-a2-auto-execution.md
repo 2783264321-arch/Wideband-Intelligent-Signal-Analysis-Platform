@@ -6,7 +6,7 @@
 
 **Architecture:** A new torch-free `app/execution_selection/` package owns the policy. A pure module (`policy.py`) owns workload classification, deterministic ranking, and reason-code generation. A thin resolver (`resolver.py`) collects candidate facts (`technical` / `configured` / `certified` / `available`) by reusing `ExecutorRegistry` and existing availability seams, then calls the pure policy. Services (`AnalysisService`, `DatasetExperimentService`) supply facts and freeze the resolved exact executor; they never duplicate ranking logic. Auto resolves exactly once before persistence; after resolution the persisted executor is an exact executor (`local_cpu` / `local_gpu` / `remote_gpu`) and behaves identically to a manual selection (no runtime fallback, A1 recovery unchanged). Provenance is persisted metadata-only into existing JSON columns (no DB migration).
 
-**Tech Stack:** Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy 2, SQLite, pytest (control-plane venv is ML-free).
+**Tech Stack:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2, SQLite, pytest (control-plane venv is ML-free).
 
 **Spec:** `docs/superpowers/specs/2026-09-14-backend-v1-final-qualification-design.md`
 
@@ -18,9 +18,12 @@
 - **No plugin-id branches.** Production selection logic must never special-case an individual plugin (no per-plugin conditional anywhere). No learned scheduler, no cost optimizer, no opaque weighted score.
 - **No Linux/cgroup/proc/nvidia-smi dependency in production selection.** Core Auto imports must not reference `os`, `subprocess`, cgroup v2 paths, `/proc`, PSI, `nvidia-smi`, `scripts/bhq3_memory_gate.py`, `torch`, or `ultralytics`.
 - **No DB migration.** Provenance is metadata-only, persisted into existing JSON columns. Do not add schema columns; do not touch `parameters_json` (scientific).
+- **Live availability always required.** `runnable = technical ∧ configured ∧ certified ∧ live-available`. `configured` is NEVER an alias for `available`, for single-run AND DatasetExperiment Auto. A registered + certified `local_gpu` whose live CUDA probe fails MUST NOT be Auto-runnable.
+- **Public reason text is safe by construction.** The new Auto API never echoes raw provider/exception detail. Candidate reason messages come from a platform-owned projection keyed by `reason_code` (fixed safe text); unknown codes map to a generic bounded message. Selection `reason` is derived from the closed Auto reason-code set.
 - **A1 preserved.** `RUNTIME_DESCRIPTOR_INVALID` stays experiment-level; `FROZEN_AUTHORITY_ITEM_CODES` is unchanged; recovery/retry never re-resolve Auto.
 - **Do not modify** `feature/backend-v1-final-qualification`, `main`, `feature/v1-core`, `fix/a1-1-runtime-drift`.
 - Every production task is RED → GREEN. Every test command uses the existing control-plane venv on Windows.
+- **Windows full-suite differential gate (Task 8).** Because Windows has known pre-existing POSIX-only failures, A2 acceptance compares the candidate full-suite failure set against a FRESH baseline captured from exact `e372d21a9711333f906b68634f8bd20b35a9affd` in a separate read-only worktree. Gate: `candidate_new_failures = candidate_failure_set - base_failure_set` must be empty. Windows-only POSIX failures are never "fixed" by changing production code.
 
 ### Closed sets (authoritative)
 
@@ -82,15 +85,29 @@ Required concepts: `requested_execution_mode`, `resolved_executor`, `auto_reason
   - `manual`: `{"requested_execution_mode": "manual", "resolved_executor": "<executor>"}`.
   - `auto`: adds `"auto_reason_code"`, `"auto_reason"`, `"workload_class"`.
   - Public read model `analysis/schema.py::RemoteExecutionMetadataRead` (the public execution-metadata allowlist) is extended additively with `requested_execution_mode`, `auto_reason_code`, `auto_reason`, `workload_class` (all optional). `resolved_executor` is already the top-level `AnalysisRunRead.executor`.
-- **`DatasetExperiment`**: additive namespaced sub-object `auto_selection` inside the existing `dataset_experiments.runtime_descriptor_json` JSON column.
+- **`DatasetExperiment`**: additive namespaced sub-object `execution_selection` inside the existing `dataset_experiments.runtime_descriptor_json` JSON column. The namespace is `execution_selection` (the spec's earlier draft name is superseded) because BOTH manual and auto requests carry execution-selection provenance.
   - The descriptor's own keys (`executor`, `device_type`, `device_index`, `precision`, `environment_ref`, `environment_label`) remain the authoritative frozen execution identity.
-  - `RuntimeDescriptor.from_metadata(...)` reads only the known descriptor keys, so the extra `auto_selection` key is inert for A1 frozen-authority comparison (`to_metadata()` equality is unaffected).
+  - Internal shape (auto example):
+    ```json
+    {
+      "executor": "local_cpu", "device_type": "cpu", "device_index": null,
+      "precision": "float32", "environment_ref": "...", "environment_label": "...",
+      "execution_selection": {
+        "requested_execution_mode": "auto", "resolved_executor": "local_cpu",
+        "auto_reason_code": "AUTO_LOCAL_CPU_PREFERRED", "auto_reason": "...",
+        "workload_class": "SMALL"
+      }
+    }
+    ```
+  - `RuntimeDescriptor.from_metadata(...)` reads only the known descriptor keys, so the extra `execution_selection` key is inert for A1 frozen-authority comparison (`to_metadata()` equality is unaffected).
   - `parameters_json` is never touched.
+  - **Public readback must not parse the raw namespace.** `DatasetExperimentRead` is extended additively with safe projected fields `requested_execution_mode`, `auto_reason_code`, `auto_reason`, `workload_class` (all optional), derived by `DatasetExperimentService._to_read()` from the internal namespace. Historical experiments with no execution-selection metadata read back as `None` (still readable). All NEW Auto UI/readback uses this safe projection.
+  - The existing raw `runtime_descriptor_json` field on `DatasetExperimentRead` is PRE-EXISTING API debt (it exposes `environment_ref`); A2 does not redesign or remove it (removal would be breaking). It is recorded here for later Backend V1 API-freeze cleanup.
 - **Deferred alternative (documented, not implemented):** if a later API-contract freeze requires a dedicated column, add a nullable additive JSON column via the existing `run_additive_migrations` seam. A2 does not do this.
 
 ### Public information boundary
 
-The new Auto API returns only booleans (`technical`, `configured`, `certified`, `available`) and bounded reason fields (`reason_code`, `reason`, `reason_message`). It MUST NOT return `environment_ref`, interpreter/asset paths, SSH material, certificate internals/evidence, cgroup/PSI/`/proc` diagnostics, or host-private runtime paths.
+The new Auto API returns only booleans (`technical`, `configured`, `certified`, `available`) and bounded reason fields (`reason_code`, `reason`, `public_reason_message`), where the messages are platform-owned projections keyed by `reason_code`. It MUST NOT return raw provider `reason_message`, `environment_ref`, interpreter/asset paths, SSH material, certificate internals/evidence, cgroup/PSI/`/proc` diagnostics, or host-private runtime paths.
 
 ---
 
@@ -125,7 +142,10 @@ def classify_workload(*, duration_s: float | None, num_samples: int | None,
 def rank_for(workload_class: WorkloadClass) -> tuple[str, ...]: ...
 def select_executor(*, runnable: tuple[str, ...], workload_class: WorkloadClass,
                     recommended_execution: str | None) -> AutoDecision: ...
+def public_reason_message(reason_code: str | None) -> str: ...
 ```
+
+`public_reason_message` is the single platform-owned projection mapping a `reason_code` (closed set, plus the availability codes `EXECUTION_CAPABILITY_UNAVAILABLE`/`EXECUTION_NOT_CERTIFIED`/`INPUT_INCOMPATIBLE`/`REMOTE_EXECUTOR_UNAVAILABLE`/etc.) to a fixed, bounded, path/secret-free human string. Any unrecognized code returns the generic `"Executor is currently unavailable."`. It never echoes raw provider text.
 
 `resolver.py` public surface:
 
@@ -138,7 +158,7 @@ class ExecutionCandidate:
     certified: bool
     available: bool
     reason_code: str | None
-    reason_message: str | None
+    public_reason_message: str | None   # platform-owned safe projection, never raw provider text
 
 @dataclass(frozen=True)
 class ExecutionSelection:
@@ -149,19 +169,19 @@ class ExecutionSelection:
     workload_class: str
     candidates: tuple[ExecutionCandidate, ...]
 
-def collect_candidates(*, definition, model_release, recording, executor_registry
+def collect_candidates(*, definition, model_release, probe_recording, executor_registry
                        ) -> tuple[ExecutionCandidate, ...]: ...
-def resolve_auto_execution(*, definition, model_release, recording, executor_registry,
+def resolve_auto_execution(*, definition, model_release, probe_recording, executor_registry,
                            dataset_item_count: int | None = None) -> ExecutionSelection: ...
 ```
 
-Facts are derived by reusing existing seams only: `definition.technical_execution_capabilities`, `executor_registry.providers()`, `executor_registry.certified_capability(definition, model_release_id, executor)`, and (single-run scope only) `executor_registry.availability_for(definition, model_release, recording, executor)`. No new availability engine.
+Facts are derived by reusing existing seams only: `definition.technical_execution_capabilities`, `executor_registry.providers()`, `executor_registry.certified_capability(definition, model_release_id, executor)`, and `executor_registry.availability_for(definition, model_release, probe_recording, executor)`. No new availability engine.
 
-Scope semantics for `available`:
-- **Single-run scope (`recording` not None):** `available` = live `availability_for(...).available` (input + provider probe).
-- **Dataset scope (`recording` is None):** there is no single input; consistent with existing `DatasetExperimentService._validate_execution` (deployment identity only, never probes a recording), `available` is reported as `configured` (deployment-level). Runnable = `technical ∧ configured ∧ certified`. This mirrors the existing experiment-creation contract and is documented in the API response.
+`probe_recording` is always a real `RecordingModel` and `available` ALWAYS means real live availability:
+- **Single-run scope:** `probe_recording` is the requested Recording.
+- **Dataset scope:** `probe_recording` is the real Recording referenced by the smallest `manifest_order` manifest entry of the frozen dataset (deterministic). It permits normal input-compatibility and provider live-health evaluation. `dataset_item_count` (the frozen manifest `expected_recordings`) remains the dataset workload-size input. Auto still resolves ONCE; there is no per-item probing, no per-item Auto, and no executor change between items.
 
-Reason text (`reason`) is a bounded, human-readable, path/secret-free string derived from the selected `reason_code`.
+`reason_message` is NEVER carried raw. Each candidate's `public_reason_message` is `policy.public_reason_message(result.reason_code)`; the selection `reason` is `policy.public_reason_message(decision.reason_code)`. Both are bounded, path/secret-free, platform-owned strings.
 
 ---
 
@@ -175,7 +195,7 @@ Reason text (`reason`) is a bounded, human-readable, path/secret-free string der
 - Test: `backend/tests/test_execution_selection_policy.py`
 
 **Interfaces:**
-- `WorkloadClass`, `AutoDecision`, `AUTO_POLICY` constants, reason-code constants, `rank_for`, `classify_workload`, `select_executor` (exact signatures in the Module / type reference above).
+- `WorkloadClass`, `AutoDecision`, `AUTO_POLICY` constants, reason-code constants, `rank_for`, `classify_workload`, `select_executor`, `public_reason_message` (exact signatures in the Module / type reference above).
 
 - [ ] **Step 1: Write failing tests**
 
@@ -201,6 +221,7 @@ from app.execution_selection.policy import (
     GPU_PREFER_SAMPLES,
     WorkloadClass,
     classify_workload,
+    public_reason_message,
     select_executor,
 )
 
@@ -278,6 +299,13 @@ def test_unknown_ignores_recommended_when_not_runnable():
     assert decision.reason_code == AUTO_UNKNOWN_DETERMINISTIC_RANK
 
 
+def test_public_reason_message_is_platform_owned_and_generic_for_unknown():
+    assert public_reason_message(AUTO_LOCAL_GPU_PREFERRED)  # non-empty fixed safe text
+    assert public_reason_message("EXECUTION_NOT_CERTIFIED")  # non-empty fixed safe text
+    assert public_reason_message("SOME_UNKNOWN_CODE") == "Executor is currently unavailable."
+    assert public_reason_message(None) == "Executor is currently unavailable."
+
+
 def test_policy_module_has_no_linux_or_ml_dependency():
     importlib.import_module("app.execution_selection.policy")
     source = __import__("inspect").getsource(policy)
@@ -296,7 +324,7 @@ Expected RED reason: `ModuleNotFoundError: No module named 'app.execution_select
 
 - [ ] **Step 3: Minimal implementation**
 
-Create `backend/app/execution_selection/__init__.py` (empty) and `backend/app/execution_selection/policy.py` with exactly the constants, `WorkloadClass`, `AutoDecision`, `rank_for`, `classify_workload`, `select_executor` specified in the Module / type reference. Import only `dataclasses`, `enum`, `typing`. `select_executor` must return `AutoDecision(None, AUTO_NO_RUNNABLE_EXECUTOR, workload_class)` for an empty runnable set, `AUTO_ONLY_RUNNABLE_EXECUTOR` for exactly one, the class ranking for `SMALL`/`GPU_BENEFICIAL`, and the `UNKNOWN` branch (`recommended_execution` if runnable else `UNKNOWN` fallback rank).
+Create `backend/app/execution_selection/__init__.py` (empty) and `backend/app/execution_selection/policy.py` with exactly the constants, `WorkloadClass`, `AutoDecision`, `rank_for`, `classify_workload`, `select_executor`, and `public_reason_message` specified in the Module / type reference. Import only `dataclasses`, `enum`, `typing`. `select_executor` must return `AutoDecision(None, AUTO_NO_RUNNABLE_EXECUTOR, workload_class)` for an empty runnable set, `AUTO_ONLY_RUNNABLE_EXECUTOR` for exactly one, the class ranking for `SMALL`/`GPU_BENEFICIAL`, and the `UNKNOWN` branch (`recommended_execution` if runnable else `UNKNOWN` fallback rank). `public_reason_message(reason_code)` returns a fixed platform-owned safe string for known codes and the generic `"Executor is currently unavailable."` for any unknown/`None` code.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -324,7 +352,7 @@ git commit -m "feat: add portable auto execution selection policy"
 - Test: `backend/tests/test_execution_selection_resolver.py`
 
 **Interfaces:**
-- `ExecutionCandidate`, `ExecutionSelection`, `collect_candidates`, `resolve_auto_execution` (exact signatures in the Module / type reference).
+- `ExecutionCandidate` (with `public_reason_message`), `ExecutionSelection`, `collect_candidates(*, definition, model_release, probe_recording, executor_registry)`, `resolve_auto_execution(*, definition, model_release, probe_recording, executor_registry, dataset_item_count=None)` (exact signatures in the Module / type reference).
 - Reuses `ExecutorRegistry` from `app/remote_execution/runtime.py` and the shared `FakeProvider`/`FakeRegistry` from `backend/tests/executor_fixtures.py` plus the real `ExecutorRegistry` + `ExecutionCertificateStore` for certification coverage.
 
 - [ ] **Step 1: Write failing tests**
@@ -339,10 +367,21 @@ Create `backend/tests/test_execution_selection_resolver.py` covering:
 # 5. remote provider unavailable -> available False, reason_code "REMOTE_EXECUTOR_UNAVAILABLE"
 # 6. two/three runnable -> policy ranking applied, reason code from the selected executor
 # 7. zero runnable -> resolved_executor None, AUTO_NO_RUNNABLE_EXECUTOR
-# 8. dataset scope (recording None, dataset_item_count=8) -> GPU_BENEFICIAL, available == configured
+# 8. DATASET live-availability exclusion (Correction 1):
+#    probe_recording=<representative recording>, dataset_item_count=8,
+#    local_gpu configured + exact certificate, local_gpu provider live availability = False,
+#    local_cpu configured + certificate + live-available
+#    -> candidate local_gpu available=False and excluded from runnable
+#    -> workload_class == GPU_BENEFICIAL
+#    -> Auto selects the next valid executor per GPU_BENEFICIAL ranking (local_cpu when local_gpu is the only GPU)
+# 9. public reason projection (Correction 2):
+#    a malicious FakeProvider returns availability.reason_message containing BOTH
+#    "C:\\secret\\runtime\\python.exe" and "/root/private/model.pt";
+#    candidate.public_reason_message must equal policy.public_reason_message(reason_code)
+#    and contain neither path.
 ```
 
-Each test constructs a `PipelineDefinition` (with `technical_execution_capabilities` and `recommended_execution`), a `RecordingModel`-like stub, a `FakeProvider`/`FakeRegistry` or real `ExecutorRegistry`, then calls `collect_candidates(...)` / `resolve_auto_execution(...)` and asserts the `ExecutionCandidate` booleans and the `ExecutionSelection`.
+Each test constructs a `PipelineDefinition` (with `technical_execution_capabilities` and `recommended_execution`), a real `RecordingModel` (use `benchmark_fixture.add_recording` + `session`), a `FakeProvider`/`FakeRegistry` or real `ExecutorRegistry`, then calls `collect_candidates(...)` / `resolve_auto_execution(...)` and asserts the `ExecutionCandidate` booleans and the `ExecutionSelection`.
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -356,10 +395,9 @@ Expected RED reason: `ModuleNotFoundError: No module named 'app.execution_select
 
 Create `backend/app/execution_selection/resolver.py`:
 - Candidate universe = sorted union of `{cap.executor for cap in definition.technical_execution_capabilities}` and `set(executor_registry.providers())`.
-- Per candidate compute `technical`, `configured`, `certified = executor_registry.certified_capability(definition, model_release_id, executor) is not None`, and `available`:
-  - single-run scope (`recording is not None`): `executor_registry.availability_for(definition, model_release, recording, executor)` (reason fields taken from the result);
-  - dataset scope (`recording is None`): `available = configured` with a bounded deployment reason.
-- `resolve_auto_execution` builds `runnable = tuple(c.executor for c in candidates if technical and configured and certified and available)`, classifies workload from `duration_s`/`num_samples` (recording scope) or `dataset_item_count` (dataset scope), calls `policy.select_executor(...)`, and returns `ExecutionSelection(requested_mode="auto", ...)`.
+- Per candidate compute `technical`, `configured`, `certified = executor_registry.certified_capability(definition, model_release_id, executor) is not None`, and `available = executor_registry.availability_for(definition, model_release, probe_recording, executor).available` (REAL live availability for BOTH scopes; `configured` is never used as an `available` alias). Store the result's `reason_code`; set `public_reason_message = policy.public_reason_message(reason_code)` — never the raw provider message.
+- `resolve_auto_execution` builds `runnable = tuple(c.executor for c in candidates if technical and configured and certified and available)`, classifies workload from `probe_recording.num_samples`/`duration_s` (single-run) or `dataset_item_count` (dataset), calls `policy.select_executor(...)`, and returns `ExecutionSelection(requested_mode="auto", reason=policy.public_reason_message(decision.reason_code), ...)`.
+- Do not call `availability_for` for executors that are not configured (a missing provider yields `configured=False` and is excluded without a probe).
 - Import only `dataclasses`, `typing`, `app.core.errors`, `app.execution_selection.policy`, and the `RuntimeDescriptor`/`ExecutorRegistry` types (`from app.remote_execution.runtime import ...`). No `os`/`subprocess`/Linux/ML imports.
 
 - [ ] **Step 4: Run GREEN**
@@ -405,6 +443,7 @@ Create `backend/tests/test_analysis_auto_execution.py` covering:
 6. Auto provenance persisted in `execution_metadata_json`: `requested_execution_mode == "auto"`, `auto_reason_code` in the closed set, `workload_class` in `{SMALL,GPU_BENEFICIAL,UNKNOWN}`, and no `environment_ref`/path/secret keys present.
 7. Manual provenance persisted: `requested_execution_mode == "manual"`.
 8. Public read model: `GET /api/analysis-runs/{id}` includes `execution_metadata_json.requested_execution_mode` and does not expose `environment_ref`.
+9. **Exact ModelRelease freeze (Correction 4):** a release-required plugin whose default release resolves to `golden`; an Auto request (no explicit `model_release_id`) persists the run with `execution_metadata_json["model_release_id"] == "golden"` and the run executes that exact resolved release — the same release identity used for the Auto certificate decision. A release-less plugin persists `model_release_id` absent/`None`.
 
 Use the existing `executor_fixtures.FakeProvider`/`FakeRegistry` and the `client`/`session` fixtures.
 
@@ -424,8 +463,12 @@ Expected RED reason: `TypeError: create_run() got an unexpected keyword argument
   - `create_run(..., execution_mode="manual")`:
     - manual with `executor=None` → `executor = "local_cpu"`;
     - auto with `executor is not None` → `PlatformError("EXECUTION_REQUEST_INVALID", ...)`;
-    - auto with `executor is None` → load recording + definition + resolved release and call `resolve_auto_execution(...)`; on `resolved_executor is None` raise `PlatformError(selection.reason_code, selection.reason)`; else use the resolved executor.
-    - then call `prepare_run(executor=...)` unchanged.
+    - auto with `executor is None`:
+      - load recording + definition; `resolved_release = self._resolve_release(definition, model_release_id)`;
+      - call `resolve_auto_execution(definition=definition, model_release=resolved_release, probe_recording=recording, executor_registry=self.executor_registry)`;
+      - on `resolved_executor is None` raise `PlatformError(selection.reason_code, selection.reason)`;
+      - **freeze the exact release used for selection (Correction 4):** `frozen_model_release_id = resolved_release.release.model_release_id if resolved_release is not None else None`; use that value for `prepare_run(model_release_id=frozen_model_release_id)` so the Auto certificate decision and the persisted/executed release are the same identity (release-less plugin → `None`).
+    - manual path keeps the caller-supplied `model_release_id` behaviour unchanged.
     - After `prepare_run`, merge the provenance dict (`requested_execution_mode`, `resolved_executor`, and for auto `auto_reason_code`/`auto_reason`/`workload_class`) into `run.execution_metadata_json` (new dict assignment), then `commit` + `launch_prepared_run` exactly as today.
   - Do not modify `prepare_run` semantics for the DatasetExperiment path.
 
@@ -469,9 +512,14 @@ Create `backend/tests/test_dataset_experiment_auto_creation.py` covering:
 4. auto + omitted, small manifest (e.g. 3 items), `local_cpu` runnable → frozen `executor == "local_cpu"`, `reason_code == "AUTO_LOCAL_CPU_PREFERRED"`.
 5. auto + omitted, manifest item count ≥ 8 → `workload_class == "GPU_BENEFICIAL"`.
 6. auto + omitted, zero runnable → `PlatformError` `AUTO_NO_RUNNABLE_EXECUTOR`; no experiment row.
-7. `runtime_descriptor_json["auto_selection"]` persisted with `requested_execution_mode`, `resolved_executor`, `auto_reason_code`, `auto_reason`, `workload_class`; `RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)` still parses and `to_metadata()` equals the frozen descriptor (the extra key is inert).
-8. `parameters_json` equals the request `parameters` (scientific parameters untouched).
-9. `retry_failed`/recovery keep the frozen executor (assert the frozen `executor` is unchanged after a retry-failed transition).
+7. **Dataset live-availability exclusion (Correction 1):** manifest item count ≥ 8; `local_gpu` configured + exact certificate but its live provider availability returns `False`; `local_cpu` configured + certified + live-available → frozen `executor != "local_gpu"`; the frozen executor is the next valid executor per the `GPU_BENEFICIAL` ranking (`local_cpu` here, unless a `remote_gpu` is also runnable); `local_gpu` is excluded from the runnable set.
+8. **Representative probe Recording (Correction 1):** the resolver is called with the real `RecordingModel` whose `manifest_order == 0` (the deterministic representative); assert the resolved experiment `executor` equals the Auto decision computed against that recording. Auto is invoked exactly once per experiment creation (patch `resolve_auto_execution` with a counting wrapper → call count == 1).
+9. `runtime_descriptor_json["execution_selection"]` persisted with `requested_execution_mode`, `resolved_executor`, `auto_reason_code`, `auto_reason`, `workload_class`; `RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)` still parses and `to_metadata()` equals the frozen descriptor (the extra key is inert; A1 authority unaffected).
+10. `parameters_json` equals the request `parameters` (scientific parameters untouched).
+11. `retry_failed`/recovery keep the frozen executor (assert the frozen `executor` is unchanged after a retry-failed transition, and that `resolve_auto_execution` is not invoked again).
+12. **Safe readback (Correction 3):** a new Auto experiment exposes `requested_execution_mode`/`auto_reason_code`/`auto_reason`/`workload_class` via `DatasetExperimentRead` (`GET /api/dataset-experiments/{id}`); the values match the internal `execution_selection` namespace.
+13. **Historical compatibility (Correction 3):** an experiment seeded with `runtime_descriptor_json` lacking `execution_selection` still reads back (the four projected fields are `None`, no error).
+14. Public boundary: the projected `auto_reason` never contains a raw provider path or `environment_ref` value.
 
 Use the shared `dataset_experiment_fixtures` (`seed_dataset`, `create_experiment`) and `executor_fixtures`.
 
@@ -485,16 +533,18 @@ Expected RED reason: `DatasetExperimentCreate` requires `executor` / rejects `ex
 
 - [ ] **Step 3: Minimal implementation**
 
-- `dataset_experiments/schema.py`: add `execution_mode` + make `executor` optional (keep `extra="forbid"`).
+- `dataset_experiments/schema.py`: add `execution_mode` + make `executor` optional (keep `extra="forbid"`); extend `DatasetExperimentRead` additively with `requested_execution_mode: str | None`, `auto_reason_code: str | None`, `auto_reason: str | None`, `workload_class: str | None` (all default `None`).
 - `dataset_experiments/router.py`: pass `execution_mode=payload.execution_mode` and `executor=payload.executor`.
 - `dataset_experiments/service.py::create_experiment`:
   - build `manifest` (already) → `dataset_item_count = manifest.expected_recordings`;
-  - resolve release (already) → `frozen_release_id`;
-  - mode handling: manual + `executor is None` → `EXECUTION_REQUEST_INVALID`; auto + `executor is not None` → `EXECUTION_REQUEST_INVALID`; auto + `None` → `resolve_auto_execution(definition=definition, model_release=resolved_release, recording=None, executor_registry=self.executor_registry, dataset_item_count=dataset_item_count)`; on `resolved_executor is None` raise `PlatformError(selection.reason_code, selection.reason)`; else use the resolved executor;
+  - **representative probe Recording (Correction 1):** load the real `RecordingModel` referenced by the smallest `manifest_order` entry (`manifest.entries[0].recording_id`, entries are manifest-ordered) as `probe_recording`;
+  - resolve release (already) → `frozen_release_id` / `resolved_release`;
+  - mode handling: manual + `executor is None` → `EXECUTION_REQUEST_INVALID`; auto + `executor is not None` → `EXECUTION_REQUEST_INVALID`; auto + `None` → `resolve_auto_execution(definition=definition, model_release=resolved_release, probe_recording=probe_recording, executor_registry=self.executor_registry, dataset_item_count=dataset_item_count)` (called exactly ONCE); on `resolved_executor is None` raise `PlatformError(selection.reason_code, selection.reason)`; else use the resolved executor;
   - `_validate_execution(definition, frozen_release_id, executor)` unchanged (validates provider + certificate);
-  - persist `runtime_descriptor_json = {**descriptor.to_metadata(), "auto_selection": {...}}` (provenance for both modes; auto fields present only for auto);
+  - persist `runtime_descriptor_json = {**descriptor.to_metadata(), "execution_selection": {...}}` (namespace `execution_selection`; provenance for both modes; auto fields present only for auto);
   - `parameters_json = dict(parameters)` unchanged.
   - No per-item Auto anywhere; `start_item_attempt`/`launch_item_attempt`/`retry_failed`/recovery are unchanged and consume the frozen `executor`.
+- `dataset_experiments/service.py::_to_read()`: derive the four probe-free projected fields from `runtime_descriptor_json.get("execution_selection", {})`, returning `None` when absent (historical experiments stay readable). The raw `runtime_descriptor_json` field remains on the read model unchanged (pre-existing API debt, out of A2 scope).
 
 - [ ] **Step 4: Run GREEN**
 
@@ -524,7 +574,7 @@ git commit -m "feat: add dataset experiment auto execution freeze"
 - Test: `backend/tests/test_executor_selection_api.py`
 
 **Interfaces:**
-- `ExecutorSelectionRead`, `ExecutionCandidateRead` (Pydantic response models; booleans + bounded reasons only).
+- `ExecutorSelectionRead`, `ExecutionCandidateRead` (Pydantic response models; booleans + bounded reasons only). `ExecutionCandidateRead` exposes `public_reason_message` (platform-owned safe projection), never a raw provider message.
 - `GET /api/executor-selection` query contract:
   - `pipeline_id: str` (required)
   - `model_release_id: str | None`
@@ -535,14 +585,16 @@ git commit -m "feat: add dataset experiment auto execution freeze"
 - [ ] **Step 1: Write failing tests**
 
 Create `backend/tests/test_executor_selection_api.py` covering:
-1. single-run scope returns `requested_mode == "auto"`, `resolved_executor` in the closed exact-executor set, `reason_code` in the closed set, `workload_class` in the closed set, and a `candidates` list where each entry has the four booleans.
-2. dataset scope (item count ≥ 8) returns `workload_class == "GPU_BENEFICIAL"` and selects per the GPU ranking.
+1. single-run scope returns `requested_mode == "auto"`, `resolved_executor` in the closed exact-executor set, `reason_code` in the closed set, `workload_class` in the closed set, and a `candidates` list where each entry has the four booleans and a `public_reason_message`.
+2. dataset scope (item count ≥ 8) returns `workload_class == "GPU_BENEFICIAL"` and selects per the GPU ranking (evaluated against the representative `manifest_order == 0` Recording).
 3. neither scope (no `recording_id`, no dataset trio) → `PlatformError` `EXECUTION_SELECTION_REQUEST_INVALID`.
 4. both scopes supplied → `EXECUTION_SELECTION_REQUEST_INVALID`.
 5. zero runnable → `resolved_executor is None`, `reason_code == "AUTO_NO_RUNNABLE_EXECUTOR"`.
-6. public boundary: the JSON response contains no `environment_ref`, no path-like substring, no `certificate`, no `cgroup`/`psi`, and no SSH material.
+6. public boundary: the JSON response contains no `environment_ref`, no `C:\...`/`/root/...` path substring, no `certificate`, no `cgroup`/`psi`, and no SSH material.
 7. `technical but no provider` candidate reports `technical=true, configured=false, certified=false, available=false`.
 8. `provider but no certificate` candidate reports `configured=true, certified=false, available=false`.
+9. **Dataset live-availability exclusion (Correction 1):** dataset scope with item count ≥ 8, `local_gpu` configured + certified but live availability `False`, `local_cpu` runnable → `resolved_executor != "local_gpu"`.
+10. **Malicious reason safety (Correction 2):** a `FakeProvider` whose `availability(...).reason_message` contains BOTH `C:\secret\runtime\python.exe` and `/root/private/model.pt`; the full `GET /api/executor-selection` JSON body must contain neither path substring (the projection replaces it with the platform-owned bounded message).
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -554,10 +606,10 @@ Expected RED reason: route absent → `404` for `GET /api/executor-selection` (o
 
 - [ ] **Step 3: Minimal implementation**
 
-- `execution_selection/schema.py`: `ExecutionCandidateRead` (`executor`, `technical`, `configured`, `certified`, `available`, `reason_code`, `reason_message`) and `ExecutorSelectionRead` (`requested_mode`, `resolved_executor`, `reason_code`, `reason`, `workload_class`, `candidates`).
-- `execution_selection/router.py`: `GET /api/executor-selection`; validate the exactly-one-scope rule (raise `PlatformError("EXECUTION_SELECTION_REQUEST_INVALID", ...)`); resolve `definition` via `request.app.state.pipeline_registry`; resolve the release via `request.app.state.model_release_store` (`_resolve_release` semantics); single scope loads the `RecordingModel` (404 `RECORDING_NOT_FOUND` if missing) and passes it to `resolve_auto_execution`; dataset scope computes `dataset_item_count` via `DatasetBenchmarkService(session).prepare_manifest(dataset_name, dataset_split, dataset_label_space).expected_recordings` and passes `recording=None`.
+- `execution_selection/schema.py`: `ExecutionCandidateRead` (`executor`, `technical`, `configured`, `certified`, `available`, `reason_code`, `public_reason_message`) and `ExecutorSelectionRead` (`requested_mode`, `resolved_executor`, `reason_code`, `reason`, `workload_class`, `candidates`).
+- `execution_selection/router.py`: `GET /api/executor-selection`; validate the exactly-one-scope rule (raise `PlatformError("EXECUTION_SELECTION_REQUEST_INVALID", ...)`); resolve `definition` via `request.app.state.pipeline_registry`; resolve the release via `request.app.state.model_release_store` (`_resolve_release` semantics); single scope loads the requested `RecordingModel` (404 `RECORDING_NOT_FOUND` if missing) and passes it as `probe_recording`; dataset scope computes `dataset_item_count` via `DatasetBenchmarkService(session).prepare_manifest(dataset_name, dataset_split, dataset_label_space).expected_recordings`, loads the real `RecordingModel` referenced by the smallest `manifest_order` entry as `probe_recording`, and passes both to `resolve_auto_execution`.
 - `main.py`: `include_router(execution_selection_router)`.
-- Response maps only the booleans + bounded `reason_code`/`reason`/`reason_message`; never serialize `environment_ref` or any `RuntimeDescriptor.to_metadata()` payload.
+- Response maps only the booleans + bounded `reason_code`/`reason`/`public_reason_message`; the candidate `public_reason_message` is the platform-owned projection from `policy.public_reason_message(reason_code)` (raw provider `reason_message` is discarded). Never serialize `environment_ref` or any `RuntimeDescriptor.to_metadata()` payload.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -602,6 +654,10 @@ Create `backend/tests/test_execution_selection_failclosed_matrix.py` covering, a
 12. recommended executor uncertified → not selected.
 13. manual exact executors (`local_cpu`, `local_gpu`, `remote_gpu`) each still pass through `availability_for` unchanged.
 14. no persisted `AnalysisRun.executor == "auto"` and no `DatasetExperiment.executor == "auto"` in any scenario.
+15. dataset scope: `local_gpu` configured + certified + live-unavailable is excluded from the runnable set and never frozen (Correction 1).
+16. no public Auto reason text (`reason`, candidate `public_reason_message`) echoes raw provider detail even when a provider returns a path-bearing message (Correction 2).
+17. DatasetExperiment safe readback: a new Auto experiment exposes the projected `requested_execution_mode`/`auto_reason_code`/`auto_reason`/`workload_class`; a historical experiment without the namespace reads back with `None` (Correction 3).
+18. Auto freezes the exact resolved ModelRelease identity used for the certificate decision (Correction 4).
 
 - [ ] **Step 2: Run (gate GREEN)**
 
@@ -671,19 +727,87 @@ git commit -m "test: guard A1 recovery and ML-free boundary for auto execution"
 
 ---
 
+## Task 8: Windows full-suite differential regression gate
+
+**GPU REQUIRED: NO**
+
+**Verification task — introduces NO production code.** Windows has known pre-existing POSIX-only failures, so the full backend suite is not required to be globally green. Instead establish a FRESH baseline from exact `e372d21a9711333f906b68634f8bd20b35a9affd` and require ZERO new failures from the A2 candidate.
+
+**Files:** none (verification only). A temporary detached Git worktree is used so the A2 working branch is never rewritten.
+
+- [ ] **Step 1: Create a read-only exact-base worktree**
+
+```bash
+git worktree add --detach "D:\LGFiles\Wideband Signal Analysis Platform\wt-a2-base" e372d21a9711333f906b68634f8bd20b35a9affd
+```
+
+Confirm the baseline HEAD: `git -C "D:\...\wt-a2-base" rev-parse HEAD` equals `e372d21…`.
+
+- [ ] **Step 2: Capture the baseline failure set**
+
+```bash
+& "...\.venv\Scripts\python.exe" -m pytest backend/tests -q --tb=no -rf
+```
+
+Run this with the working directory set to the baseline worktree. Record every `FAILED <node_id>` line into a baseline failure set (e.g. `base_failures.txt`, sorted unique).
+
+- [ ] **Step 3: Capture the candidate failure set**
+
+Run the identical command on the A2 candidate branch (its worktree) and record `FAILED <node_id>` lines into `candidate_failures.txt` (sorted unique).
+
+- [ ] **Step 4: Compute the differential gate**
+
+```text
+candidate_new_failures = candidate_failure_set - base_failure_set
+```
+
+Require `candidate_new_failures == empty`. The candidate MAY have fewer failures than the baseline (A2 fixes none of the POSIX failures by design). Any new `FAILED`/`ERROR` node blocks A2 acceptance.
+
+- [ ] **Step 5: Remove the temporary worktree**
+
+```bash
+git worktree remove "D:\LGFiles\Wideband Signal Analysis Platform\wt-a2-base"
+```
+
+The A2 working branch must be unchanged by this task (read-only baseline).
+
+- [ ] **Step 6: ML-free control-plane verification**
+
+```bash
+& "...\.venv\Scripts\python.exe" -c "import importlib.util as u; print('torch:', u.find_spec('torch')); print('ultralytics:', u.find_spec('ultralytics'))"
+```
+
+Expected: `torch: None`, `ultralytics: None`.
+
+- [ ] **Step 7: Commit**
+
+No commit is created by this verification task (no files changed). Record the differential result in the A2 acceptance evidence.
+
+---
+
 ## Plan self-review record
 
-- Every Auto design requirement maps to a task: pure policy (Task 1), candidate facts (Task 2), single-run Auto + provenance (Task 3), dataset Auto freeze + provenance (Task 4), explanation endpoint (Task 5), fail-closed matrix + portability (Task 6), A1/ML-free regression (Task 7).
-- No unfinished-marker text; no "similar to Task X" references; each task names its files, interfaces, RED test, exact command, expected RED reason, minimal implementation, GREEN command, and commit.
-- Function/type names are internally consistent (`resolve_auto_execution`, `select_executor`, `classify_workload`, `ExecutionCandidate`, `ExecutionSelection`, `AutoDecision`).
-- No plugin-id branches anywhere in the designed production code.
-- No Linux/cgroup/proc/nvidia-smi dependency; portability guard test asserts absence in the policy/resolver sources.
-- No A3 scope: no runtime doctor, no runtime identity generation, no certificate install CLI, no qualification evidence directories; A2 only consumes existing `ExecutorRegistry` / `ExecutionCertificateStore` / `availability_for`.
-- No GPU gate: every task is labeled `GPU REQUIRED: NO`; all tests use deterministic providers/certificates/availability doubles and SQLite.
-- DatasetExperiment Auto resolves exactly once at creation; all Items use the frozen executor; `retry_failed`/recovery never re-resolve.
-- Persisted `executor` is never `"auto"` (single-run and dataset).
-- Manual behavior remains exact and fail-closed; no substitution; manual+omitted contracts are explicit per endpoint.
-- Reason-code set matches the approved design exactly (7 codes).
-- A1 recovery never re-resolves Auto; `RUNTIME_DESCRIPTOR_INVALID` stays experiment-level; `FROZEN_AUTHORITY_ITEM_CODES` unchanged.
-- Provenance is metadata-only in existing JSON columns (`analysis_runs.execution_metadata_json`, `dataset_experiments.runtime_descriptor_json["auto_selection"]`); no DB migration; `parameters_json` untouched.
-- Public boundary: the Auto API returns only booleans + bounded reasons; no `environment_ref`, paths, SSH material, or certificate internals.
+Corrective self-review (post-correction):
+
+1. **Dataset Auto `available` is true live availability.** Both scopes compute `available` via `executor_registry.availability_for(definition, model_release, probe_recording, executor)`. `configured` is never used as an `available` alias (Module / type reference; Task 2; Task 4).
+2. **No-GPU Case B excludes `local_gpu` from Auto.** A registered + certified `local_gpu` whose live CUDA probe fails is excluded from the runnable set for single-run and dataset Auto (Task 2 test 8; Task 4 test 7, 8; Task 5 test 9; Task 6 item 15).
+3. **No per-item Auto resolution.** Dataset Auto resolves exactly once at creation against the deterministic representative Recording (`manifest_order == 0`); all Items use the frozen executor (Task 4 steps; Task 4 test 8 counting the resolver call).
+4. **Public Auto reason text never echoes raw provider detail.** Candidate `public_reason_message` and selection `reason` come from `policy.public_reason_message(reason_code)`; unknown codes → generic bounded text (Module / type reference; Task 2 test 9; Task 5 test 10; Task 6 item 16).
+5. **Dataset Auto provenance has a safe public read projection.** `DatasetExperimentRead` gains `requested_execution_mode`/`auto_reason_code`/`auto_reason`/`workload_class` derived by `_to_read()`; consumers do not parse the raw namespace (Correction 3; Task 4 tests 12–14).
+6. **`runtime_descriptor_json` extra metadata is inert for A1 authority.** `RuntimeDescriptor.from_metadata` reads only descriptor keys; `to_metadata()` equality is unaffected (Correction 3; Task 4 test 9; Task 6 item 17).
+7. **Auto freezes the exact ModelRelease used for certificate selection.** Single-run Auto passes `frozen_model_release_id = resolved_release.release.model_release_id` (or `None`) to `prepare_run` (Correction 4; Task 3 test 9; Task 6 item 18). DatasetExperiment already resolves/fixes its release once.
+8. **Fresh Windows full-suite differential gate.** Task 8 captures a read-only baseline at exact `e372d21…` in a detached worktree and requires `candidate_failure_set - base_failure_set == empty`; Windows-only POSIX failures are never "fixed" in production code.
+9. **No GPU work exists anywhere in A2.** Every task is labeled `GPU REQUIRED: NO`; all Auto branches are exercised with deterministic provider/certificate/availability doubles and SQLite.
+10. **No A3 implementation leaked into A2.** No runtime doctor, runtime identity generation, qualification evidence directories, or certificate install CLI; A2 only consumes existing `ExecutorRegistry` / `ExecutionCertificateStore` / `availability_for`.
+11. **No unfinished-marker text.** No unfinished markers remain; no "similar to Task X"; each task names its files, interfaces, RED test, exact command, expected RED reason, minimal implementation, GREEN command, and commit.
+12. **Only the plan document changed** (this corrective commit); no production code, tests, schema, or migration touched.
+
+Additional invariants held:
+
+- Runtime is documented as Python 3.12.
+- Manual + executor omitted: `AnalysisRun` → historical `local_cpu`; `DatasetExperiment` → fail closed (approved asymmetry preserved).
+- `auto` + explicit executor → `EXECUTION_REQUEST_INVALID` (approved).
+- Auto reason-code set is the seven approved codes; no plugin-id special-casing; no Linux/cgroup dependency; A2/A3 boundary unchanged.
+- Persisted `executor` is never `"auto"`; no fallback after resolution; A1 Windows A/B/C unchanged; recovery/retry never re-resolve Auto.
+- Provenance is metadata-only in existing JSON columns (`analysis_runs.execution_metadata_json`, `dataset_experiments.runtime_descriptor_json["execution_selection"]`); no DB migration; `parameters_json` untouched.
+- The pre-existing raw `runtime_descriptor_json` exposure on `DatasetExperimentRead` is recorded as Backend V1 API-freeze debt (not reworked in A2).
