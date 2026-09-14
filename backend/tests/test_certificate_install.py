@@ -390,3 +390,107 @@ def test_operator_path_under_data_root_and_no_secrets(tmp_path: Path) -> None:
         "plugin_id", "plugin_version", "model_release_id", "executor",
         "device_type", "precision", "runtime_ref", "evidence_ref",
     }
+
+
+# ---------------------------------------------------------------------------
+# B1: local_gpu_cuda_v1 evidence installs to an exact (never generic) certificate
+# ---------------------------------------------------------------------------
+
+_GPU_MATERIAL = {
+    "python": "3.12.3",
+    "torch": "2.8.0+cu128",
+    "torch_cuda": "12.8",
+    "ultralytics": "8.4.114",
+    "numpy": "2.3.2",
+    "scipy": "1.18.0",
+    "device_name": "NVIDIA GeForce RTX 5090",
+    "compute_capability": "12.0",
+    "driver_version": "580.105.08",
+    "cuda_available": True,
+}
+
+
+def _gpu_definition() -> PipelineDefinition:
+    return PipelineDefinition(
+        id="dummy",
+        name="Dummy",
+        version="1.0",
+        label_space="spacenet_14",
+        recommended_device="GPU",
+        cpu_supported=False,
+        stages=(),
+        inspectable_stages=(),
+        technical_execution_capabilities=(ExecutionCapability("local_gpu", "cuda", "float16"),),
+        model_release_required=False,
+    )
+
+
+def _gpu_evidence(provider, definition, settings) -> QualificationEvidence:
+    from app.runtime_qualification.qualification import (
+        LocalGpuQualificationRunner,
+        LocalGpuTargetProbe,
+    )
+
+    probe = LocalGpuTargetProbe(
+        settings=settings,
+        definition=definition,
+        provider=provider,
+        model_release_store=_ReleaseStore(),
+        material_probe=lambda: dict(_GPU_MATERIAL),
+        now=_CLOCK,
+    )
+    target = QualificationTarget(
+        plugin_id=definition.plugin_id,
+        plugin_version=definition.plugin_version,
+        model_release_id=None,
+        executor="local_gpu",
+        runtime_ref=provider.runtime_ref,
+        runtime_descriptor=provider.runtime_descriptor().to_metadata(),
+    )
+    return run_qualification(
+        target=target, runner=LocalGpuQualificationRunner(target_probe=probe), now=_CLOCK
+    )
+
+
+def test_install_accepts_local_gpu_cuda_v1_as_exact_certificate(tmp_path: Path) -> None:
+    from app.runtime_qualification.identity import (
+        BHQ3_GPU_V1,
+        derive_generation_for_scheme,
+        derive_local_runtime_ref,
+    )
+
+    generation = derive_generation_for_scheme(scheme=BHQ3_GPU_V1, material=_GPU_MATERIAL)
+    gpu_ref = derive_local_runtime_ref(family="autodl_primary", kind="gpu", generation=generation)
+    assert gpu_ref == "local:autodl_primary:gpu:7b958347b5af"
+    definition = _gpu_definition()
+    provider = _Provider(runtime_ref=gpu_ref, name="local_gpu", device_type="cuda", precision="float16")
+    authority = resolve_live_authority(
+        registry=_Pipelines(definition),
+        model_release_store=_ReleaseStore(),
+        executor_registry=_ExecRegistry({"local_gpu": provider}),
+        plugin_id=definition.plugin_id,
+        plugin_version=definition.plugin_version,
+        executor="local_gpu",
+        requested_model_release_id=None,
+        data_root=tmp_path,
+    )
+    assert authority.technical_capability_present is True
+    evidence = _gpu_evidence(provider, definition, Settings(runtime_family="autodl_primary"))
+
+    certificate = validate_evidence_for_install(evidence=evidence, authority=authority)
+    assert certificate.executor == "local_gpu"
+    assert certificate.device_type == "cuda"
+    assert certificate.precision == "float16"
+    assert certificate.runtime_ref == gpu_ref
+    assert certificate.model_release_id is None
+    assert len(certificate.key()) == 7
+
+    result = install_certificate(
+        data_root=tmp_path,
+        repo_certificate_path=_empty_repo(tmp_path),
+        evidence=evidence,
+        authority=authority,
+    )
+    assert result.status == "created"
+    stored = load_operator_certificates(tmp_path)
+    assert [c.key() for c in stored] == [certificate.key()]

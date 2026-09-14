@@ -379,3 +379,117 @@ def test_runtime_doctor_legacy_cpu_without_family(tmp_path: Path, capsys) -> Non
     report = json.loads(capsys.readouterr().out)["providers"][0]
     assert report["identity_scheme"] == "legacy_opaque"
     assert report["identity_status"] == "legacy_opaque"
+
+
+# ---------------------------------------------------------------------------
+# B1: local_gpu qualification CLI dispatch (deterministic; no GPU)
+# ---------------------------------------------------------------------------
+
+_GPU_MATERIAL = {
+    "python": "3.12.3",
+    "torch": "2.8.0+cu128",
+    "torch_cuda": "12.8",
+    "ultralytics": "8.4.114",
+    "numpy": "2.3.2",
+    "scipy": "1.18.0",
+    "device_name": "NVIDIA GeForce RTX 5090",
+    "compute_capability": "12.0",
+    "driver_version": "580.105.08",
+    "cuda_available": True,
+}
+
+
+def _gpu_definition() -> PipelineDefinition:
+    return PipelineDefinition(
+        id="dummy",
+        name="Dummy",
+        version="1.0",
+        label_space="spacenet_14",
+        recommended_device="GPU",
+        cpu_supported=False,
+        stages=(),
+        inspectable_stages=(),
+        technical_execution_capabilities=(ExecutionCapability("local_gpu", "cuda", "float16"),),
+        model_release_required=False,
+    )
+
+
+def test_qualify_local_gpu_builds_real_probe_and_writes_evidence(tmp_path: Path, capsys, monkeypatch) -> None:
+    import app.runtime_qualification.qualification as qual
+    from app.runtime_qualification.identity import (
+        BHQ3_GPU_V1,
+        derive_generation_for_scheme,
+        derive_local_runtime_ref,
+    )
+
+    generation = derive_generation_for_scheme(scheme=BHQ3_GPU_V1, material=_GPU_MATERIAL)
+    gpu_ref = derive_local_runtime_ref(family="autodl_primary", kind="gpu", generation=generation)
+    assert gpu_ref == "local:autodl_primary:gpu:7b958347b5af"
+
+    monkeypatch.setattr(
+        qual, "collect_identity_material",
+        lambda path, *, scheme, runner=None: dict(_GPU_MATERIAL),
+    )
+    provider = _Provider(name="local_gpu", runtime_ref=gpu_ref, device_type="cuda", precision="float16")
+    context = _context(tmp_path, _gpu_definition(), {"local_gpu": provider})
+    assert _run(["qualify", "--plugin", "dummy", "--executor", "local_gpu"], context, capsys) == 0
+    evidence_dir = next((tmp_path / "qualification" / "local_gpu").iterdir())
+    evidence = load_evidence_dir(evidence_dir)
+    assert evidence.passed is True
+    assert evidence.qualification_type == "local_gpu_cuda_v1"
+    assert evidence.identity_scheme == "bhq3_gpu_v1"
+    assert evidence.runtime_ref == gpu_ref
+
+
+def test_qualify_local_gpu_missing_capability_is_nonzero_not_deferred(tmp_path: Path, capsys, monkeypatch) -> None:
+    import app.runtime_qualification.qualification as qual
+    from app.runtime_qualification.identity import (
+        BHQ3_GPU_V1,
+        derive_generation_for_scheme,
+        derive_local_runtime_ref,
+    )
+
+    generation = derive_generation_for_scheme(scheme=BHQ3_GPU_V1, material=_GPU_MATERIAL)
+    gpu_ref = derive_local_runtime_ref(family="autodl_primary", kind="gpu", generation=generation)
+    monkeypatch.setattr(
+        qual, "collect_identity_material",
+        lambda path, *, scheme, runner=None: dict(_GPU_MATERIAL),
+    )
+    provider = _Provider(name="local_gpu", runtime_ref=gpu_ref, device_type="cuda", precision="float16")
+    # _definition() declares only a local_cpu capability.
+    context = _context(tmp_path, _definition(), {"local_gpu": provider})
+    assert _run(["qualify", "--plugin", "dummy", "--executor", "local_gpu"], context, capsys) == 1
+    evidence_dir = next((tmp_path / "qualification" / "local_gpu").iterdir())
+    evidence = load_evidence_dir(evidence_dir)
+    assert evidence.passed is False
+    assert evidence.qualification_type == "local_gpu_cuda_v1"
+
+
+def test_cli_builds_real_local_gpu_probe(tmp_path: Path, capsys, monkeypatch) -> None:
+    import app.cli as cli_module
+    import app.runtime_qualification.qualification as qual
+    from app.runtime_qualification.identity import (
+        BHQ3_GPU_V1,
+        derive_generation_for_scheme,
+        derive_local_runtime_ref,
+    )
+
+    generation = derive_generation_for_scheme(scheme=BHQ3_GPU_V1, material=_GPU_MATERIAL)
+    gpu_ref = derive_local_runtime_ref(family="autodl_primary", kind="gpu", generation=generation)
+    monkeypatch.setattr(
+        qual, "collect_identity_material",
+        lambda path, *, scheme, runner=None: dict(_GPU_MATERIAL),
+    )
+    provider = _Provider(name="local_gpu", runtime_ref=gpu_ref, device_type="cuda", precision="float16")
+    context = _context(tmp_path, _gpu_definition(), {"local_gpu": provider})
+
+    calls = {"count": 0}
+    real_build = cli_module.build_default_target_probe
+
+    def spy(**kwargs):
+        calls["count"] += 1
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(cli_module, "build_default_target_probe", spy)
+    assert _run(["qualify", "--plugin", "dummy", "--executor", "local_gpu"], context, capsys) == 0
+    assert calls["count"] == 1

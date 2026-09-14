@@ -24,6 +24,7 @@ from app.runtime_qualification.evidence import (
     validated_passed,
 )
 from app.runtime_qualification.identity import (
+    BHQ3_GPU_V1,
     LOCAL_CPU_V1,
     UNAVAILABLE,
     collect_identity_material,
@@ -32,11 +33,12 @@ from app.runtime_qualification.identity import (
 )
 
 LOCAL_CPU_SMOKE_V1 = "local_cpu_smoke_v1"
+LOCAL_GPU_CUDA_V1 = "local_gpu_cuda_v1"
 GPU_DEFERRED = "gpu_deferred"
 
 INSTALL_ELIGIBLE_TYPES = {
     "local_cpu": (LOCAL_CPU_SMOKE_V1,),
-    "local_gpu": (),  # NONE in A3 (Plan B authorizes real GPU types)
+    "local_gpu": (LOCAL_GPU_CUDA_V1,),  # Plan B: real local_gpu runtime qualification
     "remote_gpu": (),  # NONE in A3 (Plan C authorizes real remote types)
 }
 
@@ -159,6 +161,108 @@ class LocalCpuTargetProbe:
         return None
 
 
+class LocalGpuTargetProbe:
+    """Platform-owned PRODUCTION probe for local_gpu. Generic; never branches on
+    plugin_id and runs NO model inference. Mirrors the sealed
+    ``LocalCpuTargetProbe`` checks for the ``bhq3_gpu_v1`` scheme."""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        definition: PipelineDefinition,
+        provider: object | None,
+        model_release_store: object | None,
+        material_probe: Callable[[], dict] | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._settings = settings
+        self._definition = definition
+        self._provider = provider
+        self._model_release_store = model_release_store
+        self._material_probe = material_probe
+        self._now = now
+
+    def _material(self) -> dict:
+        if self._material_probe is not None:
+            return self._material_probe()
+        return collect_identity_material(
+            self._settings.local_gpu_python_path, scheme=BHQ3_GPU_V1
+        )
+
+    def __call__(self, target: QualificationTarget) -> None:
+        if target.executor != "local_gpu":
+            raise _probe_error("Qualification target executor is not local_gpu.")
+        provider = self._provider
+        if provider is None:
+            raise _probe_error("Current local_gpu provider is not registered.")
+        if getattr(provider, "name", None) != "local_gpu":
+            raise _probe_error("Registered provider for local_gpu is not the expected provider.")
+        ok, reason = provider.probe()
+        if not ok:
+            raise _probe_error(f"Local GPU provider probe failed: {reason or 'unknown'}")
+        if provider.runtime_ref != target.runtime_ref:
+            raise _probe_error("Current provider runtime_ref does not match the qualification target.")
+        descriptor = provider.runtime_descriptor()
+        if descriptor is None or descriptor.executor != "local_gpu":
+            raise _probe_error("Provider runtime descriptor executor is not local_gpu.")
+        if descriptor.device_type != "cuda":
+            raise _probe_error("Provider runtime descriptor device type is not cuda.")
+        if descriptor.to_metadata() != target.runtime_descriptor:
+            raise _probe_error("Provider runtime descriptor does not match the qualification target.")
+
+        capability = ExecutionCapability(
+            descriptor.executor, descriptor.device_type, descriptor.precision
+        )
+        declared = {c.key() for c in self._definition.technical_execution_capabilities}
+        if capability.key() not in declared:
+            raise _probe_error("Definition declares no exact technical execution capability.")
+
+        if self._settings.runtime_family is None:
+            raise _probe_error("runtime_family is not configured for a new local_gpu qualification.")
+        parsed = parse_local_runtime_ref(target.runtime_ref)
+        if parsed is None:
+            raise _probe_error("runtime_ref is not a well-formed local runtime reference.")
+        family, kind = parsed
+        if kind != "gpu":
+            raise _probe_error("local_gpu qualification requires a gpu runtime kind.")
+        if family != self._settings.runtime_family:
+            raise _probe_error("runtime_ref family does not match the configured runtime_family.")
+        material = self._material()
+        validate_runtime_ref_against_material(
+            runtime_ref=target.runtime_ref,
+            family=self._settings.runtime_family,
+            kind="gpu",
+            scheme=BHQ3_GPU_V1,
+            material=material,
+        )
+
+        if (
+            self._definition.plugin_id != target.plugin_id
+            or self._definition.plugin_version != target.plugin_version
+        ):
+            raise _probe_error("Qualification target plugin/version is not the current definition.")
+
+        if self._definition.model_release_required:
+            if target.model_release_id is None:
+                raise _probe_error("Release-bound plugin requires an exact model release identity.")
+            resolved = self._model_release_store.resolve(
+                target.plugin_id, target.plugin_version, target.model_release_id
+            )
+            if resolved.release.model_release_id != target.model_release_id:
+                raise _probe_error("Resolved model release does not match the qualification target.")
+            assets = resolve_local_assets(
+                deployment_config=self._settings.local_asset_paths,
+                plugin_id=target.plugin_id,
+                plugin_version=target.plugin_version,
+                asset_manifest_sha256=resolved.manifest.asset_manifest_sha256,
+            )
+            verify_assets(resolved.manifest, dict(assets))
+        elif target.model_release_id is not None:
+            raise _probe_error("Release-less plugin must not carry a model release identity.")
+        return None
+
+
 def _provider_from_registry(executor_registry: object, executor: str) -> object | None:
     providers = None
     getter = getattr(executor_registry, "providers", None)
@@ -182,17 +286,27 @@ def build_default_target_probe(
     model_release_store: object | None,
     executor_registry: object,
     now: Callable[[], datetime] | None = None,
-) -> LocalCpuTargetProbe:
+) -> LocalCpuTargetProbe | LocalGpuTargetProbe:
     handle = pipeline_registry.get(target.plugin_id)
     definition = handle.definition
     provider = _provider_from_registry(executor_registry, target.executor)
-    return LocalCpuTargetProbe(
-        settings=settings,
-        definition=definition,
-        provider=provider,
-        model_release_store=model_release_store,
-        now=now,
-    )
+    if target.executor == "local_gpu":
+        return LocalGpuTargetProbe(
+            settings=settings,
+            definition=definition,
+            provider=provider,
+            model_release_store=model_release_store,
+            now=now,
+        )
+    if target.executor == "local_cpu":
+        return LocalCpuTargetProbe(
+            settings=settings,
+            definition=definition,
+            provider=provider,
+            model_release_store=model_release_store,
+            now=now,
+        )
+    raise ValueError(f"No local target probe exists for executor '{target.executor}'.")
 
 
 class QualificationRunner(Protocol):
@@ -204,6 +318,27 @@ class QualificationRunner(Protocol):
 class LocalCpuQualificationRunner:
     qualification_type = LOCAL_CPU_SMOKE_V1
     identity_scheme = LOCAL_CPU_V1
+
+    def __init__(self, target_probe: Callable[[QualificationTarget], None] | None = None) -> None:
+        self._target_probe = target_probe
+
+    def run(self, *, target: QualificationTarget) -> tuple[QualificationResult, ...]:
+        if self._target_probe is None:
+            return (
+                QualificationResult("probe", False, "QUALIFICATION_PROBE_UNAVAILABLE"),
+            )
+        try:
+            self._target_probe(target)
+        except PlatformError as exc:
+            return (QualificationResult("probe", False, exc.message),)
+        except Exception as exc:  # never propagate as an exception
+            return (QualificationResult("probe", False, type(exc).__name__),)
+        return (QualificationResult("probe", True),)
+
+
+class LocalGpuQualificationRunner:
+    qualification_type = LOCAL_GPU_CUDA_V1
+    identity_scheme = BHQ3_GPU_V1
 
     def __init__(self, target_probe: Callable[[QualificationTarget], None] | None = None) -> None:
         self._target_probe = target_probe
@@ -235,6 +370,8 @@ def select_runner(
 ) -> QualificationRunner:
     if executor == "local_cpu":
         return LocalCpuQualificationRunner(target_probe=target_probe)
+    if executor == "local_gpu":
+        return LocalGpuQualificationRunner(target_probe=target_probe)
     return DeferredGpuQualificationRunner()
 
 

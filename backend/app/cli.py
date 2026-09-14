@@ -221,7 +221,7 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
         runtime_descriptor=provider.runtime_descriptor().to_metadata(),
     )
 
-    if args.executor == "local_cpu":
+    if args.executor in ("local_cpu", "local_gpu"):
         probe = build_default_target_probe(
             target=target,
             settings=ctx.settings,
