@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,7 +29,8 @@ class DatasetExperimentCreate(BaseModel):
     plugin_version: str = Field(min_length=1)
     model_release_id: Annotated[str, Field(pattern=MODEL_RELEASE_ID_PATTERN)] | None = None
 
-    executor: str = Field(min_length=1)
+    executor: str | None = None
+    execution_mode: Literal["manual", "auto"] = "manual"
     parameters: dict[str, Any] = Field(default_factory=dict)
 
     evaluation_protocol: str = Field(default=DEFAULT_PHYSICAL_TF_PROTOCOL, min_length=1)
@@ -97,6 +98,12 @@ class DatasetExperimentRead(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+
+    # Safe execution-selection provenance projection (never the raw descriptor).
+    requested_execution_mode: str | None = None
+    auto_reason_code: str | None = None
+    auto_reason: str | None = None
+    workload_class: str | None = None
 
     # Derived from Item rows (never persisted)
     expected_items: int

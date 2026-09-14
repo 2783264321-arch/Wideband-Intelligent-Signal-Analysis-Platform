@@ -36,6 +36,7 @@ def create_experiment(payload: DatasetExperimentCreate, request: Request):
             evaluation_protocol=payload.evaluation_protocol,
             max_concurrency=payload.max_concurrency,
             model_release_id=payload.model_release_id,
+            execution_mode=payload.execution_mode,
         )
         return service.get_experiment(experiment.id)
 

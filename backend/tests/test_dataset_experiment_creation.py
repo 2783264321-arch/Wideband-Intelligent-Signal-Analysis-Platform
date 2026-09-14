@@ -207,7 +207,10 @@ def test_creation_freezes_parameters_and_runtime_descriptor(client):
     experiment = _create(service, parameters={"threshold": 0.5})
     assert experiment.parameters_json == {"threshold": 0.5}
     assert experiment.executor == "local_cpu"
-    assert experiment.runtime_descriptor_json == FakeProvider("local_cpu", runtime_ref=LOCAL_REF).runtime_descriptor().to_metadata()
+    expected_descriptor = FakeProvider("local_cpu", runtime_ref=LOCAL_REF).runtime_descriptor()
+    parsed = RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)
+    assert parsed.to_metadata() == expected_descriptor.to_metadata()
+    assert experiment.runtime_descriptor_json["execution_selection"]["requested_execution_mode"] == "manual"
 
 
 def test_creation_does_not_probe_any_recording(client):

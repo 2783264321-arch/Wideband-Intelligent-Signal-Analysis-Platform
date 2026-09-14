@@ -22,6 +22,7 @@ from app.dataset_experiments.schema import (
     DatasetExperimentItemRead,
     DatasetExperimentRead,
 )
+from app.execution_selection.resolver import resolve_auto_execution
 from app.pipelines.plugin import validate_plugin_parameters
 from app.recordings.model import RecordingModel
 from app.remote_execution.runtime import FROZEN_AUTHORITY_ITEM_CODES, RuntimeDescriptor
@@ -199,6 +200,7 @@ class DatasetExperimentService:
             )
             or 0
         )
+        selection_meta = dict(experiment.runtime_descriptor_json or {}).get("execution_selection") or {}
         return DatasetExperimentRead(
             id=experiment.id,
             name=experiment.name,
@@ -222,6 +224,10 @@ class DatasetExperimentService:
             created_at=experiment.created_at,
             started_at=experiment.started_at,
             completed_at=experiment.completed_at,
+            requested_execution_mode=selection_meta.get("requested_execution_mode"),
+            auto_reason_code=selection_meta.get("auto_reason_code"),
+            auto_reason=selection_meta.get("auto_reason"),
+            workload_class=selection_meta.get("workload_class"),
             expected_items=sum(status_counts.values()),
             queued_items=status_counts.get("queued", 0),
             running_items=status_counts.get("running", 0),
@@ -295,17 +301,22 @@ class DatasetExperimentService:
         dataset_label_space,
         plugin_id,
         plugin_version,
-        executor,
+        executor=None,
         parameters,
         evaluation_protocol,
         max_concurrency,
         model_release_id=None,
+        execution_mode="manual",
     ):
         if max_concurrency < 1:
             raise PlatformError(
                 "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
                 "max_concurrency must be >= 1.",
                 422,
+            )
+        if execution_mode not in ("manual", "auto"):
+            raise PlatformError(
+                "EXECUTION_REQUEST_INVALID", "execution_mode must be 'manual' or 'auto'."
             )
 
         manifest = self._manifest_preview(dataset_name, dataset_split, dataset_label_space)
@@ -320,7 +331,61 @@ class DatasetExperimentService:
         frozen_asset_sha = (
             None if resolved_release is None else resolved_release.manifest.asset_manifest_sha256
         )
-        provider, descriptor = self._validate_execution(definition, frozen_release_id, executor)
+
+        selection = None
+        if execution_mode == "auto":
+            if executor is not None:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "execution_mode='auto' must not specify an executor.",
+                )
+            if self.executor_registry is None:
+                raise PlatformError(
+                    "EXECUTION_CAPABILITY_UNAVAILABLE", "Executor registry is not configured."
+                )
+            if not manifest.entries:
+                raise PlatformError(
+                    "DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                    "Auto execution requires at least one dataset recording.",
+                    409,
+                )
+            probe_recording = self.session.get(RecordingModel, manifest.entries[0].recording_id)
+            if probe_recording is None:
+                raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+            selection = resolve_auto_execution(
+                definition=definition,
+                model_release=resolved_release,
+                probe_recording=probe_recording,
+                executor_registry=self.executor_registry,
+                dataset_item_count=manifest.expected_recordings,
+            )
+            if selection.resolved_executor is None:
+                raise PlatformError(selection.reason_code, selection.reason)
+            frozen_executor = selection.resolved_executor
+        else:
+            if executor is None:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "manual execution requires an explicit executor.",
+                )
+            frozen_executor = executor
+
+        provider, descriptor = self._validate_execution(definition, frozen_release_id, frozen_executor)
+
+        provenance = {
+            "requested_execution_mode": execution_mode,
+            "resolved_executor": provider.name,
+        }
+        if selection is not None:
+            provenance.update({
+                "auto_reason_code": selection.reason_code,
+                "auto_reason": selection.reason,
+                "workload_class": selection.workload_class,
+            })
+        runtime_descriptor_json = {
+            **descriptor.to_metadata(),
+            "execution_selection": provenance,
+        }
 
         experiment = DatasetExperimentModel(
             id=f"exp_{uuid4().hex}",
@@ -335,7 +400,7 @@ class DatasetExperimentService:
             asset_manifest_sha256=frozen_asset_sha,
             parameters_json=dict(parameters),
             executor=provider.name,
-            runtime_descriptor_json=descriptor.to_metadata(),
+            runtime_descriptor_json=runtime_descriptor_json,
             evaluation_protocol=evaluation_protocol,
             max_concurrency=max_concurrency,
             status="pending",
