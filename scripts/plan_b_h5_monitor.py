@@ -86,14 +86,22 @@ def map_ownership_pairs(run_ids: list[str], *, proc_root: Path = Path("/proc")):
 
 
 def foreign_compute_pids(samples: list) -> list[int]:
-    """GPU compute PIDs observed that were not mapped to an exact Plan-B worker."""
+    """Currently-alive GPU compute PIDs NOT mapped to an exact Plan-B worker.
+
+    A GPU compute PID is only a foreign process if it still exists at evaluation
+    time. Workers that have already exited leave their PID in historical
+    samples; treating an exited (reused-empty) PID as foreign would misreport
+    the campaign's own transient sampling race as a violation. Any GPU process
+    that is alive and unmapped is still an abort condition (checked live by the
+    concurrency monitor).
+    """
     foreign: set[int] = set()
     for sample in samples:
         mapped = set(sample.worker_pids) if hasattr(sample, "worker_pids") else set()
         for pid in getattr(sample, "gpu_compute_pids", ()):
             if pid not in mapped:
                 foreign.add(pid)
-    return sorted(foreign)
+    return sorted(pid for pid in foreign if Path(f"/proc/{pid}").exists())
 
 
 class _MonitorBase:

@@ -9,9 +9,13 @@ Covers the final corrective issues:
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
+
+import time
 
 import pytest
 
@@ -296,3 +300,30 @@ def test_h5_resume_rejects_fresh_db() -> None:
     assert "verify_prior_cycles" in source
     assert 'if fresh["fresh"] and start_cycle != 0' in source
     assert 'if not fresh["fresh"] and start_cycle == 0' in source
+
+
+def test_foreign_compute_pids_excludes_exited_pids() -> None:
+    """An exited GPU PID left in historical samples is NOT a foreign process."""
+    sample = h5.ConcurrencySample(0.0, (), (), (99999,), 0, 0, 0.25, experiment_id="e")
+    assert monitor.foreign_compute_pids([sample]) == []
+
+
+def test_foreign_compute_pids_flags_alive_unmapped() -> None:
+    """A live unmapped GPU PID IS reported as foreign."""
+    import os
+    import signal
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            time.sleep(30)
+        finally:
+            os._exit(0)
+    try:
+        sample = h5.ConcurrencySample(0.0, (), (), (pid,), 0, 0, 0.25, experiment_id="e")
+        assert monitor.foreign_compute_pids([sample]) == [pid]
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
