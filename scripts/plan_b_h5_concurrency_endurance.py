@@ -143,18 +143,73 @@ def run_cycle(app, *, cycle: membership.H5Cycle, name: str, concurrency: int,
     return summary
 
 
+def verify_prior_cycles(app, *, cycles, start_cycle: int, root: Path) -> list[dict]:
+    """Controlled resume: verify every already-completed cycle from the real DB.
+
+    Never re-runs a completed cycle. Returns the recovered cycle summaries; the
+    intended partition stays 16 + 16 + 8 = 40 and remaining cycles continue.
+    """
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    recovered: list[dict] = []
+    existing = client.get("/api/dataset-experiments").json()
+    for cycle in cycles[:start_cycle]:
+        expected = cycle.expected_items
+        used = {s["_experiment_id"] for s in recovered}
+        candidates = [
+            e for e in existing
+            if e["plugin_id"] == PLUGIN and e["status"] == "completed"
+            and e["max_concurrency"] == h5.CONCURRENCY_BOUND
+            and e["expected_items"] == expected
+            and e["id"] not in used
+        ]
+        if not candidates:
+            raise SystemExit(
+                f"H5 STOP: resume requires a completed cycle with {expected} items "
+                f"before --start-cycle {start_cycle}"
+            )
+        experiment_id = sorted(c["id"] for c in candidates)[0]
+        summary = gather_cycle_evidence(app, experiment_id=experiment_id, cycle=cycle)
+        acceptance = h5.evaluate_cycle_acceptance(summary=summary, cycle=cycle)
+        if acceptance.abort:
+            raise SystemExit(
+                f"H5 STOP: prior cycle {cycle.index + 1} acceptance failed: {acceptance.checks}"
+            )
+        summary["_cycle_acceptance"] = acceptance.checks
+        summary["_recovered"] = True
+        recovered.append(summary)
+        print(json.dumps({"resumed_cycle": cycle.index + 1,
+                          "experiment_id": experiment_id,
+                          "actual_runs": summary["_actual_run_count"]}, indent=2))
+    return recovered
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", action="store_true")
+    parser.add_argument("--start-cycle", type=int, default=0,
+                        help="resume from cycle N (1-based); prior cycles must be completed")
     args = parser.parse_args(argv)
     if not args.run:
         parser.error("--run is required (real 40-execution campaign)")
+    start_cycle = max(0, args.start_cycle - 1)
 
     root = common.PLAN_B_ROOT / "h5"
-    # Issue 5: exactly-once guard BEFORE any registration/settlement.
+
+    cycles = membership.h5_cycles()
+    if membership.total_expected_executions() != 40:
+        raise SystemExit("H5 STOP: cycle partition is not 40")
+
+    # Issue 5: exactly-once guard. On a fresh DB only start_cycle==0 is legal;
+    # when resuming, prior cycles must already be completed (never re-run).
     fresh = h5.check_h5_fresh_state(root / "qual.db")
-    if not fresh["fresh"]:
-        raise SystemExit(f"H5 STOP: {fresh['reason']} (existing state: {fresh['counts']})")
+    if fresh["fresh"] and start_cycle != 0:
+        raise SystemExit("H5 STOP: cannot resume: the H5 DB is fresh")
+    if not fresh["fresh"] and start_cycle == 0:
+        raise SystemExit(
+            f"H5 STOP: H5_EXISTING_STATE (existing state: {fresh['counts']})"
+        )
 
     # Issue 1: before the FIRST H5 DatasetExperiment exists, the qualification-
     # owned worker set is EMPTY, so ANY pre-existing GPU compute process is foreign.
@@ -164,6 +219,9 @@ def main(argv=None) -> int:
 
     baseline = admission["gpu_memory_baseline_mib"]
     app, _settings = core.build_app(root)
+    recovered: list[dict] = verify_prior_cycles(
+        app, cycles=cycles, start_cycle=start_cycle, root=root
+    )
     view_counts = {
         membership.H5_FULL: membership.register_dataset_view(
             app, dataset_name=membership.H5_FULL, stems=tuple(common.H2_STEMS)
@@ -172,10 +230,6 @@ def main(argv=None) -> int:
             app, dataset_name=membership.H5_TAIL8, stems=tuple(common.H2_STEMS[:8])
         ),
     }
-
-    cycles = membership.h5_cycles()
-    if membership.total_expected_executions() != 40:
-        raise SystemExit("H5 STOP: cycle partition is not 40")
 
     samples_path = common.EVIDENCE_DIR / "h5_concurrency_samples.jsonl"
     resource_path = common.EVIDENCE_DIR / "h5_resource_samples.jsonl"
@@ -206,9 +260,11 @@ def main(argv=None) -> int:
     )
     resource_monitor.start()
 
-    cycle_summaries = []
+    cycle_summaries = list(recovered)
     try:
         for index, cycle in enumerate(cycles):
+            if index < start_cycle:
+                continue  # already completed and verified from the real DB
             summary = run_cycle(
                 app, cycle=cycle, name=f"Plan B H5 cycle {index + 1}",
                 concurrency=h5.CONCURRENCY_BOUND,

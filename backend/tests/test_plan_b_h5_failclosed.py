@@ -288,3 +288,11 @@ def test_sampling_gap_aborts_immediately() -> None:
     monitor_obj._evaluate(h5.ConcurrencySample(
         0.0, (1,), ("a",), (1,), 1, 0, 0.7, experiment_id="e"))
     assert monitor_obj.abort_reason == "CONCURRENCY_SAMPLING_GAP"
+
+
+def test_h5_resume_rejects_fresh_db() -> None:
+    source = (SCRIPTS / "plan_b_h5_concurrency_endurance.py").read_text(encoding="utf-8")
+    assert "--start-cycle" in source
+    assert "verify_prior_cycles" in source
+    assert 'if fresh["fresh"] and start_cycle != 0' in source
+    assert 'if not fresh["fresh"] and start_cycle == 0' in source
