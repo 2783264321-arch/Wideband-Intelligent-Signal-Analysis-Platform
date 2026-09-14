@@ -148,5 +148,71 @@ def test_h5_evidence_path_and_constants() -> None:
     assert h5.GPU_QUIESCENT_TIMEOUT_S == 60
     assert str(common.EVIDENCE_DIR).startswith(str(common.PLAN_B_ROOT))
     source = (SCRIPTS / "plan_b_h5_concurrency_endurance.py").read_text(encoding="utf-8")
-    assert "pre_admission_gate" in source
-    assert "16 + 16 + 8" in source or "h5_expected_executions" in source
+    assert "run_per_campaign_admission" in source
+    assert "16 + 16 + 8" in source or "h5_expected_executions" in source or "total_expected_executions" in source
+
+
+def test_h5_high_frequency_gap_constants() -> None:
+    assert h5.H5_TARGET_SAMPLE_PERIOD_S <= 0.25
+    assert h5.H5_MAX_SAMPLE_GAP_S <= 0.5
+
+
+def test_h5_sampling_gap_abort_is_enforced() -> None:
+    # 0.51 s actual gap -> CONCURRENCY_SAMPLING_GAP
+    over = h5.evaluate_concurrency_sample(h5.ConcurrencySample(
+        timestamp=0.0, worker_pids=(1,), worker_run_ids=("run_a",), gpu_compute_pids=(1,),
+        db_running_runs=1, db_pending_runs=0, interval_s=0.51,
+    ))
+    assert over.abort is True
+    assert over.reason == "CONCURRENCY_SAMPLING_GAP"
+
+
+def test_h5_three_qualification_workers_abort() -> None:
+    evaluation = h5.evaluate_concurrency_sample(h5.ConcurrencySample(
+        timestamp=0.0, worker_pids=(1, 2, 3), worker_run_ids=("a", "b", "c"),
+        gpu_compute_pids=(1, 2, 3), db_running_runs=3, db_pending_runs=0, interval_s=0.25,
+    ))
+    assert evaluation.abort is True
+    assert evaluation.reason == "CONCURRENCY_BOUND_EXCEEDED"
+
+
+def test_h5_final_acceptance_derived_not_constant() -> None:
+    cycles = [
+        {"status": "completed", "_membership": {"expected_items": 16}, "failed_items": 0},
+        {"status": "completed", "_membership": {"expected_items": 16}, "failed_items": 0},
+        {"status": "completed", "_membership": {"expected_items": 8}, "failed_items": 0},
+    ]
+    samples = [
+        h5.ConcurrencySample(0.0, (1,), ("a",), (1,), 1, 0, 0.25),
+        h5.ConcurrencySample(0.25, (1, 2), ("a", "b"), (1, 2), 2, 0, 0.25),
+    ]
+    result = h5.evaluate_final_acceptance(
+        cycle_summaries=cycles, concurrency_samples=samples, resource_samples=[],
+        resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+    )
+    assert result["passed"] is True
+    assert result["cycle_expected_items"] == [16, 16, 8]
+    assert result["max_observed_concurrency"] == 2
+
+    bad = list(cycles)
+    bad[2] = {"status": "completed", "_membership": {"expected_items": 16}, "failed_items": 0}
+    failed = h5.evaluate_final_acceptance(
+        cycle_summaries=bad, concurrency_samples=samples, resource_samples=[],
+        resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+    )
+    assert failed["passed"] is False
+
+
+def test_h5_resource_delta_baseline_semantics() -> None:
+    assert h5.evaluate_resource_deltas(baseline={"max": 3, "oom": 0, "oom_kill": 0},
+                                       current={"max": 3, "oom": 0, "oom_kill": 0}) == {
+        "max": 0, "oom": 0, "oom_kill": 0, "high": 0}
+    assert h5.evaluate_resource_deltas(baseline={"oom": 0}, current={"oom": 1})["oom"] == 1
+
+
+def test_h5_campaign_script_uses_membership_and_monitor() -> None:
+    source = (SCRIPTS / "plan_b_h5_concurrency_endurance.py").read_text(encoding="utf-8")
+    assert "assert_cycle_membership" in source
+    assert "ConcurrencyMonitor" in source
+    assert "ResourceMonitor" in source
+    assert "run_per_campaign_admission" in source
