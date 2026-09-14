@@ -101,6 +101,7 @@ def create_analysis_run(payload: AnalysisRunCreate, request: Request):
             executor=payload.executor,
             parameters=payload.parameters,
             model_release_id=payload.model_release_id,
+            execution_mode=payload.execution_mode,
         )
 
 

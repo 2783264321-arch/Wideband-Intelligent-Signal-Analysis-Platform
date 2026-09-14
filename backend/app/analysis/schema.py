@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,12 +27,18 @@ class RemoteExecutionMetadataRead(BaseModel):
     payload_sha256: str | None = None
     remote_started_at: datetime | None = None
     remote_finished_at: datetime | None = None
+    # Execution-selection provenance (manual/auto). Platform-owned, bounded.
+    requested_execution_mode: str | None = None
+    auto_reason_code: str | None = None
+    auto_reason: str | None = None
+    workload_class: str | None = None
 
 
 class AnalysisRunCreate(BaseModel):
     recording_id: str
     pipeline_id: str
-    executor: str = "local_cpu"
+    executor: str | None = None
+    execution_mode: Literal["manual", "auto"] = "manual"
     parameters: dict[str, Any] = Field(default_factory=dict)
     model_release_id: Annotated[str, Field(pattern=MODEL_RELEASE_ID_PATTERN)] | None = None
 

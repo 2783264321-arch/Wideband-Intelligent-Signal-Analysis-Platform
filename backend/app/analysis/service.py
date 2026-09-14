@@ -10,6 +10,7 @@ from app.analysis.job_manager import LocalJobManager
 from app.analysis.model import AnalysisRunModel
 from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.errors import PlatformError
+from app.execution_selection.resolver import resolve_auto_execution
 from app.pipelines.plugin import validate_plugin_parameters
 from app.pipelines.registry import PipelineRegistry
 from app.recordings.model import RecordingModel
@@ -361,23 +362,75 @@ class AnalysisService:
         *,
         recording_id: str,
         pipeline_id: str,
-        executor: str,
+        executor: str | None = None,
         parameters: dict,
         model_release_id: str | None = None,
+        execution_mode: str = "manual",
     ) -> AnalysisRunModel:
-        """Legacy Single-Recording path.
+        """Single-Recording path: Manual (exact executor) or Auto (pre-persist selection).
 
-        Composes the caller-owned prepare seam with a service-owned preparation
-        commit and the physical launch primitive, preserving current public
-        behavior exactly.
+        Manual preserves the historical contract: an omitted ``executor`` defaults
+        to ``local_cpu`` and an explicit executor is validated exactly with no
+        substitution. Auto resolves exactly one executor BEFORE persistence and
+        must not be combined with an explicit ``executor``.
         """
+        if execution_mode not in ("manual", "auto"):
+            raise PlatformError(
+                "EXECUTION_REQUEST_INVALID",
+                "execution_mode must be 'manual' or 'auto'.",
+            )
+
+        selection = None
+        if execution_mode == "auto":
+            if executor is not None:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "execution_mode='auto' must not specify an executor.",
+                )
+            if self.executor_registry is None:
+                raise PlatformError(
+                    "EXECUTION_CAPABILITY_UNAVAILABLE", "Executor registry is not configured."
+                )
+            recording = self.session.get(RecordingModel, recording_id)
+            if recording is None:
+                raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+            definition = self.registry.get(pipeline_id).definition
+            resolved_release = self._resolve_release(definition, model_release_id)
+            selection = resolve_auto_execution(
+                definition=definition,
+                model_release=resolved_release,
+                probe_recording=recording,
+                executor_registry=self.executor_registry,
+            )
+            if selection.resolved_executor is None:
+                raise PlatformError(selection.reason_code, selection.reason)
+            frozen_executor = selection.resolved_executor
+            # Freeze the exact release used for the Auto certificate decision.
+            frozen_model_release_id = (
+                None if resolved_release is None else resolved_release.release.model_release_id
+            )
+        else:
+            frozen_executor = executor or "local_cpu"
+            frozen_model_release_id = model_release_id
+
         run = self.prepare_run(
             recording_id=recording_id,
             pipeline_id=pipeline_id,
-            executor=executor,
+            executor=frozen_executor,
             parameters=parameters,
-            model_release_id=model_release_id,
+            model_release_id=frozen_model_release_id,
         )
+        provenance = {
+            "requested_execution_mode": execution_mode,
+            "resolved_executor": run.executor,
+        }
+        if selection is not None:
+            provenance.update({
+                "auto_reason_code": selection.reason_code,
+                "auto_reason": selection.reason,
+                "workload_class": selection.workload_class,
+            })
+        run.execution_metadata_json = {**(run.execution_metadata_json or {}), **provenance}
         self.session.commit()
         self.session.refresh(run)
         return self.launch_prepared_run(run.id)
