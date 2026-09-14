@@ -199,3 +199,126 @@ def test_authority_codes_are_item_level_classification():
     assert not is_experiment_level(PlatformError("EXECUTION_NOT_CERTIFIED", "x"))
     assert is_experiment_level(PlatformError("RUNTIME_DESCRIPTOR_INVALID", "x"))
     assert is_experiment_level(PlatformError("DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED", "x"))
+
+
+# ---------------------------------------------------------------------------
+# Plan A1.1 — frozen runtime drift recovery (both timing windows).
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_descriptor_drift_before_transaction_a_creates_no_run(client):
+    """Window A (A1.1): runtime generation drifts BEFORE Transaction A.
+
+    A DatasetExperiment is frozen to runtime generation A; the deployed provider
+    is then replaced by an independently-valid generation B (same
+    executor/device_type/device_index/precision, different environment identity).
+
+    ``start_item_attempt`` must reject the mismatch before Transaction A, so no
+    durable execution state is created at all: Experiment fails, the Item stays
+    queued, and there is no Attempt, no AnalysisRun and no worker.
+    """
+    provider_a = FakeProvider("local_cpu")
+    session, ds, analysis, _, experiment = running_experiment_with_token(
+        client, "T", max_concurrency=1, count=1, provider=provider_a
+    )
+
+    # Generation B: independently valid, different environment identity.
+    provider_b = FakeProvider("local_cpu", runtime_ref="fake:local_cpu:genB")
+
+    outcome = step_once(client, experiment.id, "T", provider=provider_b)
+
+    assert provider_b.launches == []
+    assert outcome == CoordinatorOutcome.INVARIANT_FAILED
+
+    with client.app.state.database.session_factory() as fresh:
+        stored_experiment = fresh.get(DatasetExperimentModel, experiment.id)
+        stored_item = item(fresh, experiment.id, order=0)
+        attempt_count = (
+            fresh.query(DatasetExperimentAttemptModel)
+            .filter_by(experiment_item_id=stored_item.id)
+            .count()
+        )
+        run_count = fresh.query(AnalysisRunModel).count()
+
+    assert stored_experiment.status == "failed"
+    assert stored_item.status == "queued"   # never mutated to manufacture a failed item
+    assert attempt_count == 0               # Transaction A never created
+    assert run_count == 0                   # no pending Run ever staged
+
+
+def test_runtime_descriptor_drift_after_transaction_a_terminalizes_owned_run(client):
+    """Window B (A1.1): runtime generation drifts AFTER Transaction A.
+
+    Transaction A commits under A (Item running, Attempt, Run pending), then the
+    deployed provider is replaced by generation B. ``launch_item_attempt`` must
+    detect ``RUNTIME_DESCRIPTOR_INVALID`` and — because that code is
+    experiment-level and never marks the owned Item failed — clean up the owned
+    Run and Item under the same generation fencing before re-raising.
+    """
+    provider_a = FakeProvider("local_cpu")
+    session, ds, analysis, _, experiment = running_experiment_with_token(
+        client, "T", max_concurrency=1, count=1, provider=provider_a
+    )
+    target = item(session, experiment.id, order=0)
+
+    attempt = ds.start_item_attempt(
+        experiment_id=experiment.id, item_id=target.id,
+        analysis_service=analysis, coordinator_token="T",
+    )
+
+    # Deploy generation B after Transaction A committed.
+    provider_b = FakeProvider("local_cpu", runtime_ref="fake:local_cpu:genB")
+    ds.executor_registry._providers["local_cpu"] = provider_b
+
+    with pytest.raises(PlatformError) as exc:
+        ds.launch_item_attempt(
+            experiment_id=experiment.id, item_id=target.id, attempt_id=attempt.id,
+            analysis_service=analysis, coordinator_token="T",
+        )
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
+
+    with client.app.state.database.session_factory() as fresh:
+        stored_attempt = fresh.get(DatasetExperimentAttemptModel, attempt.id)
+        stored_run = fresh.get(AnalysisRunModel, attempt.analysis_run_id)
+        stored_item = fresh.get(DatasetExperimentItemModel, target.id)
+
+    assert stored_attempt.launch_requested_at is None   # no launch intent claimed
+    assert stored_run.status == "interrupted"           # owned Run terminalized
+    assert stored_run.error_type == "RUNTIME_DESCRIPTOR_INVALID"
+    assert stored_run.worker_pid is None
+    assert stored_item.status == "failed"               # owned Item failed
+    assert provider_b.launches == []                    # no worker launched
+
+
+def test_window_b_cleanup_respects_generation_fencing(client):
+    """A stale coordinator token must not perform the Window-B cleanup."""
+    provider_a = FakeProvider("local_cpu")
+    session, ds, analysis, _, experiment = running_experiment_with_token(
+        client, "T", max_concurrency=1, count=1, provider=provider_a
+    )
+    target = item(session, experiment.id, order=0)
+    attempt = ds.start_item_attempt(
+        experiment_id=experiment.id, item_id=target.id,
+        analysis_service=analysis, coordinator_token="T",
+    )
+
+    provider_b = FakeProvider("local_cpu", runtime_ref="fake:local_cpu:genB")
+    ds.executor_registry._providers["local_cpu"] = provider_b
+    experiment.coordinator_token = "T2"  # generation rotated
+    session.commit()
+
+    with pytest.raises(PlatformError) as exc:
+        ds.launch_item_attempt(
+            experiment_id=experiment.id, item_id=target.id, attempt_id=attempt.id,
+            analysis_service=analysis, coordinator_token="T",  # stale
+        )
+    assert exc.value.code == "DATASET_EXPERIMENT_FENCE_LOST"
+
+    with client.app.state.database.session_factory() as fresh:
+        stored_run = fresh.get(AnalysisRunModel, attempt.analysis_run_id)
+        stored_attempt = fresh.get(DatasetExperimentAttemptModel, attempt.id)
+        stored_item = fresh.get(DatasetExperimentItemModel, target.id)
+
+    assert stored_run.status == "pending"               # untouched by stale actor
+    assert stored_attempt.launch_requested_at is None
+    assert stored_item.status == "running"              # untouched by stale actor

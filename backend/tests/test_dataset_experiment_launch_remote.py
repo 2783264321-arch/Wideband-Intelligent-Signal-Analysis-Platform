@@ -212,3 +212,40 @@ def test_remote_real_stale_session_cas_does_not_launch(client, tmp_path):
     with client.app.state.database.session_factory() as fresh:
         assert fresh.get(DatasetExperimentAttemptModel, attempt.id).launch_requested_at is not None
 
+
+def test_remote_pre_transaction_a_runtime_drift_creates_no_run(client, tmp_path):
+    """A1.1 does not redesign remote recovery; the generic pre-Transaction-A
+    authority check ALSO applies to remote_gpu.
+
+    A remote runtime-generation change (same executor/device/precision, different
+    runtime identity) before Transaction A must reject scheduling with
+    ``RUNTIME_DESCRIPTOR_INVALID`` and create no Attempt/Run. Already-launched
+    remote pending/running recovery still uses the existing remote
+    coordinator/fencing semantics (see ``test_remote_startup_recovery.py``).
+    """
+    data_root = tmp_path / "data"
+    _seed_remote_dataset(client, data_root)
+    session, ds, analysis, provider = _services_remote(client, data_root)
+    experiment = _remote_experiment(ds)
+    item = _queued_item(session, experiment.id)
+
+    # Different remote runtime generation (same executor/device/precision).
+    drifted = FakeProvider("remote_gpu", runtime_ref="remote:test:cuda:2", probe=_Probe())
+    ds.executor_registry._providers["remote_gpu"] = drifted
+
+    with pytest.raises(PlatformError) as exc:
+        ds.start_item_attempt(experiment_id=experiment.id, item_id=item.id,
+                              analysis_service=analysis)
+    assert exc.value.code == "RUNTIME_DESCRIPTOR_INVALID"
+
+    with client.app.state.database.session_factory() as fresh:
+        stored_item = fresh.get(DatasetExperimentItemModel, item.id)
+        attempt_count = fresh.query(DatasetExperimentAttemptModel).filter_by(
+            experiment_item_id=item.id).count()
+        run_count = fresh.query(AnalysisRunModel).count()
+
+    assert stored_item.status == "queued"   # no Item mutation
+    assert attempt_count == 0               # no Attempt
+    assert run_count == 0                   # no AnalysisRun
+    assert drifted.launches == []
+

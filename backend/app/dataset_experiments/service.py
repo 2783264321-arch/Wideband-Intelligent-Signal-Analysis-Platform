@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 
 _ITEM_STATUSES = ("queued", "running", "completed", "failed")
 
+# A1.1: a changed frozen runtime generation is a systemic execution-identity
+# change (experiment-level), unlike a recoverable per-item provider/certificate
+# loss (FROZEN_AUTHORITY_ITEM_CODES). It is never added to that item-code set.
+_RUNTIME_DESCRIPTOR_INVALID = "RUNTIME_DESCRIPTOR_INVALID"
+
 
 def cas_fail_closed_pending_run(session, *, experiment_id, coordinator_token,
                                 item_id, attempt_id, run_id, error_type, error_message):
@@ -464,14 +469,41 @@ class DatasetExperimentService:
                 409,
             )
 
-        # NOTE (Plan A1 / P3): frozen executor authority (provider registration,
-        # exact certificate, provider descriptor match) is intentionally NOT
-        # revalidated here. It is a per-item, pre-intent check owned by
-        # `launch_item_attempt` via
-        # `ExecutorRegistry.validate_frozen_execution_authority`, so a recoverable
-        # provider/certificate loss fails the item rather than the whole
-        # experiment. Dataset/release identity checks above remain experiment-level.
+        # NOTE (Plan A1 / P3; A1.1): frozen executor authority (provider
+        # registration, exact certificate, provider descriptor match) is not part
+        # of experiment identity revalidation here; it is validated by the shared
+        # `_validate_frozen_execution_authority` helper before BOTH durable
+        # transactions (Transaction A in `start_item_attempt`, Transaction B in
+        # `launch_item_attempt`), so a changed runtime generation is rejected
+        # before either write. Dataset/release identity checks above remain
+        # experiment-level.
         return experiment
+
+    def _validate_frozen_execution_authority(self, experiment):
+        """Cheap, deterministic frozen runtime-authority check. Never probes.
+
+        Resolves the exact frozen plugin definition, parses the frozen runtime
+        descriptor, and requires the current deployment provider to match it
+        exactly (full ``RuntimeDescriptor.to_metadata()``) with an exact
+        certificate. Used before Transaction A and before Transaction B so a
+        runtime generation change is rejected before either durable write.
+
+        Raises ``RUNTIME_DESCRIPTOR_INVALID`` / ``EXECUTION_NOT_CERTIFIED`` /
+        ``EXECUTION_CAPABILITY_UNAVAILABLE`` (or
+        ``DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED`` on plugin-version
+        drift). Never substitutes executor/runtime and never probes.
+        """
+        definition = self.registry.get(experiment.plugin_id).definition
+        if definition.version != experiment.plugin_version:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
+                "Active plugin version no longer matches the frozen plugin version.",
+                409,
+            )
+        frozen_descriptor = RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)
+        self.executor_registry.validate_frozen_execution_authority(
+            definition, experiment.model_release_id, experiment.executor, frozen_descriptor
+        )
 
     def _assert_item_membership(self, experiment, manifest):
         items = list(
@@ -539,6 +571,12 @@ class DatasetExperimentService:
                 409,
             )
         recording_id = item.recording_id
+
+        # Pre-Transaction-A frozen runtime-authority revalidation (A1.1). A changed
+        # runtime generation must not create a durable pending Run at all; reject
+        # it here, before any external I/O or write lock, so no Attempt/Run/worker
+        # is ever created and the Item stays queued.
+        self._validate_frozen_execution_authority(experiment)
 
         try:
             # All external I/O (availability/probe/identity/source hash) happens
@@ -729,32 +767,44 @@ class DatasetExperimentService:
                 409,
             )
 
-        # Pre-intent frozen execution-authority revalidation (Plan A1 / P3).
+        # Pre-intent frozen execution-authority revalidation (Plan A1 / P3; A1.1).
         # Must happen BEFORE Transaction B claims the launch intent, so an
         # unavailable authority never leaves a durable intent with no worker.
-        definition = self.registry.get(experiment.plugin_id).definition
-        if definition.version != experiment.plugin_version:
-            raise PlatformError(
-                "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",
-                "Active plugin version no longer matches the frozen plugin version.",
-                409,
-            )
-        frozen_descriptor = RuntimeDescriptor.from_metadata(experiment.runtime_descriptor_json)
         try:
-            self.executor_registry.validate_frozen_execution_authority(
-                definition, experiment.model_release_id, experiment.executor, frozen_descriptor
-            )
+            self._validate_frozen_execution_authority(experiment)
         except PlatformError as exc:
-            if exc.code in FROZEN_AUTHORITY_ITEM_CODES and coordinator_token is not None:
-                self.fail_closed_unlaunched_run(
-                    experiment_id=experiment.id,
-                    coordinator_token=coordinator_token,
-                    item_id=item.id,
-                    attempt_id=attempt.id,
-                    run_id=run.id,
-                    error_type=exc.code,
-                    error_message=exc.message,
-                )
+            if coordinator_token is not None:
+                if exc.code in FROZEN_AUTHORITY_ITEM_CODES:
+                    self.fail_closed_unlaunched_run(
+                        experiment_id=experiment.id,
+                        coordinator_token=coordinator_token,
+                        item_id=item.id,
+                        attempt_id=attempt.id,
+                        run_id=run.id,
+                        error_type=exc.code,
+                        error_message=exc.message,
+                    )
+                elif exc.code == _RUNTIME_DESCRIPTOR_INVALID:
+                    # Window B (A1.1): Transaction A already committed a pending
+                    # Run bound to a running Item, but the frozen runtime
+                    # generation changed. RUNTIME_DESCRIPTOR_INVALID stays
+                    # experiment-level, so the coordinator will NOT fail the owned
+                    # Item; terminalize the owned Run and fail the owned Item here
+                    # under the same generation fencing, then re-raise so the
+                    # Experiment is failed without orphaning Run/Item.
+                    self.fail_closed_unlaunched_run(
+                        experiment_id=experiment.id,
+                        coordinator_token=coordinator_token,
+                        item_id=item.id,
+                        attempt_id=attempt.id,
+                        run_id=run.id,
+                        error_type=exc.code,
+                        error_message=exc.message,
+                    )
+                    self._mark_item_failed(
+                        item.id, exc.code, exc.message,
+                        experiment_id=experiment.id, coordinator_token=coordinator_token,
+                    )
             raise
 
         now = datetime.now(timezone.utc)
