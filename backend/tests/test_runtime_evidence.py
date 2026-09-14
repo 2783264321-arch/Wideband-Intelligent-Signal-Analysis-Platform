@@ -16,6 +16,7 @@ from app.runtime_qualification.evidence import (
     EVIDENCE_SCHEMA_VERSION,
     QualificationEvidence,
     QualificationResult,
+    compute_evidence_sha256,
     evidence_directory,
     evidence_payload,
     load_evidence_dir,
@@ -82,7 +83,16 @@ def test_round_trip(tmp_path: Path) -> None:
     assert loaded.passed is True
     assert loaded.results == evidence.results
     assert loaded.evidence_sha256
-    assert loaded.evidence_sha256 == evidence.evidence_sha256 or True
+    assert loaded.evidence_sha256 == compute_evidence_sha256(loaded)
+
+
+def test_non_utf8_evidence_is_invalid(tmp_path: Path) -> None:
+    directory = evidence_directory(tmp_path, executor=_EXECUTOR, runtime_ref=_RUNTIME_REF)
+    directory.mkdir(parents=True)
+    (directory / EVIDENCE_FILENAME).write_bytes(b"\xff\xfe\x00not valid utf-8")
+    with pytest.raises(PlatformError) as exc:
+        load_evidence_dir(directory)
+    assert exc.value.code == "QUALIFICATION_EVIDENCE_INVALID"
 
 
 def test_storage_key_verification_rejects_wrong_directory(tmp_path: Path) -> None:

@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import sys
 
 from app.core.errors import PlatformError
 

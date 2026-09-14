@@ -105,6 +105,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _make_identity_resolver(repo_refs: frozenset[str]):
+    """Derive and compare each provider's identity against the interpreter material.
+
+    Never rewrites ``WSP_LOCAL_*_RUNTIME_REF``; never pattern-matches the ref shape
+    to decide ``legacy_opaque``.
+    """
+
+    def resolver(spec, settings):
+        configured = spec.runtime_ref
+        if configured is None:
+            return (None, None, spec.identity_scheme, "not_configured")
+        if configured in repo_refs:
+            # Existing repo-default identity with platform certificate provenance
+            # and no new A3 derivation: provenance-based, never string-based.
+            return (configured, None, identity_module.LEGACY_OPAQUE, "legacy_opaque")
+        scheme = (
+            identity_module.BHQ3_GPU_V1
+            if spec.executor == "local_gpu"
+            else identity_module.LOCAL_CPU_V1
+        )
+        parsed = identity_module.parse_local_runtime_ref(configured)
+        if parsed is None:
+            return (configured, None, scheme, "mismatch")
+        family, kind = parsed
+        python_path = getattr(settings, f"{spec.executor}_python_path", None)
+        try:
+            material = identity_module.collect_identity_material(python_path)
+            generation = identity_module.derive_generation_for_scheme(scheme=scheme, material=material)
+        except PlatformError:
+            return (configured, None, scheme, "unavailable")
+        derived = identity_module.derive_local_runtime_ref(family=family, kind=kind, generation=generation)
+        return (configured, derived, scheme, "match" if derived == configured else "mismatch")
+
+    return resolver
+
+
 def _cmd_runtime_doctor(ctx: CliContext, out) -> int:
     repo_refs = frozenset(
         certificate.runtime_ref for certificate in load_execution_certificates(ctx.repo_certificate_path)
@@ -127,6 +163,7 @@ def _cmd_runtime_doctor(ctx: CliContext, out) -> int:
         provider_specs=specs,
         interpreter_probe=doctor_module.SubprocessInterpreterProbe(),
         gpu_probe=doctor_module.NvidiaSmiGpuProbe(),
+        identity_resolver=_make_identity_resolver(repo_refs),
     )
     print(json.dumps(report.to_operator_json(), indent=2), file=out)
     return 0
@@ -186,7 +223,7 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
                 "qualification_type": evidence.qualification_type,
                 "identity_scheme": evidence.identity_scheme,
                 "runtime_ref": evidence.runtime_ref,
-                "evidence": str(path),
+                "evidence_dir": str(path.parent),
                 "results": [
                     {"name": result.name, "passed": result.passed, "detail": result.detail}
                     for result in evidence.results

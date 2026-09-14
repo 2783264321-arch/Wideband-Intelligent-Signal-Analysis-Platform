@@ -7,7 +7,7 @@ must not depend on an existing certificate.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -145,7 +145,11 @@ def _check_staleness(evidence: QualificationEvidence, now: datetime | None, max_
         created = datetime.fromisoformat(evidence.created_at)
     except (ValueError, TypeError) as exc:
         raise _invalid("Evidence created_at is not a valid timestamp.") from exc
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
     reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
     if (reference - created).total_seconds() > max_age_s:
         raise _invalid("Qualification evidence is stale.")
 

@@ -7,7 +7,7 @@ hash of the embedded ``runtime_ref``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -260,7 +260,7 @@ def _reconstruct(payload: dict) -> QualificationEvidence:
 def load_evidence(path: Path, *, expected_storage_key: str | None = None) -> QualificationEvidence:
     try:
         raw = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise _invalid("Evidence file could not be read.") from exc
     try:
         payload = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)

@@ -250,3 +250,28 @@ def test_cli_constructs_real_production_probe(tmp_path: Path, capsys, monkeypatc
     monkeypatch.setattr(cli_module, "build_default_target_probe", spy)
     assert _run(["qualify", "--plugin", "dummy", "--executor", "local_cpu"], context, capsys) == 0
     assert calls["count"] == 1
+
+
+def test_runtime_doctor_derives_and_compares_identity(tmp_path: Path, capsys) -> None:
+    good = _Provider(name="local_cpu", runtime_ref=_control_plane_ref(), device_type="cpu", precision="float32")
+    context = _context(tmp_path, _definition(), {"local_cpu": good})
+    assert _run(["runtime", "doctor"], context, capsys) == 0
+    assert '"identity_status": "match"' in capsys.readouterr().out
+
+    stale = _Provider(name="local_cpu", runtime_ref="local:autodl_primary:cpu:ffffffffffff", device_type="cpu", precision="float32")
+    context2 = _context(tmp_path, _definition(), {"local_cpu": stale})
+    assert _run(["runtime", "doctor"], context2, capsys) == 0
+    assert '"identity_status": "mismatch"' in capsys.readouterr().out
+
+
+def test_certificate_install_corrupt_evidence_has_no_traceback(tmp_path: Path, capsys) -> None:
+    provider = _Provider(name="local_cpu", runtime_ref=_control_plane_ref(), device_type="cpu", precision="float32")
+    context = _context(tmp_path, _definition(), {"local_cpu": provider})
+    corrupt = tmp_path / "qualification" / "local_cpu" / ("0" * 64)
+    corrupt.mkdir(parents=True)
+    (corrupt / "evidence.json").write_bytes(b"\xff\xfe\x00corrupt")
+    code = _run(["certificate", "install", "--from", str(corrupt)], context, capsys)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "QUALIFICATION_EVIDENCE_INVALID" in err
+    assert "Traceback" not in err
