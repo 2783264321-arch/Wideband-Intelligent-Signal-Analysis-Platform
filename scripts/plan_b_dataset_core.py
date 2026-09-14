@@ -169,8 +169,13 @@ class NvidiaSmiError(RuntimeError):
     """nvidia-smi telemetry is unavailable or malformed (acceptance fail-closed)."""
 
 
-def _run_nvidia_smi(args: list[str], *, runner=None) -> str:
-    """Run one fixed nvidia-smi query and fail closed on ANY failure."""
+def _run_nvidia_smi(args: list[str], *, runner=None, allow_empty: bool = False) -> str:
+    """Run one fixed nvidia-smi query and fail closed on failure.
+
+    ``allow_empty=True`` accepts empty stdout as a legitimate successful result
+    (e.g. ``--query-compute-apps`` with no running compute processes). Any
+    nonzero return code is always a failure.
+    """
     run = runner or subprocess.run
     argv = ["nvidia-smi", *args]
     try:
@@ -180,7 +185,7 @@ def _run_nvidia_smi(args: list[str], *, runner=None) -> str:
     if getattr(result, "returncode", None) != 0:
         raise NvidiaSmiError(f"nvidia-smi exited nonzero for query {args!r}.")
     out = (result.stdout or "").strip()
-    if out == "":
+    if out == "" and not allow_empty:
         raise NvidiaSmiError(f"nvidia-smi returned empty output for query {args!r}.")
     return out
 
@@ -198,9 +203,13 @@ def gpu_memory_used_mib(*, runner=None) -> int:
 
 
 def compute_apps(*, runner=None) -> list[tuple[int, int]]:
-    """Return compute-app (pid, used_mib); empty ONLY when nvidia-smi succeeded."""
+    """Return compute-app (pid, used_mib); empty ONLY when nvidia-smi succeeded.
+
+    An empty stdout with returncode 0 is the legitimate no-compute-process state.
+    """
     out = _run_nvidia_smi(
-        ["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], runner=runner
+        ["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+        runner=runner, allow_empty=True,
     )
     apps = []
     for line in out.splitlines():

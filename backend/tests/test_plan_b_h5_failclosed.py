@@ -49,10 +49,11 @@ def test_nvidia_smi_nonzero_fails_closed() -> None:
 
 
 def test_nvidia_smi_empty_output_fails_closed() -> None:
-    runner = _runner({("--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"):
+    # For scalar GPU queries, empty stdout is NOT a legitimate result.
+    runner = _runner({("--query-gpu=memory.used", "--format=csv,noheader,nounits"):
                       _completed("   \n")})
     with pytest.raises(core.NvidiaSmiError):
-        core.compute_apps(runner=runner)
+        core.gpu_memory_used_mib(runner=runner)
 
 
 def test_nvidia_smi_malformed_fails_closed() -> None:
@@ -68,14 +69,10 @@ def test_nvidia_smi_malformed_fails_closed() -> None:
 
 
 def test_nvidia_smi_valid_no_compute_is_genuinely_empty() -> None:
+    # rc 0 + empty stdout is the legitimate "no compute processes" state.
     runner = _runner({("--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"):
-                      _completed("")}) 
-    # valid empty output: nvidia-smi returns "" with rc 0 -> header-only messages
-    # Our fail-closed rule treats EMPTY stdout as unavailable (cannot distinguish
-    # "no apps" from "query failed"), so a well-formed no-apps output is the empty
-    # string is rejected; a genuine no-apps listing has no lines but non-empty csv.
-    with pytest.raises(core.NvidiaSmiError):
-        core.compute_apps(runner=runner)
+                      _completed("")})
+    assert core.compute_apps(runner=runner) == []
 
 
 def test_nvidia_smi_valid_metrics_parsed() -> None:
