@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-1. **Portable production contract preserved.** Production code must stay portable; Linux/`cgroup`/`/proc`/`nvidia-smi` logic stays in acceptance-only tooling (`scripts/`). Production `app/` must never import `torch`/`ultralytics`; the control-plane `.venv` stays ML-free (`torch: None`, `ultralytics: None`).
+1. **Portability / `nvidia-smi` boundary (explicit).** Production `app/` must never import `torch`/`ultralytics`; the control-plane `.venv` stays ML-free (`torch: None`, `ultralytics: None`). The following are acceptance-only and live only in `scripts/`: `/proc`-based PID identity/RSS telemetry, cgroup v2 memory/pressure/events reads, GPU utilization/memory sampling, crash-injection tooling, and the Amendment-A1 memory gate/monitor. `nvidia-smi` must NOT be a dependency of Auto policy, core executor selection, `local_cpu` runtime identity, or generic application startup (this preserves Windows/non-NVIDIA portability). `nvidia-smi` MAY be used by the fixed platform-owned `bhq3_gpu_v1` local_gpu identity/doctor probe (the sealed canonical material includes NVIDIA `driver_version`) and by operator-facing best-effort GPU diagnostics (as A3 already allows). The `local_gpu` `bhq3_gpu_v1` scheme is explicitly NVIDIA/CUDA-specific; absence or failure of `nvidia-smi` does NOT degrade to a generic identity — it produces `RUNTIME_IDENTITY_UNAVAILABLE`. The fixed command is platform-owned, takes no user-supplied shell input, and is invoked with `shell=False`. No universal `nvidia-smi` portability is claimed across non-NVIDIA systems.
 2. **One runtime identity authority, scheme-versioned.** `provider.runtime_ref` remains the single authority. `identity.py` stays a pure derivation/validation helper; it holds no historical runtime hash literal and never branches on the `runtime_ref` string.
 3. **CPU identity behavior unchanged.** `local_cpu_v1` material fields, canonicalization, and derivation are not modified. The GPU work is additive.
 4. **BHQ3 payload fields exactly:** `python, torch, torch_cuda, ultralytics, numpy, scipy, device_name, compute_capability, driver_version, cuda_available`. Never add `platform_system`, `architecture`, GPU UUID, hostname, or absolute interpreter path. Never remove or rename a field.
@@ -32,6 +32,7 @@
 16. **No secrets committed.** No SSH keys, tokens, or host credentials. Operator interpreter/asset absolute paths are deployment config, not secrets, and stay out of portable production defaults.
 17. **Every production task is RED → GREEN**, run with the control-plane venv from the repository root.
 18. **Missing identity material fails closed** (`RUNTIME_IDENTITY_UNAVAILABLE`); never substitute a changing `"unknown"` and then mint a supposedly exact certificate.
+19. **Exact GPU quiescence rule (single definition, referenced by H2/H3/H4/H5/B-final).** Let `gpu_memory_baseline_mib` be the pre-campaign quiescent `nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits` value (measured; currently 0 MiB but the code always uses the measured value). After a run/experiment/campaign becomes terminal, the qualification-owned compute-app PID set (from `nvidia-smi --query-compute-apps=pid,used_memory`) must be empty, and within `GPU_QUIESCENT_TIMEOUT_S = 60` seconds `memory.used <= gpu_memory_baseline_mib + GPU_QUIESCENT_MARGIN_MIB` with `GPU_QUIESCENT_MARGIN_MIB = 64`. If compute-apps are empty AND `memory.used` stays `> gpu_memory_baseline_mib + 64 MiB` for 60 s, record `GPU_MEMORY_NOT_QUIESCENT` and abort the current campaign. GPU memory alone never infers a worker leak: PID/compute-app state is always checked too. The vague phrases "~0", "near baseline", and "near zero" are replaced by this rule.
 
 ---
 
@@ -171,42 +172,89 @@ No secret is stored anywhere; all values are deployment configuration.
 ```python
 # identity.py
 _LOCAL_CPU_IDENTITY_PROBE_SCRIPT = """... existing 7-field CPU probe body ..."""
-_BHQ3_GPU_IDENTITY_PROBE_SCRIPT = """
-import json, subprocess, sys
+**Required GPU identity collection order (fail closed; any failure → `RUNTIME_IDENTITY_UNAVAILABLE`, no material returned):**
+
+```text
+1. import required fixed packages (numpy, scipy, torch, ultralytics)
+2. cuda_available = torch.cuda.is_available()
+3. require cuda_available is True
+4. require torch.cuda.device_count() >= 1
+5. use exact device index 0
+6. collect device_name + compute_capability from device 0 properties
+7. run the fixed driver query for device 0
+8. require driver query returncode == 0
+9. require exactly one non-empty driver-version line, and it must not be "unknown"
+10. assemble the exact 10-field BHQ3 payload
+```
+
+The exact recorded BHQ3 fixture MUST still reproduce `7b958347b5af`. `"unknown"` can never enter the canonical material.
+
+```python
+# identity.py
+_LOCAL_CPU_IDENTITY_PROBE_SCRIPT = """... existing 7-field CPU probe body ..."""
+
+# Fixed platform-owned torch/CUDA probe, executed INSIDE the configured ML
+# interpreter. It never invents a value: on any failure it reports ok=False.
+_BHQ3_GPU_TORCH_PROBE_SCRIPT = """
+import json, sys
 import numpy, scipy, torch, ultralytics
 
-def _driver_version():
-    try:
-        return subprocess.run(
-            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout.strip()
-    except Exception:
-        return "unknown"
-
-props = torch.cuda.get_device_properties(0)
-material = {
-    "python": sys.version.split()[0],
-    "torch": torch.__version__,
-    "torch_cuda": torch.version.cuda,
-    "ultralytics": ultralytics.__version__,
-    "numpy": numpy.__version__,
-    "scipy": scipy.__version__,
-    "device_name": props.name,
-    "compute_capability": "%d.%d" % (props.major, props.minor),
-    "driver_version": _driver_version(),
-    "cuda_available": bool(torch.cuda.is_available()),
-}
-print(json.dumps(material))
+result = {"ok": False, "reason": None, "material": None}
+try:
+    if not torch.cuda.is_available():
+        result["reason"] = "cuda unavailable"
+    elif torch.cuda.device_count() < 1:
+        result["reason"] = "no cuda device"
+    else:
+        props = torch.cuda.get_device_properties(0)
+        result["ok"] = True
+        result["material"] = {
+            "python": sys.version.split()[0],
+            "torch": torch.__version__,
+            "torch_cuda": torch.version.cuda,
+            "ultralytics": ultralytics.__version__,
+            "numpy": numpy.__version__,
+            "scipy": scipy.__version__,
+            "device_name": props.name,
+            "compute_capability": "%d.%d" % (props.major, props.minor),
+            "cuda_available": True,
+            "device_count": int(torch.cuda.device_count()),
+        }
+except Exception as exc:
+    result["reason"] = type(exc).__name__
+print(json.dumps(result))
 """
 
+# Fixed platform-owned driver query, locked to device 0 so multi-GPU hosts still
+# yield exactly one line. No user-supplied shell input; invoked with shell=False.
+_BHQ3_GPU_DRIVER_QUERY = (
+    "nvidia-smi", "-i", "0",
+    "--query-gpu=driver_version", "--format=csv,noheader",
+)
+
+def assemble_bhq3_gpu_material(probe_material: dict, driver_version: str) -> dict: ...
+    # PURE, fail-closed assembly (unit-testable without CUDA). Rejects:
+    #   probe_material["cuda_available"] is not exactly True
+    #   int(probe_material["device_count"]) < 1
+    #   missing/empty/non-string device_name or compute_capability
+    #   missing/empty/non-string python/torch/torch_cuda/ultralytics/numpy/scipy
+    #   driver_version empty, multi-line, whitespace-only, or == "unknown"
+    # Any rejection -> RUNTIME_IDENTITY_UNAVAILABLE; no partial material.
+    # Returns exactly BHQ3_GPU_V1_FIELDS (drops the internal device_count).
+
 def collect_local_cpu_identity_material(python_path, *, runner=None) -> dict: ...
-    # runs _LOCAL_CPU_IDENTITY_PROBE_SCRIPT inside the ML interpreter, parses the
-    # last JSON line, requires set(payload) == set(LOCAL_CPU_V1_FIELDS).
+    # unchanged CPU behavior: runs _LOCAL_CPU_IDENTITY_PROBE_SCRIPT inside the ML
+    # interpreter, requires set(payload) == set(LOCAL_CPU_V1_FIELDS).
 
 def collect_bhq3_gpu_identity_material(python_path, *, runner=None) -> dict: ...
-    # runs _BHQ3_GPU_IDENTITY_PROBE_SCRIPT inside the ML interpreter, parses the
-    # last JSON line, requires set(payload) == set(BHQ3_GPU_V1_FIELDS).
+    # 1. interpreter must exist else RUNTIME_IDENTITY_UNAVAILABLE
+    # 2. run _BHQ3_GPU_TORCH_PROBE_SCRIPT via runner(..., shell=False); require
+    #    returncode == 0 and last JSON line {"ok": True, "material": {...}}
+    #    else RUNTIME_IDENTITY_UNAVAILABLE
+    # 3. run _BHQ3_GPU_DRIVER_QUERY via runner(..., shell=False); require
+    #    returncode == 0 and stdout.strip() is exactly one non-empty line
+    #    else RUNTIME_IDENTITY_UNAVAILABLE
+    # 4. return assemble_bhq3_gpu_material(probe_material, driver_line)
 
 def collect_identity_material(python_path, *, scheme: str, runner=None) -> dict: ...
     # dispatch ONLY on `scheme`; unknown scheme -> RUNTIME_IDENTITY_INVALID.
@@ -214,7 +262,7 @@ def collect_identity_material(python_path, *, scheme: str, runner=None) -> dict:
     # LOCAL_CPU_V1 -> collect_local_cpu_identity_material
 ```
 
-`runner` is the injectable subprocess seam (`Callable[..., subprocess.CompletedProcess]`, default `subprocess.run`); tests pass a deterministic fake. Both collectors raise `RUNTIME_IDENTITY_UNAVAILABLE` on missing interpreter, non-zero exit, or malformed payload, and `RUNTIME_IDENTITY_INVALID` on a field-set mismatch. The `name`/`scheme` argument is required (no CPU default), so CPU material can never silently reach a GPU scheme. `derive_generation_for_scheme` retains its exact-field check as the second line of defense.
+`runner` is the injectable subprocess seam (`Callable[..., subprocess.CompletedProcess]`, default `subprocess.run`); tests pass a deterministic fake. Both GPU subprocess calls use `shell=False`; no user-supplied code or input is ever executed. `assemble_bhq3_gpu_material` is the single place that decides whether a complete exact material exists, so `"unknown"`, empty/absent device data, and malformed driver output can never be hashed into an identity. The `scheme` argument is required (no CPU default), so CPU material can never silently reach a GPU scheme; `derive_generation_for_scheme` retains its exact-field check as the second line of defense.
 
 **Caller updates (behavior-preserving)**
 - `qualification.py::LocalCpuTargetProbe._material` → `collect_identity_material(self._settings.local_cpu_python_path, scheme=LOCAL_CPU_V1)`.
@@ -227,9 +275,10 @@ Create `backend/tests/test_runtime_identity_gpu_collector.py`:
 
 ```text
 1. test_bhq3_gpu_collector_reproduces_recorded_identity
-   - fake runner returns JSON of BHQ3_MATERIAL (from test_runtime_identity.py)
+   - fake runner: call 1 (torch probe) -> {"ok": True, "material": <9 raw fields>},
+     call 2 (driver query) -> returncode 0, stdout "580.105.08\n"
    - collect_identity_material(Path("/ml/python"), scheme=BHQ3_GPU_V1, runner=fake)
-     == BHQ3_MATERIAL
+     == BHQ3_MATERIAL (exactly the 10 canonical fields; internal device_count dropped)
    - derive_generation_for_scheme(scheme=BHQ3_GPU_V1, material=...) == "7b958347b5af"
 2. test_dispatch_never_feeds_cpu_material_to_gpu_scheme
    - fake CPU runner (returns the 7-field CPU payload) + scheme=BHQ3_GPU_V1
@@ -238,19 +287,37 @@ Create `backend/tests/test_runtime_identity_gpu_collector.py`:
    - fake GPU runner + scheme=LOCAL_CPU_V1 raises RUNTIME_IDENTITY_INVALID
 4. test_unknown_scheme_rejected
    - collect_identity_material(..., scheme="nope") raises RUNTIME_IDENTITY_INVALID
-5. test_gpu_collector_fails_closed
-   - missing interpreter / non-zero runner returncode / malformed JSON
-     -> RUNTIME_IDENTITY_UNAVAILABLE
-6. test_gpu_probe_script_is_platform_owned_and_bounded
-   - the GPU script text imports only stdlib + numpy/scipy/torch/ultralytics,
-     invokes nvidia-smi only via the fixed query, and declares exactly the
-     10 BHQ3 fields (source-scan; no user-controlled input)
+5. test_assemble_bhq3_gpu_material_fails_closed
+   - cuda_available is False -> RUNTIME_IDENTITY_UNAVAILABLE
+   - device_count == 0 -> RUNTIME_IDENTITY_UNAVAILABLE
+   - device_name missing/empty -> RUNTIME_IDENTITY_UNAVAILABLE
+   - compute_capability missing/empty -> RUNTIME_IDENTITY_UNAVAILABLE
+   - any version field missing/None -> RUNTIME_IDENTITY_UNAVAILABLE
+   - driver_version == "" / "   " / "a\nb" / "unknown" -> RUNTIME_IDENTITY_UNAVAILABLE
+   - assert NO material and NO generation is ever produced on rejection
+6. test_gpu_collector_fails_closed_on_probe_failure
+   - missing interpreter -> RUNTIME_IDENTITY_UNAVAILABLE
+   - torch probe runner returncode != 0 -> RUNTIME_IDENTITY_UNAVAILABLE
+   - torch probe stdout {"ok": False, ...} -> RUNTIME_IDENTITY_UNAVAILABLE
+   - torch probe malformed/absent JSON -> RUNTIME_IDENTITY_UNAVAILABLE
+7. test_gpu_collector_fails_closed_on_driver_failure
+   - driver query runner returncode != 0 -> RUNTIME_IDENTITY_UNAVAILABLE
+   - driver stdout empty/whitespace -> RUNTIME_IDENTITY_UNAVAILABLE
+   - driver stdout two lines (multi-GPU/malformed) -> RUNTIME_IDENTITY_UNAVAILABLE
+   - driver stdout "unknown" -> RUNTIME_IDENTITY_UNAVAILABLE
+8. test_gpu_probe_script_is_platform_owned_and_bounded
+   - the torch probe script imports only stdlib + numpy/scipy/torch/ultralytics and
+     declares exactly the 10 raw fields (including internal device_count)
+   - the only external command is the fixed _BHQ3_GPU_DRIVER_QUERY tuple, invoked
+     with shell=False
+   - source-scan asserts the GPU path contains no `"unknown"` fallback and no
+     user-controlled input
 ```
 
 Add an opt-in real-interpreter test (same file):
 
 ```text
-7. test_integration_bhq3_gpu_collector_real_interpreter  (gated)
+9. test_integration_bhq3_gpu_collector_real_interpreter  (gated)
    - skip unless WSP_PLAN_B_GPU_IDENTITY=1 and /root/miniconda3/bin/python exists
    - collect_bhq3_gpu_identity_material(Path("/root/miniconda3/bin/python"))
    - assert generation == "7b958347b5af" and runtime_ref ==
@@ -277,7 +344,7 @@ Expected: prints the 7 CPU keys (the bug) before implementation.
 
 - [ ] **Step 3: Minimal implementation**
 
-Add the two collectors + dispatcher to `identity.py`; update the three callers; update the existing CPU-scheme test call sites. Do not alter `canonical_material_bytes`, `derive_generation`, `derive_local_runtime_ref`, `derive_generation_for_scheme`, `BHQ3_GPU_V1_FIELDS`, `LOCAL_CPU_V1_FIELDS`, `resolve_identity_scheme`, `validate_runtime_ref_against_material`, or `validate_configured_local_runtime_ref`.
+Add the two collectors + dispatcher + the pure `assemble_bhq3_gpu_material` validator + the fixed `_BHQ3_GPU_DRIVER_QUERY` to `identity.py`; update the three callers; update the existing CPU-scheme test call sites. Do not alter `canonical_material_bytes`, `derive_generation`, `derive_local_runtime_ref`, `derive_generation_for_scheme`, `BHQ3_GPU_V1_FIELDS`, `LOCAL_CPU_V1_FIELDS`, `resolve_identity_scheme`, `validate_runtime_ref_against_material`, or `validate_configured_local_runtime_ref`.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -315,7 +382,7 @@ git add backend/app/runtime_qualification/identity.py \
 git commit -m "feat: add scheme-aware gpu runtime identity collection"
 ```
 
-**Review checkpoint (B0):** control-plane `.venv` still reports `torch: None`, `ultralytics: None`; the recorded BHQ3 fixture reproduces `7b958347b5af`; CPU identity derivation output is bit-identical to the pre-change output for a fixed CPU material dict; `identity.py` still contains no historical hash literal.
+**Review checkpoint (B0):** control-plane `.venv` still reports `torch: None`, `ultralytics: None`; the recorded BHQ3 fixture reproduces `7b958347b5af`; CUDA-unavailable, zero-device, and driver-query failures produce `RUNTIME_IDENTITY_UNAVAILABLE` (never `"unknown"`, never a derived generation); CPU identity derivation output is bit-identical to the pre-change output for a fixed CPU material dict; `identity.py` still contains no historical hash literal.
 
 ---
 
@@ -497,15 +564,24 @@ def plan_b_asset_map(plugin_id: str) -> dict:
     # {"<plugin_id>/<version>/<manifest_sha256>": {logical: absolute path}}
     # built from the committed manifest via load_pipeline_asset_manifest, never hardcoded
 
+# The exact expected Plan-B WSP environment-key set (9 keys; no fixed numeric count
+# is asserted elsewhere):
+PLAN_B_WSP_KEYS = (
+    "WSP_RUNTIME_FAMILY",              # autodl_primary
+    "WSP_LOCAL_GPU_PYTHON_PATH",       # /root/miniconda3/bin/python
+    "WSP_LOCAL_GPU_RUNTIME_REF",       # local:autodl_primary:gpu:7b958347b5af
+    "WSP_LOCAL_INFERENCE_WORK_ROOT",   # <root>/work
+    "WSP_LOCAL_ASSET_PATHS_JSON",      # union of CPN+ZoomSpec namespaced maps
+    "WSP_PROJECT_ROOT",
+    "WSP_DATA_ROOT",                   # <root>/data
+    "WSP_LABEL_SPACE_ROOT",
+    "WSP_DATABASE_URL",                # sqlite:///<root>/qual.db
+)
+
 def bootstrap_env_before_app_import(root: Path) -> None:
-    # set os.environ once, IN THIS PROCESS ONLY (no profile mutation):
-    #   WSP_RUNTIME_FAMILY, WSP_LOCAL_GPU_PYTHON_PATH, WSP_LOCAL_GPU_RUNTIME_REF,
-    #   WSP_LOCAL_INFERENCE_WORK_ROOT (root/"work"),
-    #   WSP_LOCAL_ASSET_PATHS_JSON (union of CPN+ZoomSpec maps, json.dumps),
-    #   WSP_PROJECT_ROOT, WSP_DATA_ROOT (root/"data"),
-    #   WSP_LABEL_SPACE_ROOT, WSP_DATABASE_URL (sqlite:///<root>/qual.db)
-    # and the acceptance-only scoped thread override (Global Constraint 11):
-    #   OMP_NUM_THREADS="1", MKL_NUM_THREADS="1"
+    # set exactly PLAN_B_WSP_KEYS in os.environ, IN THIS PROCESS ONLY
+    # (no profile mutation), plus the acceptance-only scoped thread override
+    # (Global Constraint 11): OMP_NUM_THREADS="1", MKL_NUM_THREADS="1"
     # must be called before importing app.main / create_app so spawned coordinator
     # and worker subprocesses (JobManager copies os.environ) inherit it.
 
@@ -513,11 +589,12 @@ def build_settings(root: Path):
     # returns Settings() AFTER bootstrap_env_before_app_import(root)
 
 def verify_configuration() -> dict:
-    # read-only: imports Settings, prints masked presence for the four WSP_ keys,
-    # derives the gpu runtime identity via identity.collect_identity_material(
-    #   scheme=BHQ3_GPU_V1), asserts interpreter exists, work root/data root exist or
-    #   are creatable, asset namespaces resolve, and derived == GPU_RUNTIME_REF.
-    # Returns a JSON-serializable report; never prints secrets.
+    # read-only: imports Settings, reports masked presence for exactly
+    # PLAN_B_WSP_KEYS, derives the gpu runtime identity via
+    # identity.collect_identity_material(scheme=BHQ3_GPU_V1), asserts interpreter
+    # exists, work root/data root exist or are creatable, asset namespaces resolve,
+    # and derived == GPU_RUNTIME_REF. Returns a JSON-serializable report; never
+    # prints secrets.
 ```
 
 **Interfaces (`scripts/plan_b_env.py`)** — operator entry point:
@@ -536,7 +613,11 @@ Create `backend/tests/test_plan_b_env.py`:
 ```text
 1. test_plan_b_asset_map_matches_manifests: namespaces equal the committed CPN and
    ZoomSpec manifest SHAs; every logical asset name present; absolute paths
-2. test_bootstrap_env_sets_only_plan_b_keys: after bootstrap, the six WSP_ keys exist,
+2. test_bootstrap_env_sets_only_plan_b_keys: after bootstrap, exactly PLAN_B_WSP_KEYS
+   are set (assert the explicit enumerated key set, not a numeric count):
+   WSP_RUNTIME_FAMILY, WSP_LOCAL_GPU_PYTHON_PATH, WSP_LOCAL_GPU_RUNTIME_REF,
+   WSP_LOCAL_INFERENCE_WORK_ROOT, WSP_LOCAL_ASSET_PATHS_JSON, WSP_PROJECT_ROOT,
+   WSP_DATA_ROOT, WSP_LABEL_SPACE_ROOT, WSP_DATABASE_URL;
    runtime_family == "autodl_primary", gpu ref == sealed ref, OMP/MKL overrides are
    valid positive integers, and pre-existing unrelated env keys are untouched
 3. test_bootstrap_env_does_not_touch_profiles: source-scan plan_b_common.py contains no
@@ -617,17 +698,45 @@ Qualification is invoked with the identical code path as production: `identity_m
 
 **Negative evidence (all must fail closed, 0 GPU executions)**
 
+Integrity negatives (tampering detected by the evidence hash):
+
 ```text
-N1 runtime_ref drift          : tampered evidence runtime_ref -> QUALIFICATION_EVIDENCE_INVALID or mismatch
-N2 manifest SHA drift         : tampered asset_manifest_sha256 -> QUALIFICATION_EVIDENCE_INVALID
-N3 wrong runtime family       : WSP_RUNTIME_FAMILY=other_family -> doctor mismatch / probe failure
-N4 wrong executor             : evidence.executor local_cpu against live local_gpu authority -> rejection
-N5 failed CUDA probe          : provider probe forced false -> LocalGpuTargetProbe raises QUALIFICATION_PROBE_FAILED
-N6 plugin self-certification  : source scan proves only install.py writes the operator store
-N7 duplicate/conflict         : same exact operator key with conflicting evidence_ref -> fail closed
+I1 tampered serialized evidence without recomputing evidence_sha256
+   (runtime_ref or asset_manifest_sha256 mutated) -> QUALIFICATION_EVIDENCE_INVALID
+I2 vacuous/malformed evidence (empty results, wrong schema/keys) -> QUALIFICATION_EVIDENCE_INVALID
 ```
 
-N3 is run in an isolated subprocess with the alternate `WSP_RUNTIME_FAMILY` only (never persisted).
+Live-authority drift negatives (evidence is internally valid and its `evidence_sha256`
+is correctly recomputed, but the CURRENT live authority has moved):
+
+```text
+D1 runtime authority drift
+   evidence.runtime_ref = OLD_RUNTIME_REF, evidence_sha256 recomputed correctly
+   CURRENT provider.runtime_ref = NEW_RUNTIME_REF
+   -> evidence load succeeds; certificate install fails closed
+      (live-authority runtime_ref mismatch); no operator certificate written
+D2 manifest authority drift
+   evidence.model_release_id unchanged; evidence.asset_manifest_sha256 = OLD_MANIFEST_SHA,
+   evidence_sha256 recomputed correctly
+   CURRENT resolved ModelRelease.asset_manifest_sha256 = NEW_MANIFEST_SHA
+   -> evidence load succeeds; certificate install fails closed
+      (asset-manifest authority mismatch); no operator certificate written
+D3 wrong executor
+   evidence.executor local_cpu against CURRENT local_gpu authority -> rejection
+D4 wrong runtime family
+   CURRENT WSP_RUNTIME_FAMILY=other_family -> doctor mismatch / LocalGpuTargetProbe failure
+   (isolated subprocess; alternate family never persisted)
+D5 failed CUDA probe
+   provider probe forced false -> LocalGpuTargetProbe raises QUALIFICATION_PROBE_FAILED
+D6 plugin self-certification
+   source scan proves only install.py writes the operator store
+D7 duplicate/conflict
+   same exact operator key with conflicting evidence_ref -> fail closed
+```
+
+D1/D2 prove the two layers are distinct: **integrity validation != current
+deployment authority validation**. The drift evidence is a fault-injection fixture
+only; ModelRelease immutability semantics are not weakened.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -635,17 +744,24 @@ Create `backend/tests/test_plan_b_certificate_flow.py`:
 
 ```text
 1. test_b3_plan_resolves_expected_paths: B3 root and evidence dirs live under PLAN_B_ROOT
-2. test_negative_runtime_ref_drift_fails_closed
-3. test_negative_manifest_sha_drift_fails_closed
-4. test_negative_wrong_executor_fails_closed
-5. test_repo_certificates_unchanged_by_install (already_certified writes nothing)
-6. test_only_install_module_writes_operator_store (source scan)
+2. test_integrity_tampered_evidence_rejected (I1, I2): tampered/vacuous evidence fails
+   integrity validation -> QUALIFICATION_EVIDENCE_INVALID
+3. test_authority_drift_runtime_ref_fails_closed (D1): valid stale evidence (SHA recomputed)
+   + CURRENT provider runtime_ref drift -> install fails closed; no operator certificate written
+4. test_authority_drift_manifest_sha_fails_closed (D2): valid stale evidence (SHA recomputed)
+   + CURRENT ModelRelease manifest SHA drift -> install fails closed; no certificate written
+5. test_negative_wrong_executor_fails_closed (D3)
+6. test_negative_wrong_runtime_family_fails_closed (D4, isolated env)
+7. test_failed_cuda_probe_fails_closed (D5)
+8. test_only_install_module_writes_operator_store (D6, source scan)
+9. test_duplicate_conflict_fails_closed (D7)
+10. test_repo_certificates_unchanged_by_install (already_certified writes nothing)
 ```
 
 The deterministic negatives are CPU-only; the real doctor/qualify run is opt-in:
 
 ```text
-7. test_b3_real_runtime_doctor_and_qualify  (gated)
+11. test_b3_real_runtime_doctor_and_qualify  (gated)
    - skip unless WSP_PLAN_B_REAL_GPU=1 and the ML interpreter + CUDA are present
    - run scripts/plan_b_certificate_flow.py --real
 ```
@@ -740,6 +856,7 @@ assert_h2_acceptance(experiment, items, evaluation, membership) -> evidence dict
 
 ```text
 nvidia-smi compute-apps empty (0 GPU processes)
+gpu_memory_baseline_mib = measured nvidia-smi memory.used (quiescent pre-campaign)
 require_memory_admission() returns an admitted mode (Amendment A1 two-path)
 free disk on /root/autodl-tmp >= 5 GiB
 ```
@@ -749,17 +866,19 @@ free disk on /root/autodl-tmp >= 5 GiB
 ```text
 cgroup memory.events oom/oom_kill/max delta > 0
 dangerous committed-floor growth (monitor trips)
-persistent GPU memory not returning to ~0 after a run exits (> 60 s)
+GPU_MEMORY_NOT_QUIESCENT (Global Constraint 19: compute-apps empty and
+  memory.used > gpu_memory_baseline_mib + 64 MiB for 60 s)
 > 1 live app.analysis.local_inference_worker for max_concurrency == 1
 disk free < 2 GiB
 any qualification process escapes PLAN_B_ROOT work dirs into an unrelated DB
 ```
 
-**Post-run orphan check**
+**Post-run orphan check / GPU quiescence**
 
 ```text
 no app.analysis.local_inference_worker PIDs; no app.dataset_experiments.worker PIDs
-for this experiment; nvidia-smi --query-compute-apps empty after quiescence
+for this experiment; nvidia-smi --query-compute-apps empty
+and within 60 s memory.used <= gpu_memory_baseline_mib + 64 MiB (Global Constraint 19)
 ```
 
 **Acceptance (exact)**
@@ -770,6 +889,7 @@ evaluated == 16; missing == 0; coverage == 1.0
 localization AP metrics present; CPN classification N/A reason preserved
 stable recording_manifest_hash across a re-prepare
 no duplicate launches; no orphan workers; exact executor/runtime/model provenance
+GPU quiescence held after the experiment (Global Constraint 19)
 ```
 
 **Evidence artifact**
@@ -883,6 +1003,7 @@ separate exact ModelRelease/AssetManifest provenance
 compare(A,B): comparable true; localization deltas numeric; N/A deltas null
 per-recording algorithm-lab comparison returns cases without error
 no duplicate launches; no orphan workers; exact executor/runtime/model provenance
+GPU quiescence held after the experiment (Global Constraint 19)
 ```
 
 **Evidence artifact:** `/root/autodl-tmp/plan_b_qual/evidence/h3_zoomspec.json` (includes the compare response and a per-recording comparison summary).
@@ -982,7 +1103,7 @@ SIGKILL for a genuine crash (H4-A/H4-B); never for recovery tests that only need
 
 **Abort conditions:** same as H2, plus "any signal delivered to a PID whose argv identity was not verified" is a hard abort.
 
-**Post-run orphan check:** zero `app.analysis.local_inference_worker` and `app.dataset_experiments.worker` PIDs for the H4 DB.
+**Post-run orphan check:** zero `app.analysis.local_inference_worker` and `app.dataset_experiments.worker` PIDs for the H4 DB, and GPU quiescence (Global Constraint 19) after any live-kill case.
 
 **Acceptance (exact)**
 
@@ -1082,27 +1203,52 @@ expected executions 40
 
 Three sequential DatasetExperiments in one dedicated DB (16, 16, 8 items) — this is the concurrency + endurance workload; there is no separate 8-item concurrency experiment.
 
-**Concurrency section (first ~16 executions) must prove**
+**Concurrency observation cadence (first controlled section, at least the first 16 executions)**
 
 ```text
-max simultaneously live app.analysis.local_inference_worker PIDs <= 2
-   (sampled via /proc/*/cmdline + nvidia-smi --query-compute-apps)
+concurrency sampling interval <= 0.5 s (preferred 0.25–0.5 s)
+at each sample capture:
+  - qualification-owned app.analysis.local_inference_worker PID set + verified
+    /proc/<pid>/cmdline run_id
+  - nvidia-smi --query-compute-apps=pid,used_memory PIDs
+  - DB running/pending run + attempt ownership state
+  - timestamp
+```
+
+**Concurrency section must prove**
+
+```text
+max observed qualification worker count <= 2 (over ALL high-frequency samples)
+no sample contains > 2 qualification compute workers
+no DB evidence of > 2 simultaneously-owned live executions
+every observed GPU compute PID maps to an expected qualification worker
 all intended items terminal; exactly one logical AnalysisRun per intended execution
 no duplicate attempt ownership outside intentional retry
 no orphan workers after each experiment
 ```
 
-**Endurance section (remaining executions) continues the same monitoring to 40.**
-
-**Observation cadence:** ~5 s during runs plus before/after each experiment:
+If any high-frequency sample shows > 2 qualification workers:
 
 ```text
-worker PID set/lifetimes; /proc/<pid>/status VmHWM
-nvidia-smi --query-gpu=memory.used,memory.free,utilization.gpu
-nvidia-smi --query-compute-apps=pid,used_memory
-cgroup memory.current, committed_floor, effective_headroom, memory.stat,
-  memory.pressure, memory.events
-DB status/attempt/run counts
+CONCURRENCY_BOUND_EXCEEDED -> abort H5
+```
+
+**Endurance section (remaining executions) continues monitoring to 40.** Expensive
+resource-trend telemetry may drop to ~5 s once the concurrency contract is
+established; lightweight PID/compute-app checks continue at the high-frequency
+cadence whenever cheap, and the `<= 2` worker assertion is never weakened.
+
+**Observation cadence (split)**
+
+```text
+concurrency proof (first section): PID / compute-app / DB ownership sampling <= 0.5 s
+endurance resource trend: ~5 s plus before/after each experiment
+  worker PID set/lifetimes; /proc/<pid>/status VmHWM
+  nvidia-smi --query-gpu=memory.used,memory.free,utilization.gpu
+  nvidia-smi --query-compute-apps=pid,used_memory
+  cgroup memory.current, committed_floor, effective_headroom, memory.stat,
+    memory.pressure, memory.events
+  DB status/attempt/run counts
 ```
 
 **Pre-run gate:** identical to H2 (0 GPU processes, Amendment-A1 admission, disk >= 5 GiB).
@@ -1112,8 +1258,9 @@ DB status/attempt/run counts
 ```text
 memory.events max/oom/oom_kill delta > 0
 persistent one-way committed-floor growth (monitor trips)
-persistent GPU memory leak (not returning near baseline after quiescence)
-> 2 live workers at any sample
+> 2 qualification workers at any high-frequency sample -> CONCURRENCY_BOUND_EXCEEDED
+GPU_MEMORY_NOT_QUIESCENT (Global Constraint 19: compute-apps empty and
+  memory.used > gpu_memory_baseline_mib + 64 MiB for 60 s) -> abort
 disk free < 2 GiB
 qualification process escape (unexpected DB/PID)
 ```
@@ -1124,18 +1271,20 @@ No cache-clearing hacks; no `drop_caches`; no killing unrelated processes; page 
 
 ```text
 all intended items terminal; 0 failed
-max simultaneously live local_inference_worker PIDs <= 2
+max simultaneously live local_inference_worker PIDs <= 2 (high-frequency samples)
+no high-frequency sample exceeded 2 qualification compute workers
 exactly one logical AnalysisRun per intended execution
 no duplicate attempts outside intentional retry/crash cases
 0 orphan qualification worker PIDs; 0 remaining qualification GPU compute processes
 memory.events.max delta == 0; oom == 0; oom_kill == 0
 0 SQLite "database is locked" failures
 all evaluations coverage == 1.0
+GPU quiescence (Global Constraint 19) held after every experiment and at campaign end
 leak analysis across cycles: page cache vs committed process memory vs worker RSS vs
   GPU memory separated; no one-way growth trend
 ```
 
-**Evidence artifact:** `/root/autodl-tmp/plan_b_qual/evidence/h5_concurrency_endurance.json` (per-sample trend + per-experiment summary).
+**Evidence artifact:** `/root/autodl-tmp/plan_b_qual/evidence/h5_concurrency_endurance.json` (per-experiment summary, the high-frequency concurrency samples summarized with a verifiable max count, and the raw high-frequency sample artifact alongside it, e.g. `h5_concurrency_samples.jsonl`).
 
 - [ ] **Step 1: Write failing test**
 
@@ -1143,9 +1292,12 @@ leak analysis across cycles: page cache vs committed process memory vs worker RS
 
 ```text
 1. test_h5_cycles_partition_40: 16 + 16 + 8 == 40 and cycle 3 is the first 8 H5_STEMS
-2. test_h5_concurrency_bound_check: a fake sample with 3 live workers is rejected;
-   2 is accepted; 1 is accepted
-3. test_h5_terminal_acceptance_rejects_failures: failed item, coverage < 1.0,
+2. test_h5_concurrency_bound_check: a fake high-frequency sample with 3 live workers
+   is rejected (CONCURRENCY_BOUND_EXCEEDED); 2 is accepted; 1 is accepted; the
+   max over a sample sequence is what is asserted
+3. test_h5_quiescence_rule: compute-apps empty + memory.used baseline+63 MiB accepted;
+   compute-apps empty + baseline+65 MiB for > 60 s -> GPU_MEMORY_NOT_QUIESCENT
+4. test_h5_terminal_acceptance_rejects_failures: failed item, coverage < 1.0,
    or oom delta > 0 is rejected
 ```
 
@@ -1262,7 +1414,8 @@ PYTHONPATH="$PWD/backend" "$PWD/.venv/bin/python" -c \
 ```text
 no app.analysis.local_inference_worker PIDs
 no app.dataset_experiments.worker PIDs for Plan-B DBs
-nvidia-smi --query-compute-apps empty; GPU memory back to baseline
+nvidia-smi --query-compute-apps empty; memory.used <= gpu_memory_baseline_mib + 64 MiB
+  (Global Constraint 19; no GPU_MEMORY_NOT_QUIESCENT)
 cgroup memory.events oom/oom_kill/max delta == 0 across the campaign window
 all Plan-B evidence JSON present under /root/autodl-tmp/plan_b_qual/evidence
 historical DBs and repo certificates hash-unchanged
@@ -1313,5 +1466,18 @@ git commit -m "docs: add plan b local gpu qualification evidence"
 20. **No secrets committed.** Tooling uses interpreter/asset paths only; no keys/tokens; tests assert no secret literals. ✅
 
 Additional invariants preserved: no A1/A2/A3 redesign; no executor substitution/fallback; no DB migration; no frozen-science change; exact certificate semantics; public API exposes no qualification internals; Plan B does not create `BACKEND_V1_SEAL_SHA` and does not shut down the GPU.
+
+### Corrective-pass self-review (final)
+
+1. **No `"unknown"` can enter BHQ3 canonical material.** The GPU path has no `"unknown"` fallback; `assemble_bhq3_gpu_material` rejects `"unknown"`, empty, multi-line, or whitespace-only driver output and any missing/invalid field with `RUNTIME_IDENTITY_UNAVAILABLE`. ✅
+2. **CUDA unavailable cannot produce GPU identity.** The torch probe reports `ok=False` for `cuda_available` False or `device_count < 1`, and the assembler requires `cuda_available is True` and `device_count >= 1`; no material is derived. ✅
+3. **Driver query failure produces unavailable.** Nonzero returncode, missing `nvidia-smi`, empty output, multi-line output, and `"unknown"` all fail closed via the collector/assembler. ✅
+4. **`nvidia-smi` portability boundary is internally consistent.** Constraint 1 permits the fixed platform-owned `bhq3_gpu_v1` identity/doctor probe (and best-effort diagnostics) while forbidding `nvidia-smi` in Auto policy, core executor selection, `local_cpu` identity, and generic startup; `/proc`/cgroup/telemetry stay in `scripts/`. ✅
+5. **CPU identity remains unchanged.** `LOCAL_CPU_V1_FIELDS`, canonicalization, and derivation are untouched; only the call site passes `scheme=LOCAL_CPU_V1`. ✅
+6. **H5 concurrency proof cannot rely on 5-second-only sampling.** The first controlled section samples PID/compute-app/DB ownership at `<= 0.5 s` (preferred 0.25–0.5 s); the `<= 2` assertion is over all high-frequency samples, with `CONCURRENCY_BOUND_EXCEEDED` on any sample > 2. ✅
+7. **Quiescent GPU memory rule has an exact threshold.** Global Constraint 19 defines measured `gpu_memory_baseline_mib`, empty compute-apps, `memory.used <= baseline + 64 MiB` within 60 s, else `GPU_MEMORY_NOT_QUIESCENT`; referenced by H2/H3/H4/H5/B-final. ✅
+8. **B3 separately tests integrity tampering and valid-but-stale authority drift.** I1/I2 cover tampering/vacuity; D1/D2 build internally valid, correctly re-hashed stale evidence and assert install fails closed against current `LiveAuthority`, writing no certificate; D3–D7 cover the remaining negatives. ✅
+9. **B2 environment-key description is exact.** The plan enumerates the 9 `PLAN_B_WSP_KEYS` and no longer asserts a numeric count. ✅
+10. **Only the Plan-B plan document changed.** No production code, tests, certificates, or GPU execution. ✅
 
 **Fault-injection STOP rules (recorded):** if a live recovery defect is reproduced in A1 code, STOP, do not widen scope, and record it; if any real GPU execution outside the budget is needed, justify it individually; if a memory/gpu/disk abort condition trips, STOP the campaign and write the partial evidence with the abort reason.
