@@ -29,3 +29,7 @@ backend/tests/.burst_iq.bin
 # G6 acceptance artifacts (never committed)
 g6_acceptance.db
 data/g6_work/
+
+# A3 operator-owned runtime qualification state (never committed)
+/data/qualification/
+/data/runtime_certificates.json

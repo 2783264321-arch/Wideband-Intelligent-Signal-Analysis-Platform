@@ -7,7 +7,7 @@ than copying their logic. No Recording inference is required for A3.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, Protocol
 
@@ -20,6 +20,7 @@ from app.runtime_qualification.evidence import (
     EVIDENCE_SCHEMA_VERSION,
     QualificationEvidence,
     QualificationResult,
+    compute_evidence_sha256,
     validated_passed,
 )
 from app.runtime_qualification.identity import (
@@ -241,7 +242,7 @@ def run_qualification(
     passed = validated_passed(results)
     created = (now or (lambda: datetime.now(timezone.utc)))().isoformat()
     descriptor = dict(target.runtime_descriptor)
-    return QualificationEvidence(
+    evidence = QualificationEvidence(
         schema_version=EVIDENCE_SCHEMA_VERSION,
         created_at=created,
         plugin_id=target.plugin_id,
@@ -260,3 +261,4 @@ def run_qualification(
         asset_manifest_sha256=asset_manifest_sha256,
         evidence_sha256="",
     )
+    return replace(evidence, evidence_sha256=compute_evidence_sha256(evidence))

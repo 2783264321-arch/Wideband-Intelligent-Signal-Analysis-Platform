@@ -38,11 +38,14 @@ from app.remote_execution.runtime import (
     RemoteGpuExecutorProvider,
     load_execution_certificates,
 )
+from app.runtime_qualification.install import (
+    build_certificate_store as _build_merged_certificate_store,
+)
 
 
-def _build_certificate_store() -> ExecutionCertificateStore:
-    path = Path(__file__).resolve().parent / "pipelines" / "execution_certificates.json"
-    return ExecutionCertificateStore(load_execution_certificates(path))
+def _build_certificate_store(settings) -> ExecutionCertificateStore:
+    repo_path = Path(__file__).resolve().parent / "pipelines" / "execution_certificates.json"
+    return _build_merged_certificate_store(repo_path=repo_path, data_root=settings.data_root)
 
 
 def _build_executor_registry(app, settings) -> ExecutorRegistry:
@@ -50,7 +53,7 @@ def _build_executor_registry(app, settings) -> ExecutorRegistry:
     remote = getattr(app.state, "remote_executor_provider", None)
     if remote is not None:
         providers[remote.name] = remote
-    return ExecutorRegistry(providers, _build_certificate_store())
+    return ExecutorRegistry(providers, _build_certificate_store(settings))
 
 
 def _plugins_root() -> Path:
