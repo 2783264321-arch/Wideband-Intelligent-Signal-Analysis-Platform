@@ -1,0 +1,244 @@
+"""A3 Task 1: portable runtime doctor report model + injectable probes.
+
+Torch-free and portable. The module never imports CUDA/torch, has no Linux-only
+container-filesystem dependency, and never rewrites a configured
+``WSP_LOCAL_*_RUNTIME_REF``. Optional GPU diagnostics are attempted only for CUDA
+device types and are never identity material.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+import platform as _platform
+import shutil
+import subprocess
+import sys
+from typing import Callable, Protocol, Sequence
+
+from app.core.config import Settings
+
+SCHEMA_VERSION = 1
+
+IDENTITY_MATCH = "match"
+IDENTITY_MISMATCH = "mismatch"
+IDENTITY_LEGACY_OPAQUE = "legacy_opaque"
+IDENTITY_NOT_CONFIGURED = "not_configured"
+IDENTITY_UNAVAILABLE = "unavailable"
+
+IDENTITY_STATUSES = (
+    IDENTITY_MATCH,
+    IDENTITY_MISMATCH,
+    IDENTITY_LEGACY_OPAQUE,
+    IDENTITY_NOT_CONFIGURED,
+    IDENTITY_UNAVAILABLE,
+)
+
+
+@dataclass(frozen=True)
+class InterpreterReport:
+    available: bool
+    version: str | None
+    executable_id: str | None  # PRIVATE (operator-only); never serialized to HTTP
+
+
+@dataclass(frozen=True)
+class GpuReport:
+    applicable: bool
+    available: bool
+    device_name: str | None
+    compute_capability: str | None
+    cuda_runtime: str | None
+    driver_version: str | None
+    reason: str | None  # doctor diagnostic only; never identity material
+
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    executor: str
+    python_path: Path | None
+    runtime_ref: str | None
+    device_type: str
+    precision: str
+    identity_scheme: str = IDENTITY_UNAVAILABLE
+
+
+@dataclass(frozen=True)
+class ProviderReport:
+    executor: str
+    device_type: str
+    precision: str
+    runtime_ref: str | None
+    configured: bool
+    identity_scheme: str
+    identity_status: str
+    configured_runtime_ref: str | None
+    derived_runtime_ref: str | None
+    interpreter: InterpreterReport
+    gpu: GpuReport
+
+
+@dataclass(frozen=True)
+class RuntimeDoctorReport:
+    schema_version: int
+    created_at: str
+    runtime_family: str | None
+    control_plane_python: str
+    platform_system: str
+    architecture: str
+    providers: tuple[ProviderReport, ...]
+    notes: tuple[str, ...]
+
+    def to_operator_json(self) -> dict:
+        """Operator-only projection (may include the private executable_id)."""
+        return asdict(self)
+
+
+class InterpreterProbe(Protocol):
+    def inspect(self, python_path: Path | None) -> InterpreterReport: ...
+
+
+class GpuProbe(Protocol):
+    def inspect(self) -> GpuReport: ...
+
+
+class SubprocessInterpreterProbe:
+    """Best-effort, read-only interpreter diagnostic (never identity)."""
+
+    def inspect(self, python_path: Path | None) -> InterpreterReport:
+        if python_path is None:
+            return InterpreterReport(False, None, None)
+        path = Path(python_path)
+        if not path.is_file():
+            return InterpreterReport(False, None, str(path))
+        try:
+            result = subprocess.run(
+                [str(path), "-c", "import sys; print(sys.version.split()[0])"],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return InterpreterReport(False, None, str(path))
+        if result.returncode != 0:
+            return InterpreterReport(False, None, str(path))
+        lines = (result.stdout or "").strip().splitlines()
+        return InterpreterReport(True, lines[-1] if lines else None, str(path))
+
+
+class NvidiaSmiGpuProbe:
+    """Optional CUDA diagnostic only. Absence of ``nvidia-smi`` is safe."""
+
+    def inspect(self) -> GpuReport:
+        exe = shutil.which("nvidia-smi")
+        if exe is None:
+            return GpuReport(True, False, None, None, None, None, "nvidia-smi not found")
+        try:
+            result = subprocess.run(
+                [exe, "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return GpuReport(True, False, None, None, None, None, "nvidia-smi could not be run")
+        if result.returncode != 0:
+            return GpuReport(True, False, None, None, None, None, "nvidia-smi exited nonzero")
+        lines = (result.stdout or "").strip().splitlines()
+        parts = [part.strip() for part in lines[0].split(",")] if lines else []
+        name = parts[0] if parts and parts[0] else None
+        driver = parts[1] if len(parts) > 1 and parts[1] else None
+        return GpuReport(True, True, name, None, None, driver, None)
+
+
+def _default_identity_resolver(spec: ProviderSpec, settings: Settings) -> tuple:
+    if spec.runtime_ref is None:
+        return (None, None, spec.identity_scheme, IDENTITY_NOT_CONFIGURED)
+    if spec.identity_scheme == IDENTITY_LEGACY_OPAQUE:
+        return (spec.runtime_ref, None, IDENTITY_LEGACY_OPAQUE, IDENTITY_LEGACY_OPAQUE)
+    return (spec.runtime_ref, None, spec.identity_scheme, IDENTITY_NOT_CONFIGURED)
+
+
+def _not_applicable_gpu(device_type: str) -> GpuReport:
+    return GpuReport(
+        applicable=False,
+        available=False,
+        device_name=None,
+        compute_capability=None,
+        cuda_runtime=None,
+        driver_version=None,
+        reason=f"{device_type} runtime; GPU diagnostics not applicable",
+    )
+
+
+def build_runtime_doctor_report(
+    *,
+    settings: Settings,
+    provider_specs: Sequence[ProviderSpec],
+    interpreter_probe: InterpreterProbe,
+    gpu_probe: GpuProbe,
+    identity_resolver: Callable[[ProviderSpec, Settings], tuple] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    host_platform: str | None = None,
+) -> RuntimeDoctorReport:
+    resolver = identity_resolver or _default_identity_resolver
+    now = (clock or (lambda: datetime.now(timezone.utc)))()
+    providers: list[ProviderReport] = []
+    for spec in provider_specs:
+        interpreter = interpreter_probe.inspect(spec.python_path)
+        gpu = gpu_probe.inspect() if spec.device_type == "cuda" else _not_applicable_gpu(spec.device_type)
+        configured_ref, derived_ref, scheme, status = resolver(spec, settings)
+        providers.append(
+            ProviderReport(
+                executor=spec.executor,
+                device_type=spec.device_type,
+                precision=spec.precision,
+                runtime_ref=spec.runtime_ref,
+                configured=spec.runtime_ref is not None,
+                identity_scheme=scheme,
+                identity_status=status,
+                configured_runtime_ref=configured_ref,
+                derived_runtime_ref=derived_ref,
+                interpreter=interpreter,
+                gpu=gpu,
+            )
+        )
+    return RuntimeDoctorReport(
+        schema_version=SCHEMA_VERSION,
+        created_at=now.isoformat(),
+        runtime_family=settings.runtime_family,
+        control_plane_python=sys.executable,
+        platform_system=host_platform or _platform.system(),
+        architecture=_platform.machine(),
+        providers=tuple(providers),
+        notes=("Doctor never rewrites WSP_LOCAL_*_RUNTIME_REF.",),
+    )
+
+
+def build_provider_specs(
+    settings: Settings,
+    providers: object,
+    *,
+    scheme_for: Callable[[str, str], str] | None = None,
+) -> tuple[ProviderSpec, ...]:
+    """Derive doctor specs from registered providers (no plugin-id branching)."""
+    if not hasattr(providers, "items"):
+        return ()
+    resolve = scheme_for or (lambda executor, runtime_ref: IDENTITY_UNAVAILABLE)
+    specs: list[ProviderSpec] = []
+    for name, provider in providers.items():  # type: ignore[union-attr]
+        descriptor = provider.runtime_descriptor()
+        runtime_ref = provider.runtime_ref
+        specs.append(
+            ProviderSpec(
+                executor=name,
+                python_path=getattr(settings, f"{name}_python_path", None),
+                runtime_ref=runtime_ref,
+                device_type=descriptor.device_type,
+                precision=descriptor.precision,
+                identity_scheme=resolve(name, runtime_ref),
+            )
+        )
+    return tuple(specs)
