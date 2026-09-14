@@ -30,6 +30,10 @@ ENDURANCE_SAMPLE_INTERVAL_S = 5.0
 H5_TARGET_SAMPLE_PERIOD_S = 0.25
 H5_MAX_SAMPLE_GAP_S = 0.5
 
+# Monitor failure reason codes (fail closed).
+CONCURRENCY_MONITOR_FAILURE = "CONCURRENCY_MONITOR_FAILURE"
+RESOURCE_MONITOR_FAILURE = "RESOURCE_MONITOR_FAILURE"
+
 
 def h5_cycles(stems: Iterable[str]) -> list[list[str]]:
     """16 + 16 + 8 = 40 over the frozen 16-stem pool."""
@@ -44,6 +48,12 @@ def h5_expected_executions(stems: Iterable[str]) -> int:
 
 
 @dataclass(frozen=True)
+class WorkerOwnership:
+    run_id: str
+    pid: int | None
+
+
+@dataclass(frozen=True)
 class ConcurrencySample:
     timestamp: float
     worker_pids: tuple[int, ...]
@@ -52,23 +62,39 @@ class ConcurrencySample:
     db_running_runs: int
     db_pending_runs: int
     interval_s: float
+    experiment_id: str | None = None
+    ownership: tuple[WorkerOwnership, ...] = ()
 
 
 @dataclass(frozen=True)
 class ResourceSample:
     timestamp: float
     gpu_memory_used_mib: int
+    gpu_memory_free_mib: int | None = None
+    gpu_utilization_pct: int | None = None
     worker_rss_kb: dict = field(default_factory=dict)
-    cgroup_current_bytes: int | None = None
+    worker_vmhwm_kb: dict = field(default_factory=dict)
+    cgroup_memory_current_bytes: int | None = None
+    cgroup_clean_file_cache_bytes: int | None = None
     cgroup_committed_floor_bytes: int | None = None
     cgroup_effective_headroom_bytes: int | None = None
+    cgroup_pressure_some_avg10: float | None = None
+    cgroup_pressure_full_avg10: float | None = None
+    # CURRENT absolute cgroup memory.events counters (deltas computed vs baseline).
+    cgroup_events_max: int = 0
+    cgroup_events_oom: int = 0
+    cgroup_events_oom_kill: int = 0
     cgroup_oom_events: int = 0
     cgroup_oom_kill_events: int = 0
     cgroup_max_events: int = 0
+    disk_free_bytes: int | None = None
     db_completed_items: int = 0
     db_failed_items: int = 0
+    db_running_runs: int = 0
+    db_pending_runs: int = 0
+    db_attempt_count: int = 0
+    db_run_count: int = 0
     wall_time_s: float | None = None
-    disk_free_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -120,7 +146,7 @@ def evaluate_gpu_quiescence(
 
 def evaluate_abort_conditions(
     *, samples: Iterable[ConcurrencySample], resource_samples: Iterable[ResourceSample],
-    disk_free_bytes: int | None, unexpected_db_escape: bool,
+    resource_baseline: dict | None, disk_free_bytes: int | None, unexpected_db_escape: bool,
 ) -> H5AbortEvaluation:
     all_checks: dict = {}
     for sample in samples:
@@ -128,13 +154,11 @@ def evaluate_abort_conditions(
         all_checks[f"concurrency@{sample.timestamp}"] = evaluation.checks
         if evaluation.abort:
             return H5AbortEvaluation(True, evaluation.reason, evaluation.checks)
+    baseline = resource_baseline or {}
     for resource in resource_samples:
-        if resource.cgroup_oom_events > 0 or resource.cgroup_oom_kill_events > 0 or resource.cgroup_max_events > 0:
-            return H5AbortEvaluation(True, "CGROUP_MEMORY_EVENT", {
-                "oom": resource.cgroup_oom_events,
-                "oom_kill": resource.cgroup_oom_kill_events,
-                "max": resource.cgroup_max_events,
-            })
+        evaluation = evaluate_resource_sample(sample=resource, baseline=baseline)
+        if evaluation.abort:
+            return evaluation
     if disk_free_bytes is not None and disk_free_bytes < 2 * 1024 ** 3:
         return H5AbortEvaluation(True, "DISK_LOW", {"disk_free_bytes": disk_free_bytes})
     if unexpected_db_escape:
@@ -176,24 +200,50 @@ def serialize_resource_samples(samples: Iterable[ResourceSample], path: Path) ->
 
 
 def run_per_campaign_admission(core, *, plan_b_pids, min_disk_bytes: int = 5 * 1024 ** 3) -> dict:
-    """Pre-campaign admission. Fails closed if a foreign GPU compute process
-    exists, GPU memory baseline cannot be measured, A1 memory admission fails,
-    disk is too low, or the cgroup baseline cannot be captured."""
+    """Pre-campaign admission (acceptance-only).
+
+    Fail-closed order:
+      1. foreign GPU compute process gate (allowed Plan-B set must be EMPTY before
+         the first H5 experiment exists);
+      2. GPU memory baseline measurable;
+      3. A1 cache-aware memory admission actually invoked and admitted;
+      4. disk >= ``min_disk_bytes``;
+      5. cgroup ``memory.events`` baseline captured.
+
+    The exact A1 admission report is returned for H5 evidence.
+    """
     compute = core.compute_apps()
     admitted, reason, foreign = pre_admission_gate(compute, plan_b_pids=plan_b_pids)
     if not admitted:
         return {"admitted": False, "reason": reason, "detail": {"foreign": foreign},
-                "gpu_memory_baseline_mib": None, "cgroup_events_baseline": None}
+                "gpu_memory_baseline_mib": None, "cgroup_events_baseline": None,
+                "a1_admission": None}
+
     try:
         baseline_mib = core.gpu_memory_used_mib()
     except Exception as exc:  # pragma: no cover - environment dependent
         return {"admitted": False, "reason": "GPU_BASELINE_UNAVAILABLE", "detail": {"error": str(exc)},
-                "gpu_memory_baseline_mib": None, "cgroup_events_baseline": None}
+                "gpu_memory_baseline_mib": None, "cgroup_events_baseline": None,
+                "a1_admission": None}
+
+    # Issue 4: actually run the A1 cache-aware admission (two-path, fail closed).
+    try:
+        a1_result, a1_snapshot = run_a1_memory_admission()
+    except SystemExit as exc:
+        return {"admitted": False, "reason": "A1_MEMORY_ADMISSION_BLOCKED",
+                "detail": {"a1": str(exc)}, "gpu_memory_baseline_mib": baseline_mib,
+                "cgroup_events_baseline": None, "a1_admission": None}
+    except Exception as exc:  # pragma: no cover - environment dependent
+        return {"admitted": False, "reason": "A1_MEMORY_ADMISSION_UNAVAILABLE",
+                "detail": {"error": str(exc)}, "gpu_memory_baseline_mib": baseline_mib,
+                "cgroup_events_baseline": None, "a1_admission": None}
+
     try:
         events = read_cgroup_events_baseline()
     except Exception as exc:
         return {"admitted": False, "reason": "CGROUP_BASELINE_UNAVAILABLE", "detail": {"error": str(exc)},
-                "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": None}
+                "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": None,
+                "a1_admission": a1_result}
     try:
         import shutil
         free = shutil.disk_usage(str(core.common.PLAN_B_ROOT)).free
@@ -201,9 +251,18 @@ def run_per_campaign_admission(core, *, plan_b_pids, min_disk_bytes: int = 5 * 1
         free = None
     if free is not None and free < min_disk_bytes:
         return {"admitted": False, "reason": "DISK_LOW", "detail": {"free": free},
-                "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": events}
+                "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": events,
+                "a1_admission": a1_result}
     return {"admitted": True, "reason": None, "detail": {"free_disk_bytes": free},
-            "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": events}
+            "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": events,
+            "a1_admission": a1_result, "a1_snapshot": a1_snapshot}
+
+
+def run_a1_memory_admission():
+    """Invoke the existing A1 cache-aware two-path admission (never a weaker gate)."""
+    import bhq3_memory_gate as memory_gate
+
+    return memory_gate.require_memory_admission()
 
 
 def read_cgroup_events_baseline() -> dict:
@@ -218,17 +277,85 @@ def read_cgroup_events_baseline() -> dict:
     return events
 
 
+def cgroup_event_deltas(*, baseline: dict, current: dict) -> dict:
+    """Campaign deltas for the mandatory memory.events counters.
+
+    ``current`` holds CURRENT absolute counters; each delta subtracts the
+    campaign baseline. Historical nonzero baselines therefore produce delta 0.
+    """
+    keys = {"max": "max", "oom": "oom", "oom_kill": "oom_kill"}
+    return {
+        name: int(current.get(cur_key, 0)) - int(baseline.get(base_key, 0))
+        for name, (base_key, cur_key) in {
+            "max": ("max", "cgroup_events_max"),
+            "oom": ("oom", "cgroup_events_oom"),
+            "oom_kill": ("oom", "cgroup_events_oom_kill"),
+        }.items()
+    }
+
+
 def evaluate_resource_deltas(*, baseline: dict, current: dict) -> dict:
+    """Backward-compatible helper for already-extracted delta inputs."""
     return {key: int(current.get(key, 0)) - int(baseline.get(key, 0))
             for key in ("max", "oom", "oom_kill", "high")}
 
 
-def evaluate_cycle_acceptance(*, summary: dict) -> H5AbortEvaluation:
-    """Per-cycle acceptance derived from the persisted experiment read model."""
+def evaluate_resource_sample(*, sample: ResourceSample, baseline: dict,
+                             monitor_failure: str | None = None) -> H5AbortEvaluation:
+    """Abort on any positive campaign cgroup event delta or A1 memory trip."""
+    if monitor_failure is not None:
+        return H5AbortEvaluation(True, RESOURCE_MONITOR_FAILURE, {"failure": monitor_failure})
+    deltas = cgroup_event_deltas(baseline=baseline, current=_resource_events(sample))
     checks = {
-        "expected_items_exact": summary.get("expected_items") == summary.get("_membership", {}).get("expected_items"),
-        "completed": summary.get("status") == "completed",
-        "failed_0": summary.get("failed_items") == 0,
+        "oom_delta_0": deltas["oom"] == 0,
+        "oom_kill_delta_0": deltas["oom_kill"] == 0,
+        "max_delta_0": deltas["max"] == 0,
+    }
+    if not all(checks.values()):
+        return H5AbortEvaluation(True, "CGROUP_MEMORY_EVENT", {**checks, "deltas": deltas})
+    return H5AbortEvaluation(False, None, checks)
+
+
+def _resource_events(sample: ResourceSample) -> dict:
+    return {
+        "cgroup_events_max": sample.cgroup_events_max,
+        "cgroup_events_oom": sample.cgroup_events_oom,
+        "cgroup_events_oom_kill": sample.cgroup_events_oom_kill,
+    }
+
+
+def evaluate_cycle_acceptance(*, summary: dict, cycle: object) -> H5AbortEvaluation:
+    """Per-cycle acceptance from the real DB/API read models.
+
+    ``summary`` is the experiment read model augmented with ``_evaluation``,
+    ``_items``, ``_attempt_counts`` and ``_actual_runs`` gathered from the live
+    DB/API. ``cycle`` supplies the intended item count.
+    """
+    intended = cycle.expected_items
+    evaluation = summary.get("_evaluation") or {}
+    items = summary.get("_items") or []
+    completed_items = [i for i in items if i.get("status") == "completed"]
+    actual_runs = summary.get("_actual_runs") or []
+    attempt_counts = summary.get("_attempt_counts") or {}
+
+    checks = {
+        "status_completed": summary.get("status") == "completed",
+        "expected_items_exact": summary.get("expected_items") == intended,
+        "completed_items_exact": summary.get("completed_items") == intended,
+        "failed_items_0": summary.get("failed_items") == 0,
+        "queued_items_0": summary.get("queued_items") == 0,
+        "running_items_0": summary.get("running_items") == 0,
+        "item_membership_exact": len(items) == intended and len(completed_items) == intended,
+        "one_attempt_per_item": all(attempt_counts.get(i.get("id")) == 1 for i in items),
+        "attempt_count_exact": summary.get("attempt_count") == intended,
+        "unique_runs_per_item": (
+            len([r for r in actual_runs if r]) == intended
+            and len(set(actual_runs)) == intended
+        ),
+        "evaluation_completed": evaluation.get("status") == "completed",
+        "evaluated_exact": evaluation.get("evaluated_recordings") == intended,
+        "missing_0": evaluation.get("missing_recordings") == 0,
+        "coverage_1": evaluation.get("coverage") == 1.0,
     }
     if not all(checks.values()):
         return H5AbortEvaluation(True, "CYCLE_ACCEPTANCE_FAILED", checks)
@@ -236,27 +363,47 @@ def evaluate_cycle_acceptance(*, summary: dict) -> H5AbortEvaluation:
 
 
 def evaluate_final_acceptance(*, cycle_summaries, concurrency_samples, resource_samples,
-                              resource_baseline: dict | None, foreign_gpu_pids) -> dict:
-    """Final H5 acceptance derived from DB/evidence, not from a constant."""
+                              resource_baseline: dict | None, foreign_gpu_pids,
+                              concurrency_monitor_failure=None,
+                              resource_monitor_failure=None,
+                              concurrency_artifact_present=False,
+                              resource_artifact_present=False) -> dict:
+    """Final H5 acceptance derived from actual DB-backed evidence.
+
+    Rejects missing/empty monitoring evidence and monitor failures. Requires the
+    DB-backed actual model-run total (not the membership constant) to be 40.
+    """
     cycle_items = [s.get("_membership", {}).get("expected_items") for s in cycle_summaries]
+    actual_runs = [s.get("_actual_run_count") for s in cycle_summaries]
+    actual_attempts = [s.get("_actual_attempt_count") for s in cycle_summaries]
+    actual_completed = [s.get("completed_items") for s in cycle_summaries]
+
     max_concurrency = max_observed_concurrency(concurrency_samples)
     gaps = [s.interval_s for s in concurrency_samples]
-    max_gap = max(gaps) if gaps else 0.0
+    max_gap = max(gaps) if gaps else None
 
-    event_deltas = {"max": 0, "oom": 0, "oom_kill": 0}
-    if resource_baseline is not None:
-        final = resource_samples[-1].__dict__ if resource_samples else {}
-        event_deltas = {
-            "max": int(final.get("cgroup_max_events", 0)) - int(resource_baseline.get("max", 0)),
-            "oom": int(final.get("cgroup_oom_events", 0)) - int(resource_baseline.get("oom", 0)),
-            "oom_kill": int(final.get("cgroup_oom_kill_events", 0)) - int(resource_baseline.get("oom_kill", 0)),
-        }
+    event_deltas = {name: 0 for name in ("max", "oom", "oom_kill")}
+    if resource_baseline is not None and resource_samples:
+        event_deltas = cgroup_event_deltas(
+            baseline=resource_baseline, current=_resource_events(resource_samples[-1])
+        )
 
     checks = {
+        "actual_runs_16_16_8": actual_runs == [16, 16, 8],
+        "actual_attempts_16_16_8": actual_attempts == [16, 16, 8],
+        "actual_completed_16_16_8": actual_completed == [16, 16, 8],
+        "actual_total_runs_40": sum(r for r in actual_runs if isinstance(r, int)) == 40,
+        "actual_total_attempts_40": sum(a for a in actual_attempts if isinstance(a, int)) == 40,
+        "no_hidden_fourth_cycle": len(cycle_summaries) == 3,
         "cycle_partition_16_16_8": cycle_items == [16, 16, 8],
-        "total_executions_40": sum(i for i in cycle_items if isinstance(i, int)) == 40,
         "max_concurrency_le_2": max_concurrency <= CONCURRENCY_BOUND,
-        "all_gaps_le_max": max_gap <= H5_MAX_SAMPLE_GAP_S,
+        "all_gaps_le_max": max_gap is not None and max_gap <= H5_MAX_SAMPLE_GAP_S,
+        "concurrency_samples_present": len(list(concurrency_samples)) > 0,
+        "resource_samples_present": len(list(resource_samples)) > 0,
+        "concurrency_artifact_present": bool(concurrency_artifact_present),
+        "resource_artifact_present": bool(resource_artifact_present),
+        "concurrency_monitor_ok": concurrency_monitor_failure is None,
+        "resource_monitor_ok": resource_monitor_failure is None,
         "oom_delta_0": event_deltas["oom"] == 0,
         "oom_kill_delta_0": event_deltas["oom_kill"] == 0,
         "max_delta_0": event_deltas["max"] == 0,
@@ -267,8 +414,15 @@ def evaluate_final_acceptance(*, cycle_summaries, concurrency_samples, resource_
         "passed": all(checks.values()),
         "checks": checks,
         "cycle_expected_items": cycle_items,
+        "actual_runs": actual_runs,
+        "actual_attempts": actual_attempts,
+        "actual_completed_items": actual_completed,
+        "actual_total_runs": sum(r for r in actual_runs if isinstance(r, int)),
+        "actual_total_attempts": sum(a for a in actual_attempts if isinstance(a, int)),
         "max_observed_concurrency": max_concurrency,
         "max_sample_gap_s": max_gap,
+        "concurrency_monitor_failure": concurrency_monitor_failure,
+        "resource_monitor_failure": resource_monitor_failure,
         "cgroup_event_deltas": event_deltas,
         "foreign_gpu_pids": list(foreign_gpu_pids),
     }

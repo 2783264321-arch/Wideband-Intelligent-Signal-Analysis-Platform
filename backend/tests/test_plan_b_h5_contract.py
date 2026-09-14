@@ -95,20 +95,21 @@ def test_h5_gpu_quiescence_rule() -> None:
 
 
 def test_h5_abort_conditions() -> None:
-    resource_oom = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0, cgroup_oom_kill_events=1)
+    resource_oom = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0, cgroup_events_oom_kill=1)
     evaluation = h5.evaluate_abort_conditions(
-        samples=[], resource_samples=[resource_oom], disk_free_bytes=None, unexpected_db_escape=False)
+        samples=[], resource_samples=[resource_oom], resource_baseline={"oom_kill": 0},
+        disk_free_bytes=None, unexpected_db_escape=False)
     assert evaluation.abort is True
     assert evaluation.reason == "CGROUP_MEMORY_EVENT"
 
     assert h5.evaluate_abort_conditions(
-        samples=[], resource_samples=[], disk_free_bytes=1 * 1024 ** 3,
+        samples=[], resource_samples=[], resource_baseline={}, disk_free_bytes=1 * 1024 ** 3,
         unexpected_db_escape=False).reason == "DISK_LOW"
     assert h5.evaluate_abort_conditions(
-        samples=[], resource_samples=[], disk_free_bytes=None,
+        samples=[], resource_samples=[], resource_baseline={}, disk_free_bytes=None,
         unexpected_db_escape=True).reason == "QUALIFICATION_DB_ESCAPE"
     assert h5.evaluate_abort_conditions(
-        samples=[], resource_samples=[], disk_free_bytes=None,
+        samples=[], resource_samples=[], resource_baseline={}, disk_free_bytes=None,
         unexpected_db_escape=False).abort is False
 
 
@@ -176,31 +177,91 @@ def test_h5_three_qualification_workers_abort() -> None:
     assert evaluation.reason == "CONCURRENCY_BOUND_EXCEEDED"
 
 
-def test_h5_final_acceptance_derived_not_constant() -> None:
-    cycles = [
-        {"status": "completed", "_membership": {"expected_items": 16}, "failed_items": 0},
-        {"status": "completed", "_membership": {"expected_items": 16}, "failed_items": 0},
-        {"status": "completed", "_membership": {"expected_items": 8}, "failed_items": 0},
-    ]
+def test_h5_final_acceptance_requires_actual_db_40() -> None:
+    def _cycle(n, runs, attempts, status="completed"):
+        return {
+            "status": status,
+            "_membership": {"expected_items": n},
+            "completed_items": n, "failed_items": 0,
+            "_actual_run_count": runs, "_actual_attempt_count": attempts,
+        }
+
+    cycles = [_cycle(16, 16, 16), _cycle(16, 16, 16), _cycle(8, 8, 8)]
     samples = [
         h5.ConcurrencySample(0.0, (1,), ("a",), (1,), 1, 0, 0.25),
         h5.ConcurrencySample(0.25, (1, 2), ("a", "b"), (1, 2), 2, 0, 0.25),
     ]
+    resources = [h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0)]
     result = h5.evaluate_final_acceptance(
-        cycle_summaries=cycles, concurrency_samples=samples, resource_samples=[],
+        cycle_summaries=cycles, concurrency_samples=samples, resource_samples=resources,
         resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+        concurrency_artifact_present=True, resource_artifact_present=True,
     )
     assert result["passed"] is True
-    assert result["cycle_expected_items"] == [16, 16, 8]
-    assert result["max_observed_concurrency"] == 2
+    assert result["actual_runs"] == [16, 16, 8]
+    assert result["actual_total_runs"] == 40
 
-    bad = list(cycles)
-    bad[2] = {"status": "completed", "_membership": {"expected_items": 16}, "failed_items": 0}
-    failed = h5.evaluate_final_acceptance(
-        cycle_summaries=bad, concurrency_samples=samples, resource_samples=[],
+    # A cycle that claims 8 intended but actually ran 16 fails.
+    bad = [_cycle(16, 16, 16), _cycle(16, 16, 16), {"status": "completed",
+           "_membership": {"expected_items": 8}, "completed_items": 8, "failed_items": 0,
+           "_actual_run_count": 16, "_actual_attempt_count": 16}]
+    assert h5.evaluate_final_acceptance(
+        cycle_summaries=bad, concurrency_samples=samples, resource_samples=resources,
         resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+        concurrency_artifact_present=True, resource_artifact_present=True,
+    )["passed"] is False
+
+
+def test_h5_final_acceptance_rejects_empty_monitor_evidence() -> None:
+    cycles = [
+        {"status": "completed", "_membership": {"expected_items": 16}, "completed_items": 16,
+         "failed_items": 0, "_actual_run_count": 16, "_actual_attempt_count": 16},
+        {"status": "completed", "_membership": {"expected_items": 16}, "completed_items": 16,
+         "failed_items": 0, "_actual_run_count": 16, "_actual_attempt_count": 16},
+        {"status": "completed", "_membership": {"expected_items": 8}, "completed_items": 8,
+         "failed_items": 0, "_actual_run_count": 8, "_actual_attempt_count": 8},
+    ]
+    empty = h5.evaluate_final_acceptance(
+        cycle_summaries=cycles, concurrency_samples=[], resource_samples=[],
+        resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+        concurrency_artifact_present=False, resource_artifact_present=False,
+    )
+    assert empty["passed"] is False
+    assert empty["checks"]["concurrency_samples_present"] is False
+    assert empty["checks"]["all_gaps_le_max"] is False  # max([]) must not pass
+
+
+def test_h5_final_acceptance_rejects_monitor_failure() -> None:
+    cycles = [
+        {"status": "completed", "_membership": {"expected_items": n}, "completed_items": n,
+         "failed_items": 0, "_actual_run_count": n, "_actual_attempt_count": n}
+        for n in (16, 16, 8)
+    ]
+    samples = [h5.ConcurrencySample(0.0, (1,), ("a",), (1,), 1, 0, 0.25)]
+    resources = [h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0)]
+    failed = h5.evaluate_final_acceptance(
+        cycle_summaries=cycles, concurrency_samples=samples, resource_samples=resources,
+        resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+        concurrency_monitor_failure="RESOURCE_MONITOR_FAILURE: boom",
+        resource_monitor_failure=None,
+        concurrency_artifact_present=True, resource_artifact_present=True,
     )
     assert failed["passed"] is False
+    assert failed["checks"]["concurrency_monitor_ok"] is False
+
+
+def test_h5_cgroup_event_delta_nonzero_baseline() -> None:
+    # historical baseline max=10, current max=10 -> delta 0 accepted
+    sample_same = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0,
+                                    cgroup_events_max=10, cgroup_events_oom=0, cgroup_events_oom_kill=0)
+    ok = h5.evaluate_resource_sample(sample=sample_same, baseline={"max": 10, "oom": 0, "oom_kill": 0})
+    assert ok.abort is False
+    # current max=11 -> delta 1 abort
+    sample_over = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0,
+                                    cgroup_events_max=11, cgroup_events_oom=0, cgroup_events_oom_kill=0)
+    bad = h5.evaluate_resource_sample(sample=sample_over, baseline={"max": 10, "oom": 0, "oom_kill": 0})
+    assert bad.abort is True
+    assert bad.reason == "CGROUP_MEMORY_EVENT"
 
 
 def test_h5_resource_delta_baseline_semantics() -> None:
@@ -216,3 +277,119 @@ def test_h5_campaign_script_uses_membership_and_monitor() -> None:
     assert "ConcurrencyMonitor" in source
     assert "ResourceMonitor" in source
     assert "run_per_campaign_admission" in source
+
+
+def test_h5_pre_admission_empty_allowlist_treats_all_as_foreign() -> None:
+    # Issue 1: before the first H5 experiment, allowlist is empty; ANY compute PID is foreign.
+    admitted, reason, foreign = h5.pre_admission_gate([(555, 4096)], plan_b_pids=())
+    assert admitted is False
+    assert reason == "FOREIGN_GPU_PROCESS_PRESENT"
+    assert foreign == [(555, 4096)]
+    # no compute process -> may continue
+    ok, reason2, _ = h5.pre_admission_gate([], plan_b_pids=())
+    assert ok is True and reason2 is None
+
+
+def test_h5_campaign_passes_empty_allowlist() -> None:
+    source = (SCRIPTS / "plan_b_h5_concurrency_endurance.py").read_text(encoding="utf-8")
+    assert "run_per_campaign_admission(core, plan_b_pids=())" in source
+
+
+def test_h5_cycle_acceptance_requires_real_read_models() -> None:
+    class _Cycle:
+        index = 0
+        expected_items = 16
+
+    good = {
+        "status": "completed", "expected_items": 16, "completed_items": 16,
+        "failed_items": 0, "queued_items": 0, "running_items": 0, "attempt_count": 16,
+        "_items": [{"id": f"i{n}", "status": "completed"} for n in range(16)],
+        "_attempt_counts": {f"i{n}": 1 for n in range(16)},
+        "_actual_runs": [f"run_{n}" for n in range(16)],
+        "_evaluation": {"status": "completed", "evaluated_recordings": 16,
+                        "missing_recordings": 0, "coverage": 1.0},
+    }
+    assert h5.evaluate_cycle_acceptance(summary=good, cycle=_Cycle()).abort is False
+
+    bad = dict(good)
+    bad["_attempt_counts"] = {f"i{n}": 2 for n in range(16)}  # retries present
+    assert h5.evaluate_cycle_acceptance(summary=bad, cycle=_Cycle()).abort is True
+
+    bad2 = dict(good)
+    bad2["_evaluation"] = {"status": "completed", "evaluated_recordings": 16,
+                           "missing_recordings": 0, "coverage": 0.9}
+    assert h5.evaluate_cycle_acceptance(summary=bad2, cycle=_Cycle()).abort is True
+
+
+def test_h5_monitor_fails_closed_on_sampler_exception() -> None:
+    from plan_b_h5_monitor import _MonitorBase
+
+    class _Boom(_MonitorBase):
+        failure_code = "CONCURRENCY_MONITOR_FAILURE"
+
+        def _run(self):
+            raise RuntimeError("sampler exploded")
+
+    monitor = _Boom(evidence_path=Path("/tmp/opencode/h5_boom.jsonl"))
+    monitor.start()
+    for _ in range(100):
+        if monitor.thread_failure is not None:
+            break
+        import time as _t
+        _t.sleep(0.01)
+    monitor.stop()
+    assert monitor.thread_failure is not None
+    assert monitor.abort_reason == "CONCURRENCY_MONITOR_FAILURE"
+
+
+def test_h5_worker_pid_for_run_and_ownership(tmp_path: Path) -> None:
+    import plan_b_h5_monitor as monitor
+
+    (tmp_path / "11").mkdir()
+    (tmp_path / "11" / "cmdline").write_bytes(
+        b"/ml/python\0-m\0app.analysis.local_inference_worker\0run_owned\0"
+    )
+    (tmp_path / "22").mkdir()
+    (tmp_path / "22" / "cmdline").write_bytes(
+        b"/ml/python\0-m\0app.analysis.local_inference_worker\0run_other\0"
+    )
+    assert monitor.worker_pid_for_run("run_owned", proc_root=tmp_path) == 11
+    assert monitor.worker_pid_for_run("run_missing", proc_root=tmp_path) is None
+    pairs = monitor.map_ownership_pairs(["run_owned", "run_missing"], proc_root=tmp_path)
+    assert [(p.run_id, p.pid) for p in pairs] == [("run_owned", 11), ("run_missing", None)]
+    # unrelated worker (run_other) is NOT qualification-owned for run_owned
+    assert monitor.worker_pid_for_run("run_owned", proc_root=tmp_path) != 22
+
+
+def test_h5_ambiguous_worker_pid_fails_closed(tmp_path: Path) -> None:
+    import plan_b_h5_monitor as monitor
+
+    for name in ("11", "22"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "cmdline").write_bytes(
+            b"/ml/python\0-m\0app.analysis.local_inference_worker\0run_dup\0"
+        )
+    import pytest
+    with pytest.raises(RuntimeError):
+        monitor.worker_pid_for_run("run_dup", proc_root=tmp_path)
+
+
+def test_h5_a1_memory_admission_is_invoked() -> None:
+    import plan_b_h5_core as core_h5
+    assert hasattr(core_h5, "run_a1_memory_admission")
+    source = (SCRIPTS / "plan_b_h5_core.py").read_text(encoding="utf-8")
+    assert "require_memory_admission" in source
+    # admission result carries the exact A1 report
+    assert "a1_admission" in source
+
+
+def test_h5_resource_sample_has_real_endurance_fields() -> None:
+    sample = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=10)
+    for field_name in (
+        "gpu_memory_free_mib", "gpu_utilization_pct", "worker_rss_kb", "worker_vmhwm_kb",
+        "cgroup_memory_current_bytes", "cgroup_clean_file_cache_bytes",
+        "cgroup_committed_floor_bytes", "cgroup_effective_headroom_bytes",
+        "cgroup_events_max", "cgroup_events_oom", "cgroup_events_oom_kill",
+        "disk_free_bytes", "db_completed_items", "db_run_count",
+    ):
+        assert hasattr(sample, field_name), field_name

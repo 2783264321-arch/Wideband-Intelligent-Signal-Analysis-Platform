@@ -186,6 +186,75 @@ def compute_apps() -> list[tuple[int, int]]:
     return apps
 
 
+def gpu_metrics() -> dict:
+    """GPU memory (used/free) and utilization (acceptance telemetry only)."""
+    out = subprocess.run(
+        ["nvidia-smi", "--query-gpu=memory.used,memory.free,utilization.gpu",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=30,
+    ).stdout.strip().splitlines()
+    if not out:
+        return {"used_mib": 0, "free_mib": None, "utilization_pct": None}
+    parts = [p.strip() for p in out[0].split(",")]
+    try:
+        used = int(parts[0])
+    except (ValueError, IndexError):
+        used = 0
+    free = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    util = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    return {"used_mib": used, "free_mib": free, "utilization_pct": util}
+
+
+def db_counts(root: Path) -> dict:
+    """Active H5 DB counts (acceptance telemetry only)."""
+    import sqlite3
+
+    db_path = Path(root) / "qual.db"
+    if not db_path.exists():
+        return {}
+    connection = sqlite3.connect(str(db_path))
+    try:
+        def scalar(sql: str) -> int:
+            row = connection.execute(sql).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
+        return {
+            "completed_items": scalar("select count(*) from dataset_experiment_items where status='completed'"),
+            "failed_items": scalar("select count(*) from dataset_experiment_items where status='failed'"),
+            "running_runs": scalar("select count(*) from analysis_runs where status='running'"),
+            "pending_runs": scalar("select count(*) from analysis_runs where status='pending'"),
+            "attempt_count": scalar("select count(*) from dataset_experiment_attempts"),
+            "run_count": scalar("select count(*) from analysis_runs"),
+        }
+    finally:
+        connection.close()
+
+
+def wait_for_workers_drained(experiment_id: str, *, timeout_s: int = 120) -> None:
+    """Wait until no qualification local inference worker remains on the host.
+
+    Keeps the concurrency monitor associated with the experiment until its
+    workers have actually exited, so a DB that terminalizes slightly before the
+    worker exits cannot be misread as an unmapped GPU PID.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not worker_pids():
+            return
+        time.sleep(0.5)
+
+
+def _all_pids() -> list[int]:
+    return [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit()]
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
 def assert_gpu_quiescent(baseline_mib: int, *, label: str) -> dict:
     apps = compute_apps()
     if apps:

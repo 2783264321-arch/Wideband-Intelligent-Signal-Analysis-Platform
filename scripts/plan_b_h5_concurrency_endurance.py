@@ -7,7 +7,8 @@ Workload: CPN golden, local_gpu, max_concurrency=2, 16 + 16 + 8 = 40 executions
 across three sequential DatasetExperiments over explicit acceptance-only dataset
 views (H5_FULL = frozen 16 stems; H5_TAIL8 = first 8), in a dedicated Plan-B DB.
 
-DO NOT run while a foreign GPU compute process exists (pre-admission gate).
+Admission refuses to start while a foreign GPU compute process exists (allowed
+Plan-B set is EMPTY before the first H5 experiment).
 
 This round is CPU-only preparation: the campaign is NOT launched here.
 """
@@ -30,15 +31,16 @@ PLUGIN = "cpn_bandwidth_tier"
 CPN_MANIFEST = "7ab8a6a4f5f93247d3997fcf88c4b05d1099361fa8db1555fc8daeeaf7fc55bb"
 
 
-def _plan_b_worker_pids() -> list[int]:
-    return monitor.plan_b_local_worker_pids()
+def _run_ids_for_experiment(app, experiment_id: str) -> list[str]:
+    from fastapi.testclient import TestClient
+
+    items = TestClient(app).get(f"/api/dataset-experiments/{experiment_id}/items").json()
+    return [i["latest_analysis_run_id"] for i in items if i.get("latest_analysis_run_id")]
 
 
 def create_cycle_experiment(app, *, cycle: membership.H5Cycle, name: str, concurrency: int) -> str:
-    """Create a DatasetExperiment bound to the cycle's EXACT dataset view."""
     from fastapi.testclient import TestClient
 
-    client = TestClient(app)
     payload = {
         "name": name,
         "dataset_name": cycle.dataset_name,
@@ -51,19 +53,52 @@ def create_cycle_experiment(app, *, cycle: membership.H5Cycle, name: str, concur
         "parameters": {},
         "max_concurrency": concurrency,
     }
-    created = client.post("/api/dataset-experiments", json=payload)
+    created = TestClient(app).post("/api/dataset-experiments", json=payload)
     if created.status_code != 201:
         raise SystemExit(f"H5 STOP: create -> {created.status_code} {created.text}")
     return created.json()["id"]
 
 
+def gather_cycle_evidence(app, *, experiment_id: str, cycle: membership.H5Cycle) -> dict:
+    """Collect the real DB/API read models needed for per-cycle + final acceptance."""
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    summary = client.get(f"/api/dataset-experiments/{experiment_id}").json()
+    items = client.get(f"/api/dataset-experiments/{experiment_id}/items").json()
+    attempt_counts = {}
+    actual_runs = []
+    for item in items:
+        attempts = client.get(
+            f"/api/dataset-experiments/{experiment_id}/items/{item['id']}/attempts"
+        ).json()
+        attempt_counts[item["id"]] = len(attempts)
+        for attempt in attempts:
+            actual_runs.append(attempt["analysis_run_id"])
+    evaluation = {}
+    if summary.get("dataset_evaluation_id"):
+        evaluation = client.get(
+            f"/api/dataset-benchmarks/{summary['dataset_evaluation_id']}"
+        ).json()
+    summary["_items"] = items
+    summary["_attempt_counts"] = attempt_counts
+    summary["_actual_runs"] = actual_runs
+    summary["_actual_run_count"] = len(actual_runs)
+    summary["_actual_attempt_count"] = sum(attempt_counts.values())
+    summary["_evaluation"] = evaluation
+    summary["_membership"] = {"expected_items": cycle.expected_items}
+    summary["_experiment_id"] = experiment_id
+    return summary
+
+
 def run_cycle(app, *, cycle: membership.H5Cycle, name: str, concurrency: int,
-              monitor_thread: monitor.ConcurrencyMonitor, samples_path: Path,
-              abort_holder: dict) -> dict:
+              monitor_thread: monitor.ConcurrencyMonitor,
+              resource_monitor: monitor.ResourceMonitor,
+              gpu_baseline_mib: int) -> dict:
     from fastapi.testclient import TestClient
 
     # Membership must be exact BEFORE the experiment is created/run.
-    membership_report = membership.assert_cycle_membership(app, cycle)
+    membership.assert_cycle_membership(app, cycle)
     experiment_id = create_cycle_experiment(app, cycle=cycle, name=name, concurrency=concurrency)
     client = TestClient(app)
     monitor_thread.activate(experiment_id)
@@ -71,18 +106,34 @@ def run_cycle(app, *, cycle: membership.H5Cycle, name: str, concurrency: int,
 
     deadline = time.time() + 3600
     while time.time() < deadline:
+        # Issue 2: fail closed if EITHER monitor thread died.
+        if monitor_thread.abort_reason is not None or monitor_thread.thread_failure is not None:
+            raise SystemExit(f"H5 STOP: {monitor_thread.abort_reason or monitor_thread.thread_failure}")
+        if resource_monitor.abort_reason is not None or resource_monitor.thread_failure is not None:
+            raise SystemExit(f"H5 STOP: {resource_monitor.abort_reason or resource_monitor.thread_failure}")
         body = client.get(f"/api/dataset-experiments/{experiment_id}").json()
-        if monitor_thread.abort_reason is not None:
-            abort_holder["reason"] = monitor_thread.abort_reason
-            raise SystemExit(f"H5 STOP: {monitor_thread.abort_reason}")
         if body["status"] in ("completed", "completed_with_failures", "failed"):
-            monitor_thread.deactivate()
-            body["_membership"] = membership_report
-            body["_experiment_id"] = experiment_id
-            return body
+            break
         time.sleep(0.5)
+    else:
+        raise SystemExit(f"H5 STOP: cycle {cycle.index} did not reach terminal state")
+
+    # Keep the concurrency monitor associated with this experiment until the
+    # worker/GPU shutdown is observed cleanly (avoid a false unmapped-PID abort
+    # from the DB terminalizing slightly before the worker exits).
+    core.wait_for_workers_drained(experiment_id, timeout_s=120)
     monitor_thread.deactivate()
-    raise SystemExit(f"H5 STOP: cycle {cycle.index} did not reach terminal state")
+
+    summary = gather_cycle_evidence(app, experiment_id=experiment_id, cycle=cycle)
+    acceptance = h5.evaluate_cycle_acceptance(summary=summary, cycle=cycle)
+    if acceptance.abort:
+        raise SystemExit(f"H5 STOP: CYCLE_ACCEPTANCE_FAILED {acceptance.checks}")
+
+    core.assert_no_orphans(f"H5 cycle {cycle.index + 1}")
+    cycle_quiescence = core.assert_gpu_quiescent(gpu_baseline_mib, label=f"H5 cycle {cycle.index + 1}")
+    summary["_cycle_acceptance"] = acceptance.checks
+    summary["_cycle_quiescence"] = cycle_quiescence
+    return summary
 
 
 def main(argv=None) -> int:
@@ -93,7 +144,9 @@ def main(argv=None) -> int:
         parser.error("--run is required (real 40-execution campaign)")
 
     root = common.PLAN_B_ROOT / "h5"
-    admission = h5.run_per_campaign_admission(core, plan_b_pids=_plan_b_worker_pids())
+    # Issue 1: before the FIRST H5 DatasetExperiment exists, the qualification-
+    # owned worker set is EMPTY, so ANY pre-existing GPU compute process is foreign.
+    admission = h5.run_per_campaign_admission(core, plan_b_pids=())
     if not admission["admitted"]:
         raise SystemExit(f"H5 STOP: {admission['reason']}: {admission['detail']}")
 
@@ -113,37 +166,62 @@ def main(argv=None) -> int:
         raise SystemExit("H5 STOP: cycle partition is not 40")
 
     samples_path = common.EVIDENCE_DIR / "h5_concurrency_samples.jsonl"
-    monitor_thread = monitor.ConcurrencyMonitor(
+    resource_path = common.EVIDENCE_DIR / "h5_resource_samples.jsonl"
+
+    active_experiment = {"id": None}
+
+    def _run_ids(_experiment_id):
+        return _run_ids_for_experiment(app, _experiment_id) if _experiment_id else []
+
+    def _exact_worker_pids():
+        eid = active_experiment["id"]
+        if not eid:
+            return []
+        pids = []
+        for run_id in _run_ids(eid):
+            try:
+                pid = monitor.worker_pid_for_run(run_id)
+            except RuntimeError:
+                raise
+            if pid is not None:
+                pids.append(pid)
+        return pids
+
+    concurrency_monitor = monitor.ConcurrencyMonitor(
         app=app,
         evidence_path=samples_path,
         target_period_s=h5.H5_TARGET_SAMPLE_PERIOD_S,
         max_gap_s=h5.H5_MAX_SAMPLE_GAP_S,
         bound=h5.CONCURRENCY_BOUND,
-        worker_pids=monitor.plan_b_local_worker_pids,
+        run_ids_for_experiment=_run_ids,
         gpu_compute_pids=lambda: [pid for pid, _mib in core.compute_apps()],
     )
-    monitor_thread.start()
+    concurrency_monitor.start()
 
-    resource_path = common.EVIDENCE_DIR / "h5_resource_samples.jsonl"
     resource_monitor = monitor.ResourceMonitor(
         evidence_path=resource_path,
-        gpu_memory_used_mib=core.gpu_memory_used_mib,
-        plan_b_pids=monitor.plan_b_local_worker_pids,
         interval_s=h5.ENDURANCE_SAMPLE_INTERVAL_S,
+        gpu_metrics=core.gpu_metrics,
+        exact_worker_pids=_exact_worker_pids,
+        db_counts=lambda: core.db_counts(root),
     )
     resource_monitor.start()
 
-    abort_holder: dict = {}
     cycle_summaries = []
     try:
         for index, cycle in enumerate(cycles):
+            active_experiment["id"] = None
             summary = run_cycle(
-                app, cycle=cycle, name=f"Plan B H5 cycle {index + 1}", concurrency=h5.CONCURRENCY_BOUND,
-                monitor_thread=monitor_thread, samples_path=samples_path, abort_holder=abort_holder,
+                app, cycle=cycle, name=f"Plan B H5 cycle {index + 1}",
+                concurrency=h5.CONCURRENCY_BOUND,
+                monitor_thread=concurrency_monitor,
+                resource_monitor=resource_monitor,
+                gpu_baseline_mib=baseline,
             )
             cycle_summaries.append(summary)
     finally:
-        monitor_thread.stop()
+        active_experiment["id"] = None
+        concurrency_monitor.stop()
         resource_monitor.stop()
 
     core.assert_no_orphans("H5 post-run")
@@ -151,10 +229,14 @@ def main(argv=None) -> int:
 
     acceptance = h5.evaluate_final_acceptance(
         cycle_summaries=cycle_summaries,
-        concurrency_samples=monitor_thread.samples,
+        concurrency_samples=concurrency_monitor.samples,
         resource_samples=resource_monitor.samples,
         resource_baseline=admission["cgroup_events_baseline"],
-        foreign_gpu_pids=monitor.foreign_compute_pids(monitor_thread.samples),
+        foreign_gpu_pids=monitor.foreign_compute_pids(concurrency_monitor.samples),
+        concurrency_monitor_failure=concurrency_monitor.thread_failure,
+        resource_monitor_failure=resource_monitor.thread_failure,
+        concurrency_artifact_present=samples_path.exists() and samples_path.stat().st_size > 0,
+        resource_artifact_present=resource_path.exists() and resource_path.stat().st_size > 0,
     )
 
     evidence = {
@@ -163,10 +245,13 @@ def main(argv=None) -> int:
         "view_counts": view_counts,
         "cycles": [c.expected_items for c in cycles],
         "expected_executions": membership.total_expected_executions(),
+        "admission": admission,
         "acceptance": acceptance,
         "gpu_quiescence": quiescent,
-        "concurrency_samples": len(monitor_thread.samples),
+        "concurrency_samples": len(concurrency_monitor.samples),
         "resource_samples": len(resource_monitor.samples),
+        "concurrency_monitor_failure": concurrency_monitor.thread_failure,
+        "resource_monitor_failure": resource_monitor.thread_failure,
         "raw_concurrency_artifact": str(samples_path),
         "raw_resource_artifact": str(resource_path),
     }
