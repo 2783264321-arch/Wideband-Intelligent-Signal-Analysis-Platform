@@ -67,6 +67,11 @@ PUBLIC_ALLOWLIST = {
     "payload_sha256",
     "remote_started_at",
     "remote_finished_at",
+    # A2 execution-selection provenance (manual/auto), platform-owned and bounded.
+    "requested_execution_mode",
+    "auto_reason_code",
+    "auto_reason",
+    "workload_class",
 }
 
 INTERNAL_FORBIDDEN = {
