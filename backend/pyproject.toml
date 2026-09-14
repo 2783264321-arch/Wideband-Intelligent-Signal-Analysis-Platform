@@ -20,6 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "httpx>=0.27,<1"]
 
+[project.scripts]
+wisa = "app.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
