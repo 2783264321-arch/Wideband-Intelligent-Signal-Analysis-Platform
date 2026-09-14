@@ -134,24 +134,36 @@ def _make_identity_resolver(repo_provenance: frozenset[tuple[str, str]]):
         if spec.executor == "local_gpu":
             if parsed is None:
                 return (configured, None, identity_module.BHQ3_GPU_V1, "mismatch")
+            if settings.runtime_family is None:
+                return (configured, None, identity_module.BHQ3_GPU_V1, "unavailable")
             family, kind = parsed
-            return _derive(configured, identity_module.BHQ3_GPU_V1, settings, "local_gpu_python_path", family, kind)
+            if kind != "gpu" or family != settings.runtime_family:
+                return (configured, None, identity_module.BHQ3_GPU_V1, "mismatch")
+            return _derive(
+                configured, identity_module.BHQ3_GPU_V1, settings, "local_gpu_python_path",
+                settings.runtime_family, "gpu",
+            )
 
         if spec.executor != "local_cpu":
             return (configured, None, identity_module.UNAVAILABLE, "unavailable")
 
         if (spec.executor, configured) in repo_provenance:
+            if settings.runtime_family is not None and parsed is not None:
+                family, kind = parsed
+                if family != settings.runtime_family or kind != "cpu":
+                    return (configured, None, identity_module.LOCAL_CPU_V1, "mismatch")
             return (configured, None, identity_module.LEGACY_OPAQUE, "legacy_opaque")
 
         if settings.runtime_family is None:
             return (configured, None, identity_module.LOCAL_CPU_V1, "unavailable")
         if parsed is None:
             return (configured, None, identity_module.LOCAL_CPU_V1, "mismatch")
-        family, _kind = parsed
-        if family != settings.runtime_family:
+        family, kind = parsed
+        if kind != "cpu" or family != settings.runtime_family:
             return (configured, None, identity_module.LOCAL_CPU_V1, "mismatch")
         return _derive(
-            configured, identity_module.LOCAL_CPU_V1, settings, "local_cpu_python_path", settings.runtime_family, "cpu"
+            configured, identity_module.LOCAL_CPU_V1, settings, "local_cpu_python_path",
+            settings.runtime_family, "cpu",
         )
 
     return resolver

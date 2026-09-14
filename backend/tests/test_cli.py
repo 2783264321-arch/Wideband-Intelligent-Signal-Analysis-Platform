@@ -336,3 +336,46 @@ def test_runtime_doctor_family_mismatch(tmp_path: Path, capsys) -> None:
     assert _run(["runtime", "doctor"], context, capsys) == 0
     body = json.loads(capsys.readouterr().out)
     assert body["providers"][0]["identity_status"] == "mismatch"
+
+
+def test_runtime_doctor_local_gpu_never_legacy_and_family_authority(tmp_path: Path, capsys) -> None:
+    gpu = _Provider(name="local_gpu", runtime_ref=_SEALED_GPU_REF, device_type="cuda", precision="float16")
+
+    # repo-default local_gpu + runtime_family=None -> bhq3_gpu_v1 / unavailable / NOT legacy.
+    context = _context(tmp_path, _definition(), {"local_gpu": gpu})
+    context.settings = Settings(runtime_family=None, data_root=tmp_path)
+    _repo_with(context, [_cert_dict("local_gpu", _SEALED_GPU_REF, "cuda", "float16")])
+    assert _run(["runtime", "doctor"], context, capsys) == 0
+    report = json.loads(capsys.readouterr().out)["providers"][0]
+    assert report["identity_scheme"] == "bhq3_gpu_v1"
+    assert report["identity_status"] == "unavailable"
+    assert report["identity_status"] != "legacy_opaque"
+
+    # family mismatch -> bhq3_gpu_v1 / mismatch.
+    mism = _Provider(name="local_gpu", runtime_ref="local:other_family:gpu:abcdefabcdef", device_type="cuda", precision="float16")
+    context2 = _context(tmp_path, _definition(), {"local_gpu": mism})
+    _repo_with(context2, [])
+    assert _run(["runtime", "doctor"], context2, capsys) == 0
+    report2 = json.loads(capsys.readouterr().out)["providers"][0]
+    assert report2["identity_scheme"] == "bhq3_gpu_v1"
+    assert report2["identity_status"] == "mismatch"
+
+    # kind=cpu -> bhq3_gpu_v1 / mismatch.
+    wrong_kind = _Provider(name="local_gpu", runtime_ref="local:autodl_primary:cpu:abcdefabcdef", device_type="cuda", precision="float16")
+    context3 = _context(tmp_path, _definition(), {"local_gpu": wrong_kind})
+    _repo_with(context3, [])
+    assert _run(["runtime", "doctor"], context3, capsys) == 0
+    report3 = json.loads(capsys.readouterr().out)["providers"][0]
+    assert report3["identity_scheme"] == "bhq3_gpu_v1"
+    assert report3["identity_status"] == "mismatch"
+
+
+def test_runtime_doctor_legacy_cpu_without_family(tmp_path: Path, capsys) -> None:
+    cpu = _Provider(name="local_cpu", runtime_ref=_LEGACY_CPU_REF, device_type="cpu", precision="float32")
+    context = _context(tmp_path, _definition(), {"local_cpu": cpu})
+    context.settings = Settings(runtime_family=None, data_root=tmp_path)
+    _repo_with(context, [_cert_dict("local_cpu", _LEGACY_CPU_REF, "cpu", "float32")])
+    assert _run(["runtime", "doctor"], context, capsys) == 0
+    report = json.loads(capsys.readouterr().out)["providers"][0]
+    assert report["identity_scheme"] == "legacy_opaque"
+    assert report["identity_status"] == "legacy_opaque"

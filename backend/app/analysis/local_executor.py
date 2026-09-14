@@ -21,6 +21,7 @@ from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.config import Settings
 from app.core.errors import PlatformError
 from app.remote_execution.runtime import RuntimeDescriptor
+from app.runtime_qualification.identity import validate_configured_local_runtime_ref
 
 _WORKER_MODULE = "app.analysis.local_inference_worker"
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -224,13 +225,23 @@ class LocalInferenceWorkerProvider:
 
 
 def build_local_providers(settings: Settings) -> dict[str, LocalInferenceWorkerProvider]:
-    """Register local providers only when interpreter AND runtime_ref are configured."""
+    """Register local providers only when interpreter AND runtime_ref are configured.
+
+    Before a provider is constructed, the configured runtime_ref must satisfy the
+    operator-owned ``WSP_RUNTIME_FAMILY`` authority (fail closed on disagreement);
+    ``runtime_family=None`` preserves legacy repo-default compatibility.
+    """
     providers: dict[str, LocalInferenceWorkerProvider] = {}
     for executor_kind, (path_attr, ref_attr, _device, _precision) in _LOCAL_SPECS.items():
         interpreter = getattr(settings, path_attr)
         runtime_ref = getattr(settings, ref_attr)
         if interpreter is None or runtime_ref is None:
             continue
+        validate_configured_local_runtime_ref(
+            executor=executor_kind,
+            runtime_ref=runtime_ref,
+            runtime_family=settings.runtime_family,
+        )
         providers[executor_kind] = LocalInferenceWorkerProvider(
             interpreter=interpreter,
             runtime_ref=runtime_ref,

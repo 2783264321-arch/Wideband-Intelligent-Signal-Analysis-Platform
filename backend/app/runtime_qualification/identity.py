@@ -121,6 +121,45 @@ def parse_local_runtime_ref(runtime_ref: str) -> tuple[str, str] | None:
     return match.group("family"), match.group("kind")
 
 
+_EXPECTED_LOCAL_KIND = {
+    "local_cpu": "cpu",
+    "local_gpu": "gpu",
+}
+
+
+def validate_configured_local_runtime_ref(
+    *, executor: str, runtime_ref: str, runtime_family: str | None
+) -> None:
+    """Fail closed when a configured local runtime ref disagrees with the authority.
+
+    ``runtime_family is None`` preserves backward compatibility: legacy
+    repo-default runtime refs are NOT invalidated merely for a missing family.
+    When a family IS configured, the ref family must match it and the ref kind
+    must match the executor's expected kind. The ref is never rewritten.
+    """
+    if runtime_family is None:
+        return
+    parsed = parse_local_runtime_ref(runtime_ref)
+    if parsed is None:
+        raise PlatformError(
+            "RUNTIME_FAMILY_MISMATCH",
+            f"Configured {executor} runtime_ref is malformed.",
+        )
+    family, kind = parsed
+    if family != runtime_family:
+        raise PlatformError(
+            "RUNTIME_FAMILY_MISMATCH",
+            f"Configured {executor} runtime_ref family '{family}' does not match "
+            f"WSP_RUNTIME_FAMILY '{runtime_family}'.",
+        )
+    expected_kind = _EXPECTED_LOCAL_KIND.get(executor)
+    if expected_kind is not None and kind != expected_kind:
+        raise PlatformError(
+            "RUNTIME_FAMILY_MISMATCH",
+            f"Configured {executor} runtime_ref kind '{kind}' is not '{expected_kind}'.",
+        )
+
+
 def resolve_identity_scheme(
     *,
     executor: str,
