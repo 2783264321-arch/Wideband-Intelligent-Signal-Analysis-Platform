@@ -167,6 +167,15 @@ def test_public_reason_message_covers_availability_codes():
     assert public_reason_message("REMOTE_EXECUTOR_UNAVAILABLE")
 
 
+def test_capability_unavailable_public_message_does_not_imply_unconfigured():
+    # EXECUTION_CAPABILITY_UNAVAILABLE is broader than "not configured": the
+    # platform also uses it when a provider IS configured but its live health
+    # probe fails. The public projection must therefore stay generic.
+    message = public_reason_message("EXECUTION_CAPABILITY_UNAVAILABLE")
+    assert message == "Executor is currently unavailable."
+    assert "not configured" not in message.lower()
+
+
 def test_public_reason_message_is_platform_owned_and_generic_for_unknown():
     assert public_reason_message("SOME_UNKNOWN_CODE") == "Executor is currently unavailable."
     # Defensive fallback only: the resolver NEVER calls this for an available

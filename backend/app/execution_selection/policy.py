@@ -50,7 +50,7 @@ _PUBLIC_REASON_MESSAGES = {
     AUTO_REMOTE_GPU_PREFERRED: "Remote GPU was selected.",
     AUTO_UNKNOWN_RECOMMENDED_EXECUTOR: "The recommended executor was selected.",
     AUTO_UNKNOWN_DETERMINISTIC_RANK: "The deterministic executor ranking was applied.",
-    "EXECUTION_CAPABILITY_UNAVAILABLE": "Executor is not configured on this deployment.",
+    "EXECUTION_CAPABILITY_UNAVAILABLE": _GENERIC_UNAVAILABLE_MESSAGE,
     "EXECUTION_NOT_CERTIFIED": "Executor is not certified for this release and runtime.",
     "INPUT_INCOMPATIBLE": "Executor cannot run this input.",
     "REMOTE_EXECUTOR_UNAVAILABLE": "Remote executor is unavailable.",
