@@ -190,6 +190,8 @@ def main(argv=None) -> int:
     parser.add_argument("--run", action="store_true")
     parser.add_argument("--start-cycle", type=int, default=0,
                         help="resume from cycle N (1-based); prior cycles must be completed")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="recover ALL cycles from the DB (zero new executions)")
     args = parser.parse_args(argv)
     if not args.run:
         parser.error("--run is required (real 40-execution campaign)")
@@ -200,6 +202,8 @@ def main(argv=None) -> int:
     cycles = membership.h5_cycles()
     if membership.total_expected_executions() != 40:
         raise SystemExit("H5 STOP: cycle partition is not 40")
+    if args.verify_only:
+        start_cycle = len(cycles)  # recover ALL cycles from the DB (zero launches)
 
     # Issue 5: exactly-once guard. On a fresh DB only start_cycle==0 is legal;
     # when resuming, prior cycles must already be completed (never re-run).
@@ -231,8 +235,14 @@ def main(argv=None) -> int:
         ),
     }
 
-    samples_path = common.EVIDENCE_DIR / "h5_concurrency_samples.jsonl"
-    resource_path = common.EVIDENCE_DIR / "h5_resource_samples.jsonl"
+    samples_path = common.EVIDENCE_DIR / (
+        "h5_concurrency_samples_verification.jsonl" if args.verify_only
+        else "h5_concurrency_samples.jsonl"
+    )
+    resource_path = common.EVIDENCE_DIR / (
+        "h5_resource_samples_verification.jsonl" if args.verify_only
+        else "h5_resource_samples.jsonl"
+    )
 
     def _run_ids(experiment_id):
         return _run_ids_for_experiment(app, experiment_id) if experiment_id else []
@@ -308,7 +318,11 @@ def main(argv=None) -> int:
         "raw_concurrency_artifact": str(samples_path),
         "raw_resource_artifact": str(resource_path),
     }
-    path = core.write_evidence("h5_concurrency_endurance.json", evidence)
+    path = core.write_evidence(
+        "h5_concurrency_endurance_verification.json" if args.verify_only
+        else "h5_concurrency_endurance.json",
+        evidence,
+    )
     print(json.dumps({"experiment_ids": evidence["experiment_ids"],
                       "acceptance": acceptance, "evidence": str(path)}, indent=2))
     return 0 if acceptance["passed"] else 1
