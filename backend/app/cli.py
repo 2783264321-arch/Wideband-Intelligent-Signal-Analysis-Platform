@@ -118,7 +118,7 @@ def _make_identity_resolver(repo_provenance: frozenset[tuple[str, str]]):
     def _derive(configured, scheme, settings, python_attr, family, kind):
         python_path = getattr(settings, python_attr, None)
         try:
-            material = identity_module.collect_identity_material(python_path)
+            material = identity_module.collect_identity_material(python_path, scheme=scheme)
             generation = identity_module.derive_generation_for_scheme(scheme=scheme, material=material)
         except PlatformError:
             return (configured, None, scheme, "unavailable")

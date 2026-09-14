@@ -103,7 +103,7 @@ class _ExecRegistry:
 
 
 def _control_plane_ref() -> str:
-    material = collect_identity_material(Path(sys.executable))
+    material = collect_identity_material(Path(sys.executable), scheme=LOCAL_CPU_V1)
     generation = derive_generation_for_scheme(scheme=LOCAL_CPU_V1, material=material)
     return derive_local_runtime_ref(family="autodl_primary", kind="cpu", generation=generation)
 
@@ -328,7 +328,7 @@ def test_runtime_doctor_derivable_cpu_requires_runtime_family(tmp_path: Path, ca
 
 
 def test_runtime_doctor_family_mismatch(tmp_path: Path, capsys) -> None:
-    material = collect_identity_material(Path(sys.executable))
+    material = collect_identity_material(Path(sys.executable), scheme=LOCAL_CPU_V1)
     generation = derive_generation_for_scheme(scheme=LOCAL_CPU_V1, material=material)
     other_ref = derive_local_runtime_ref(family="other_family", kind="cpu", generation=generation)
     provider = _Provider(name="local_cpu", runtime_ref=other_ref, device_type="cpu", precision="float32")

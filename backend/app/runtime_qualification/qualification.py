@@ -84,7 +84,9 @@ class LocalCpuTargetProbe:
     def _material(self) -> dict:
         if self._material_probe is not None:
             return self._material_probe()
-        return collect_identity_material(self._settings.local_cpu_python_path)
+        return collect_identity_material(
+            self._settings.local_cpu_python_path, scheme=LOCAL_CPU_V1
+        )
 
     def __call__(self, target: QualificationTarget) -> None:
         if target.executor != "local_cpu":

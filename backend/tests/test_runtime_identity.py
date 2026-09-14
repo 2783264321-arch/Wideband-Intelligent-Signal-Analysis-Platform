@@ -221,11 +221,11 @@ def test_canonical_form_is_deterministic_and_order_independent() -> None:
 
 def test_collect_identity_material_fails_closed_without_interpreter() -> None:
     with pytest.raises(PlatformError) as exc:
-        collect_identity_material(None)
+        collect_identity_material(None, scheme=LOCAL_CPU_V1)
     assert exc.value.code == "RUNTIME_IDENTITY_UNAVAILABLE"
 
     with pytest.raises(PlatformError) as exc2:
-        collect_identity_material(Path("/does/not/exist/python"))
+        collect_identity_material(Path("/does/not/exist/python"), scheme=LOCAL_CPU_V1)
     assert exc2.value.code == "RUNTIME_IDENTITY_UNAVAILABLE"
 
 

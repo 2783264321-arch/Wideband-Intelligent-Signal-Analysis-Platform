@@ -81,7 +81,7 @@ class _IntegProvider(FakeProvider):
 
 
 def _material_and_ref() -> tuple[dict, str]:
-    material = collect_identity_material(Path(sys.executable))
+    material = collect_identity_material(Path(sys.executable), scheme=LOCAL_CPU_V1)
     generation = derive_generation_for_scheme(scheme=LOCAL_CPU_V1, material=material)
     return material, derive_local_runtime_ref(family="autodl_primary", kind="cpu", generation=generation)
 

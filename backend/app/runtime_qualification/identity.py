@@ -53,7 +53,7 @@ _SCHEME_FIELDS = {
 
 _LOCAL_REF_RE = re.compile(r"^local:(?P<family>[^:]+):(?P<kind>cpu|gpu):(?P<generation>[0-9a-f]{12})$")
 
-_IDENTITY_PROBE_SCRIPT = """
+_LOCAL_CPU_IDENTITY_PROBE_SCRIPT = """
 import json, platform, sys
 def _version(name):
     try:
@@ -72,6 +72,66 @@ material = {
 }
 print(json.dumps(material))
 """
+
+# Fixed platform-owned torch/CUDA probe, executed INSIDE the configured ML
+# interpreter. It NEVER invents a value: on any failure it reports ok=False so
+# the collector fails closed with RUNTIME_IDENTITY_UNAVAILABLE. There is no
+# "unknown" fallback: missing exact material can never be hashed into an identity.
+_BHQ3_GPU_TORCH_PROBE_SCRIPT = """
+import json, sys
+import numpy, scipy, torch, ultralytics
+
+result = {"ok": False, "reason": None, "material": None}
+try:
+    if not torch.cuda.is_available():
+        result["reason"] = "cuda unavailable"
+    elif torch.cuda.device_count() < 1:
+        result["reason"] = "no cuda device"
+    else:
+        props = torch.cuda.get_device_properties(0)
+        result["ok"] = True
+        result["material"] = {
+            "python": sys.version.split()[0],
+            "torch": torch.__version__,
+            "torch_cuda": torch.version.cuda,
+            "ultralytics": ultralytics.__version__,
+            "numpy": numpy.__version__,
+            "scipy": scipy.__version__,
+            "device_name": props.name,
+            "compute_capability": "%d.%d" % (props.major, props.minor),
+            "cuda_available": True,
+            "device_count": int(torch.cuda.device_count()),
+        }
+except Exception as exc:
+    result["reason"] = type(exc).__name__
+print(json.dumps(result))
+"""
+
+# Raw torch-probe material fields: BHQ3_GPU_V1_FIELDS with driver_version replaced
+# by the internal device_count validation field.
+_BHQ3_GPU_PROBE_FIELDS = (
+    "python",
+    "torch",
+    "torch_cuda",
+    "ultralytics",
+    "numpy",
+    "scipy",
+    "device_name",
+    "compute_capability",
+    "cuda_available",
+    "device_count",
+)
+
+# Fixed platform-owned driver query, locked to device 0 so multi-GPU hosts still
+# yield exactly one line. No user-supplied shell input; invoked with shell=False.
+_BHQ3_GPU_DRIVER_QUERY = (
+    "nvidia-smi",
+    "-i",
+    "0",
+    "--query-gpu=driver_version",
+    "--format=csv,noheader",
+)
+
 _IDENTITY_PROBE_TIMEOUT_S = 120
 
 
@@ -206,20 +266,16 @@ def validate_runtime_ref_against_material(
         raise _mismatch("runtime_ref does not reproduce from the supplied identity material.")
 
 
-def collect_identity_material(python_path: Path | None) -> dict:
-    """Collect identity material inside the configured ML interpreter.
-
-    The control-plane process never imports torch/ultralytics. Absent packages
-    are recorded as ``null``.
-    """
+def _run_probe(python_path: Path | None, script: str, *, runner=None):
     if python_path is None:
         raise _unavailable("No ML interpreter is configured for identity material.")
     path = Path(python_path)
     if not path.is_file():
         raise _unavailable("Configured ML interpreter does not exist.")
+    run = runner or subprocess.run
     try:
-        result = subprocess.run(
-            [str(path), "-c", _IDENTITY_PROBE_SCRIPT],
+        result = run(
+            [str(path), "-c", script],
             shell=False,
             capture_output=True,
             text=True,
@@ -229,17 +285,125 @@ def collect_identity_material(python_path: Path | None) -> dict:
         raise _unavailable("Unable to run the configured ML interpreter.") from exc
     if result.returncode != 0:
         raise _unavailable("Configured ML interpreter failed the identity probe.")
-    payload = None
-    for line in reversed((result.stdout or "").strip().splitlines()):
+    return result
+
+
+def _last_json_object(stdout: str) -> dict:
+    for line in reversed((stdout or "").strip().splitlines()):
         try:
             candidate = json.loads(line)
         except (ValueError, TypeError):
             continue
         if isinstance(candidate, dict):
-            payload = candidate
-            break
-    if payload is None:
-        raise _unavailable("Identity probe returned no valid material.")
+            return candidate
+    raise _unavailable("Identity probe returned no valid material.")
+
+
+def collect_local_cpu_identity_material(python_path: Path | None, *, runner=None) -> dict:
+    """Collect ``local_cpu_v1`` material inside the configured ML interpreter.
+
+    The control-plane process never imports torch/ultralytics. Absent packages
+    are recorded as ``null``.
+    """
+    result = _run_probe(python_path, _LOCAL_CPU_IDENTITY_PROBE_SCRIPT, runner=runner)
+    payload = _last_json_object(result.stdout)
     if set(payload) != set(LOCAL_CPU_V1_FIELDS):
-        raise _unavailable("Identity probe returned malformed material.")
+        raise _invalid("Identity probe returned material for the wrong scheme.")
     return payload
+
+
+def assemble_bhq3_gpu_material(probe_material: dict, driver_version: str) -> dict:
+    """Pure, fail-closed assembly of the canonical ``bhq3_gpu_v1`` material.
+
+    Drops the internal ``device_count`` and adds the exact ``driver_version``.
+    Any missing/invalid field, an unavailable CUDA device, or an empty,
+    multi-line, whitespace-only or ``"unknown"`` driver value fails closed with
+    ``RUNTIME_IDENTITY_UNAVAILABLE``; no partial material is ever returned.
+    """
+    if not isinstance(probe_material, dict):
+        raise _unavailable("GPU identity probe material is not an object.")
+    if probe_material.get("cuda_available") is not True:
+        raise _unavailable("CUDA is not available for the GPU identity material.")
+    try:
+        device_count = int(probe_material.get("device_count"))
+    except (TypeError, ValueError):
+        raise _unavailable("GPU identity device_count is missing or invalid.")
+    if device_count < 1:
+        raise _unavailable("GPU identity device_count is less than one.")
+    if not isinstance(driver_version, str):
+        raise _unavailable("GPU driver version is not a string.")
+    driver = driver_version.strip()
+    if "\n" in driver or "\r" in driver:
+        raise _unavailable("GPU driver query returned multiple lines.")
+    if not driver or driver.lower() == "unknown":
+        raise _unavailable("GPU driver version is missing or unknown.")
+    material: dict = {"driver_version": driver}
+    for field in BHQ3_GPU_V1_FIELDS:
+        if field in ("driver_version", "cuda_available"):
+            continue
+        value = probe_material.get(field)
+        if not isinstance(value, str) or not value:
+            raise _unavailable(f"GPU identity field '{field}' is missing or invalid.")
+        material[field] = value
+    material["cuda_available"] = True
+    if set(material) != set(BHQ3_GPU_V1_FIELDS):
+        raise _unavailable("GPU identity material does not match the bhq3_gpu_v1 fields.")
+    return material
+
+
+def collect_bhq3_gpu_identity_material(python_path: Path | None, *, runner=None) -> dict:
+    """Collect ``bhq3_gpu_v1`` material inside the configured ML interpreter.
+
+    Execution order (fail closed at every step):
+      1. interpreter exists
+      2. fixed torch/CUDA probe runs (require returncode 0 and ``ok`` true)
+      3. probe material has EXACTLY the raw probe fields (cross-scheme rejection)
+      4. fixed device-0 driver query runs (returncode 0, exactly one non-empty line)
+      5. pure assembly drops ``device_count`` and adds ``driver_version``
+    """
+    result = _run_probe(python_path, _BHQ3_GPU_TORCH_PROBE_SCRIPT, runner=runner)
+    payload = _last_json_object(result.stdout)
+    if payload.get("ok") is not True:
+        reason = payload.get("reason") or "GPU identity probe failed."
+        raise _unavailable(str(reason))
+    probe_material = payload.get("material")
+    if not isinstance(probe_material, dict):
+        raise _unavailable("GPU identity probe returned no material.")
+    if set(probe_material) != set(_BHQ3_GPU_PROBE_FIELDS):
+        raise _invalid("GPU identity probe material does not match the bhq3_gpu_v1 probe fields.")
+
+    run = runner or subprocess.run
+    try:
+        driver_result = run(
+            list(_BHQ3_GPU_DRIVER_QUERY),
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_IDENTITY_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _unavailable("Unable to run the GPU driver query.") from exc
+    if driver_result.returncode != 0:
+        raise _unavailable("GPU driver query exited nonzero.")
+    driver_lines = [line for line in (driver_result.stdout or "").strip().splitlines() if line.strip()]
+    if len(driver_lines) != 1:
+        raise _unavailable("GPU driver query did not return exactly one line.")
+    return assemble_bhq3_gpu_material(probe_material, driver_lines[0])
+
+
+def collect_identity_material(python_path: Path | None, *, scheme: str, runner=None) -> dict:
+    """Scheme-aware identity material collection (single entry point).
+
+    The scheme is required (no CPU default) so CPU material can never silently
+    reach a GPU scheme. An unknown scheme, or material whose field set does not
+    match the scheme, fails closed with ``RUNTIME_IDENTITY_INVALID``.
+    """
+    if scheme == BHQ3_GPU_V1:
+        material = collect_bhq3_gpu_identity_material(python_path, runner=runner)
+    elif scheme == LOCAL_CPU_V1:
+        material = collect_local_cpu_identity_material(python_path, runner=runner)
+    else:
+        raise _invalid(f"Unknown runtime identity scheme '{scheme}'.")
+    if set(material) != set(_SCHEME_FIELDS[scheme]):
+        raise _invalid(f"Collected material does not match scheme '{scheme}'.")
+    return material
