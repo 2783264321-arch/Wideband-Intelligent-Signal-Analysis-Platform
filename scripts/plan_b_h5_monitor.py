@@ -161,9 +161,14 @@ class ConcurrencyMonitor(_MonitorBase):
         self._clock = clock
         self._experiment_id: str | None = None
         self._prev_ts: float | None = None
+        # Consecutive UNMAPPED_GPU_COMPUTE_PID samples tolerated as a transient
+        # worker-startup/exit window before aborting (0.25 s period -> ~1.25 s).
+        self._unmapped_grace_samples = 5
+        self._unmapped_streak = 0
 
     def activate(self, experiment_id: str) -> None:
         self._experiment_id = experiment_id
+        self._unmapped_streak = 0
 
     def deactivate(self) -> None:
         self._experiment_id = None
@@ -223,9 +228,23 @@ class ConcurrencyMonitor(_MonitorBase):
         from plan_b_h5_core import evaluate_concurrency_sample
 
         evaluation = evaluate_concurrency_sample(sample)
-        if evaluation.abort:
+        if not evaluation.abort:
+            self._unmapped_streak = 0
+            return
+        if evaluation.reason == "UNMAPPED_GPU_COMPUTE_PID":
+            # Transient startup window: a GPU compute PID can appear one sample
+            # before the worker's cmdline becomes mappable (and vice versa at
+            # exit). Require a CONSECUTIVE streak before aborting so a single
+            # racing sample does not kill a healthy campaign. Any other abort
+            # reason is immediate.
+            self._unmapped_streak = getattr(self, "_unmapped_streak", 0) + 1
+            if self._unmapped_streak < self._unmapped_grace_samples:
+                return
             self.abort_reason = evaluation.reason
             self.abort_detail = evaluation.checks
+            return
+        self.abort_reason = evaluation.reason
+        self.abort_detail = evaluation.checks
 
 
 class ResourceMonitor(_MonitorBase):

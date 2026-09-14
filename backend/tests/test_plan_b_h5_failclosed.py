@@ -236,3 +236,55 @@ class _Seq:
         if self._values:
             self._last = self._values.pop(0)
         return self._last
+
+
+def test_unmapped_gpu_pid_transient_does_not_abort_immediately() -> None:
+    """A single racing sample (GPU PID before ownership mapping) must NOT abort;
+    a persistent unmapped PID still aborts after the grace window."""
+    monitor_obj = monitor.ConcurrencyMonitor(
+        app=None,
+        evidence_path=Path("/tmp/opencode/h5_race.jsonl"),
+        target_period_s=0.25, max_gap_s=0.5, bound=2,
+        run_ids_for_experiment=lambda _eid: [],
+        gpu_compute_pids=lambda: [],
+    )
+    # Sample 1: transient unmapped PID -> tolerated.
+    s1 = h5.ConcurrencySample(0.0, (), (), (65011,), 0, 0, 0.25, experiment_id="e")
+    monitor_obj._evaluate(s1)
+    assert monitor_obj.abort_reason is None
+    # Sample 2: PID became mapped -> streak resets.
+    s2 = h5.ConcurrencySample(0.25, (65011,), ("run_x",), (65011,), 1, 0, 0.25,
+                              experiment_id="e")
+    monitor_obj._evaluate(s2)
+    assert monitor_obj.abort_reason is None
+    # Samples 3..N: persistently unmapped -> abort after grace window.
+    for _ in range(monitor_obj._unmapped_grace_samples):
+        monitor_obj._evaluate(h5.ConcurrencySample(0.5, (), (), (65099,), 0, 0, 0.25,
+                                                   experiment_id="e"))
+    assert monitor_obj.abort_reason == "UNMAPPED_GPU_COMPUTE_PID"
+
+
+def test_concurrency_bound_exceeded_aborts_immediately() -> None:
+    monitor_obj = monitor.ConcurrencyMonitor(
+        app=None,
+        evidence_path=Path("/tmp/opencode/h5_bound.jsonl"),
+        target_period_s=0.25, max_gap_s=0.5, bound=2,
+        run_ids_for_experiment=lambda _eid: [],
+        gpu_compute_pids=lambda: [],
+    )
+    monitor_obj._evaluate(h5.ConcurrencySample(
+        0.0, (1, 2, 3), ("a", "b", "c"), (1, 2, 3), 3, 0, 0.25, experiment_id="e"))
+    assert monitor_obj.abort_reason == "CONCURRENCY_BOUND_EXCEEDED"
+
+
+def test_sampling_gap_aborts_immediately() -> None:
+    monitor_obj = monitor.ConcurrencyMonitor(
+        app=None,
+        evidence_path=Path("/tmp/opencode/h5_gap.jsonl"),
+        target_period_s=0.25, max_gap_s=0.5, bound=2,
+        run_ids_for_experiment=lambda _eid: [],
+        gpu_compute_pids=lambda: [],
+    )
+    monitor_obj._evaluate(h5.ConcurrencySample(
+        0.0, (1,), ("a",), (1,), 1, 0, 0.7, experiment_id="e"))
+    assert monitor_obj.abort_reason == "CONCURRENCY_SAMPLING_GAP"
