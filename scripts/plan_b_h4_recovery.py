@@ -66,6 +66,7 @@ def _restart_and_recover(root: Path) -> dict:
 
 def live_crash_case(root: Path, label: str) -> dict:
     app, _settings = core.build_app(root)
+    core.register_subset(app)
     experiment_id = core.create_experiment(app, plugin_id=PLUGIN, name=f"Plan B H4 live {label}")
     items = _run_until_running(app, experiment_id)
     running = next(i for i in items if i["status"] == "running")
