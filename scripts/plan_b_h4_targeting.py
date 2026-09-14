@@ -1,10 +1,16 @@
-"""Plan B H4 — running-worker crash targeting (CPU-testable seam).
+"""Plan B H4 — genuine GPU running-worker crash targeting (CPU-testable seam).
 
-The genuine crash evidence requires killing a worker whose AnalysisRun has
-ALREADY transitioned to ``running``. Waiting only for
-``DatasetExperimentItem.status == running`` is insufficient: the item turns
-running before the run does, so a kill in that window exercises the
-launch-ambiguous path instead of a real running-worker crash.
+The genuine crash evidence requires killing a worker that is BOTH:
+
+  * running a real ``AnalysisRun`` (``run.status == "running"``), AND
+  * actively holding the GPU (its PID appears in the ``nvidia-smi`` compute-app set).
+
+``run.status == "running"`` alone is insufficient: production
+``local_inference_worker.execute_local_run`` sets ``run.status = "running"``
+BEFORE plugin lookup, input compatibility, runtime/asset resolution, runtime
+loading, and real model execution. Waiting only for the DB status could kill a
+worker that has not started GPU work, which would not be genuine GPU-crash
+evidence.
 
 This module owns the bounded target selection so it can be unit-tested with
 deterministic fakes (no CUDA, no model inference). It never signals anything
@@ -16,6 +22,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+WORKER_MODULE = "app.analysis.local_inference_worker"
+
+
+class AmbiguousWorkerError(RuntimeError):
+    """More than one PID claims the exact same run_id (fail closed)."""
 
 
 @dataclass(frozen=True)
@@ -29,9 +41,26 @@ class RunningWorkerTarget:
     gpu_compute_pid_seen: bool
 
 
-def verified_worker_pid(run_id: str, *, proc_root: Path = Path("/proc")) -> int | None:
-    """Return the PID whose cmdline is exactly
-    ``app.analysis.local_inference_worker <run_id>`` (and nothing else varies)."""
+def _argv_matches_worker(parts: list[str], run_id: str) -> bool:
+    """Exact worker invocation: ``... -m <module> <run_id>`` with NO trailing args."""
+    try:
+        index = parts.index("-m")
+    except ValueError:
+        return False
+    return (
+        len(parts) == index + 3
+        and parts[index + 1] == WORKER_MODULE
+        and parts[index + 2] == run_id
+    )
+
+
+def verified_worker_pids(run_id: str, *, proc_root: Path = Path("/proc")) -> list[int]:
+    """Return ALL PIDs whose cmdline is exactly ``-m <module> <run_id>``.
+
+    More than one match for the same run_id is an ambiguous state; callers must
+    treat it as fail-closed (never pick an arbitrary PID).
+    """
+    matches: list[int] = []
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
@@ -40,15 +69,23 @@ def verified_worker_pid(run_id: str, *, proc_root: Path = Path("/proc")) -> int 
         except OSError:
             continue
         parts = [p.decode("utf-8", "replace") for p in argv if p]
-        try:
-            index = parts.index("-m")
-        except ValueError:
-            continue
-        if (len(parts) > index + 2
-                and parts[index + 1] == "app.analysis.local_inference_worker"
-                and parts[index + 2] == run_id):
-            return int(entry.name)
-    return None
+        if _argv_matches_worker(parts, run_id):
+            matches.append(int(entry.name))
+    return matches
+
+
+def verified_worker_pid(run_id: str, *, proc_root: Path = Path("/proc")) -> int | None:
+    """Return the unique exact worker PID for ``run_id``.
+
+    Returns ``None`` when no PID matches. Raises ``AmbiguousWorkerError`` when
+    more than one PID matches the same run_id (fail closed).
+    """
+    matches = verified_worker_pids(run_id, proc_root=proc_root)
+    if len(matches) > 1:
+        raise AmbiguousWorkerError(
+            f"ambiguous worker PIDs for run {run_id}: {sorted(matches)}"
+        )
+    return matches[0] if matches else None
 
 
 def wait_for_verified_running_worker(
@@ -63,20 +100,22 @@ def wait_for_verified_running_worker(
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
 ) -> RunningWorkerTarget:
-    """Bounded selection of a genuine running-worker kill target.
+    """Bounded selection of a genuine GPU running-worker kill target.
 
     Returns a target ONLY when ALL hold:
       * an item is ``running`` and has a ``latest_analysis_run_id``
       * ``GET /api/analysis-runs/<run_id>`` reports ``status == "running"``
-      * a worker PID is discoverable whose cmdline exactly identifies
-        ``app.analysis.local_inference_worker <run_id>``
+      * a unique worker PID is discoverable whose cmdline exactly identifies
+        ``-m app.analysis.local_inference_worker <run_id>``
+      * that PID is CURRENTLY present in the GPU compute-app PID set
+        (``gpu_compute_pid_seen is True``)
 
-    ``gpu_compute_pid_seen`` records whether that PID was also observed in the
-    GPU compute set at capture time. It is informational provenance; the
-    non-negotiable assertion is ``pre_kill_status == "running"``.
+    If the run is running and the worker PID exists but the GPU compute PID is
+    not yet visible, it KEEPS WAITING (never returns a non-GPU target). If the
+    run completes first, or no GPU-backed target appears before ``deadline_s``,
+    it raises ``TimeoutError``. It NEVER falls back to killing another process.
 
-    Raises ``TimeoutError`` if no such target appears before ``deadline_s`` or
-    if the run completes first. It NEVER falls back to killing another process.
+    An ``AmbiguousWorkerError`` from ``pid_for_run`` propagates (fail closed).
     """
     end = now() + deadline_s
     while now() < end:
@@ -93,6 +132,9 @@ def wait_for_verified_running_worker(
             if pid is None:
                 continue
             compute = set(gpu_compute_pids())
+            if pid not in compute:
+                # Real GPU execution has not begun; keep waiting.
+                continue
             return RunningWorkerTarget(
                 experiment_id=experiment_id,
                 item_id=item["id"],
@@ -100,10 +142,10 @@ def wait_for_verified_running_worker(
                 pid=pid,
                 pre_kill_status="running",
                 verified_cmdline=True,
-                gpu_compute_pid_seen=pid in compute,
+                gpu_compute_pid_seen=True,
             )
         sleep(poll_s)
     raise TimeoutError(
-        "no verified running worker target before deadline; refusing to kill "
-        "any other process"
+        "no GPU-backed verified running worker target before deadline; refusing "
+        "to kill any other process"
     )

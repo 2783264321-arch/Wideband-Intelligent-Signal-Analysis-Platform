@@ -40,11 +40,15 @@ def _restart_and_recover(root: Path) -> dict:
 
 
 def live_crash_case(root: Path, label: str) -> dict:
-    """Kill a worker whose AnalysisRun is ALREADY ``running`` (genuine crash).
+    """Kill a worker whose AnalysisRun is ALREADY ``running`` AND whose PID is
+    actively holding the GPU (genuine GPU crash).
 
-    Selection is delegated to ``plan_b_h4_targeting`` which refuses to return a
-    target while the run is still ``pending``, so the launch-ambiguous window can
-    never masquerade as running-worker crash evidence.
+    Selection is delegated to ``plan_b_h4_targeting`` which:
+      * refuses to return a target while the run is still ``pending``;
+      * requires the exact cmdline-verified PID;
+      * requires that PID to be present in the GPU compute-app set.
+    A ``run.status == "running"`` alone is insufficient because the worker sets
+    it before loading the runtime and beginning real model execution.
     """
     from fastapi.testclient import TestClient
 
@@ -73,6 +77,8 @@ def live_crash_case(root: Path, label: str) -> dict:
     pre_status = target.pre_kill_status
     if pre_status != "running":
         raise SystemExit(f"H4 live: refusing to kill; pre_kill run status is {pre_status!r}")
+    if not target.gpu_compute_pid_seen:
+        raise SystemExit("H4 live: refusing to kill; GPU compute PID was not observed")
     os.kill(pid, signal.SIGKILL)
     # The app is restarted against the same DB; startup recovery must terminalize
     # the running local_gpu run and never rerun completed work.
