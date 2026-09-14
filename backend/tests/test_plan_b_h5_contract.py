@@ -187,9 +187,13 @@ def test_h5_final_acceptance_requires_actual_db_40() -> None:
         }
 
     cycles = [_cycle(16, 16, 16), _cycle(16, 16, 16), _cycle(8, 8, 8)]
+    from plan_b_h5_core import WorkerOwnership
+
     samples = [
-        h5.ConcurrencySample(0.0, (1,), ("a",), (1,), 1, 0, 0.25),
-        h5.ConcurrencySample(0.25, (1, 2), ("a", "b"), (1, 2), 2, 0, 0.25),
+        h5.ConcurrencySample(0.0, (1,), ("a",), (1,), 1, 0, 0.25,
+                             ownership=(WorkerOwnership("a", 1),)),
+        h5.ConcurrencySample(0.25, (1, 2), ("a", "b"), (1, 2), 2, 0, 0.25,
+                             ownership=(WorkerOwnership("a", 1), WorkerOwnership("b", 2))),
     ]
     resources = [h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0)]
     result = h5.evaluate_final_acceptance(
@@ -299,6 +303,7 @@ def test_h5_cycle_acceptance_requires_real_read_models() -> None:
     class _Cycle:
         index = 0
         expected_items = 16
+        stems = tuple(common.H2_STEMS)
 
     good = {
         "status": "completed", "expected_items": 16, "completed_items": 16,
@@ -306,6 +311,7 @@ def test_h5_cycle_acceptance_requires_real_read_models() -> None:
         "_items": [{"id": f"i{n}", "status": "completed"} for n in range(16)],
         "_attempt_counts": {f"i{n}": 1 for n in range(16)},
         "_actual_runs": [f"run_{n}" for n in range(16)],
+        "_actual_recording_names": list(common.H2_STEMS),
         "_evaluation": {"status": "completed", "evaluated_recordings": 16,
                         "missing_recordings": 0, "coverage": 1.0},
     }
@@ -393,3 +399,106 @@ def test_h5_resource_sample_has_real_endurance_fields() -> None:
         "disk_free_bytes", "db_completed_items", "db_run_count",
     ):
         assert hasattr(sample, field_name), field_name
+
+
+def test_h5_cycle_acceptance_requires_exact_recording_names() -> None:
+    class _Cycle:
+        index = 2
+        expected_items = 8
+        stems = tuple(common.H2_STEMS[:8])
+
+    good = {
+        "status": "completed", "expected_items": 8, "completed_items": 8,
+        "failed_items": 0, "queued_items": 0, "running_items": 0, "attempt_count": 8,
+        "_items": [{"id": f"i{n}", "status": "completed"} for n in range(8)],
+        "_attempt_counts": {f"i{n}": 1 for n in range(8)},
+        "_actual_runs": [f"run_{n}" for n in range(8)],
+        "_actual_recording_names": list(common.H2_STEMS[:8]),
+        "_evaluation": {"status": "completed", "evaluated_recordings": 8,
+                        "missing_recordings": 0, "coverage": 1.0},
+    }
+    assert h5.evaluate_cycle_acceptance(summary=good, cycle=_Cycle()).abort is False
+
+    # 8 completed items but ONE wrong recording name -> reject.
+    bad = dict(good)
+    bad["_actual_recording_names"] = ["WRONG"] + list(common.H2_STEMS[1:8])
+    assert h5.evaluate_cycle_acceptance(summary=bad, cycle=_Cycle()).abort is True
+
+
+def test_h5_final_acceptance_requires_ownership_gpu_evidence() -> None:
+    from plan_b_h5_core import WorkerOwnership
+
+    cycles = [
+        {"status": "completed", "_membership": {"expected_items": n}, "completed_items": n,
+         "failed_items": 0, "_actual_run_count": n, "_actual_attempt_count": n}
+        for n in (16, 16, 8)
+    ]
+    resources = [h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0)]
+    # Empty samples (no ownership, no GPU PID) must fail even if math max == 0.
+    empty_samples = [
+        h5.ConcurrencySample(0.0, (), (), (), 0, 0, 0.25),
+        h5.ConcurrencySample(0.25, (), (), (), 0, 0, 0.25),
+    ]
+    empty = h5.evaluate_final_acceptance(
+        cycle_summaries=cycles, concurrency_samples=empty_samples, resource_samples=resources,
+        resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+        concurrency_artifact_present=True, resource_artifact_present=True,
+    )
+    assert empty["passed"] is False
+    assert empty["checks"]["ownership_evidence_present"] is False
+    assert empty["checks"]["gpu_owned_evidence_present"] is False
+
+    # A real ownership + GPU sample passes the ownership-evidence gate.
+    good_samples = [
+        h5.ConcurrencySample(0.0, (11,), ("run_a",), (11,), 1, 0, 0.25,
+                             experiment_id="exp", ownership=(WorkerOwnership("run_a", 11),)),
+        h5.ConcurrencySample(0.25, (11, 22), ("a", "b"), (11, 22), 2, 0, 0.25,
+                             experiment_id="exp",
+                             ownership=(WorkerOwnership("a", 11), WorkerOwnership("b", 22))),
+    ]
+    good = h5.evaluate_final_acceptance(
+        cycle_summaries=cycles, concurrency_samples=good_samples, resource_samples=resources,
+        resource_baseline={"max": 0, "oom": 0, "oom_kill": 0}, foreign_gpu_pids=[],
+        concurrency_artifact_present=True, resource_artifact_present=True,
+    )
+    assert good["checks"]["ownership_evidence_present"] is True
+    assert good["checks"]["gpu_owned_evidence_present"] is True
+    assert good["checks"]["unique_owned_run_ids_seen"] is True
+
+
+def test_h5_resource_monitor_live_abort_on_a1_reason() -> None:
+    import plan_b_h5_monitor as monitor
+
+    monitor_obj = monitor.ResourceMonitor(
+        evidence_path=Path("/tmp/opencode/h5_res.jsonl"),
+        interval_s=5.0,
+        gpu_metrics=lambda: {"used_mib": 0, "free_mib": 100, "utilization_pct": 0},
+        run_ids_for_experiment=lambda _eid: [],
+        raw_snapshot_reader=lambda: {},
+        db_counts=lambda: {},
+    )
+
+    class _FakeA1:
+        def check(self, snapshot):
+            return "abort: memory.events.oom_kill increased"
+
+    monitor_obj._a1_monitor = _FakeA1()
+    sample = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0)
+    monitor_obj._evaluate(sample)
+    assert monitor_obj.abort_reason == "A1_MEMORY_MONITOR_ABORT"
+
+
+def test_h5_resource_monitor_live_abort_on_disk() -> None:
+    import plan_b_h5_monitor as monitor
+
+    monitor_obj = monitor.ResourceMonitor(
+        evidence_path=Path("/tmp/opencode/h5_res2.jsonl"),
+        interval_s=5.0,
+        gpu_metrics=lambda: {"used_mib": 0, "free_mib": 100, "utilization_pct": 0},
+        run_ids_for_experiment=lambda _eid: [],
+        raw_snapshot_reader=lambda: {},
+        db_counts=lambda: {},
+    )
+    sample = h5.ResourceSample(timestamp=0.0, gpu_memory_used_mib=0, disk_free_bytes=1 * 1024 ** 3)
+    monitor_obj._evaluate(sample)
+    assert monitor_obj.abort_reason == "DISK_LOW"

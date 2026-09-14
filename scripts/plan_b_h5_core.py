@@ -247,9 +247,11 @@ def run_per_campaign_admission(core, *, plan_b_pids, min_disk_bytes: int = 5 * 1
     try:
         import shutil
         free = shutil.disk_usage(str(core.common.PLAN_B_ROOT)).free
-    except Exception:  # pragma: no cover
-        free = None
-    if free is not None and free < min_disk_bytes:
+    except Exception as exc:  # pragma: no cover
+        return {"admitted": False, "reason": "DISK_FREE_UNAVAILABLE", "detail": {"error": str(exc)},
+                "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": events,
+                "a1_admission": a1_result}
+    if free < min_disk_bytes:
         return {"admitted": False, "reason": "DISK_LOW", "detail": {"free": free},
                 "gpu_memory_baseline_mib": baseline_mib, "cgroup_events_baseline": events,
                 "a1_admission": a1_result}
@@ -265,32 +267,78 @@ def run_a1_memory_admission():
     return memory_gate.require_memory_admission()
 
 
-def read_cgroup_events_baseline() -> dict:
-    """Read current cgroup memory.events counters (absolute baseline)."""
-    path = Path("/sys/fs/cgroup/memory.events")
-    events = {}
-    if path.exists():
-        for line in path.read_text().splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[1].isdigit():
-                events[parts[0]] = int(parts[1])
-    return events
+def check_h5_fresh_state(db_path: Path) -> dict:
+    """Exactly-once guard: refuse to run H5 over an existing qualification state.
+
+    Returns ``{"fresh": True}`` only when the dedicated H5 DB has no execution
+    authority (no experiments, attempts, or analysis runs). Never deletes or
+    resumes; STOPs before any model inference.
+    """
+    import sqlite3
+
+    path = Path(db_path)
+    if not path.exists():
+        return {"fresh": True, "reason": None, "counts": {}}
+    connection = sqlite3.connect(str(path))
+    try:
+        counts = {}
+        for table in ("dataset_experiments", "dataset_experiment_attempts", "analysis_runs"):
+            row = connection.execute(f"select count(*) from {table}").fetchone()
+            counts[table] = int(row[0]) if row and row[0] is not None else 0
+    finally:
+        connection.close()
+    if any(value > 0 for value in counts.values()):
+        return {"fresh": False, "reason": "H5_EXISTING_STATE", "counts": counts}
+    return {"fresh": True, "reason": None, "counts": counts}
+
+
+MANDATORY_CGROUP_EVENT_KEYS = ("max", "oom", "oom_kill")
+
+
+class CgroupBaselineError(RuntimeError):
+    """Mandatory cgroup memory.events baseline fields are missing or malformed."""
+
+
+def read_cgroup_events_baseline(*, events_path: Path | None = None) -> dict:
+    """Read the mandatory cgroup memory.events baseline counters (fail closed).
+
+    Requires numeric ``max``, ``oom`` and ``oom_kill``. An empty or missing file
+    is NOT accepted as a zero baseline.
+    """
+    path = Path(events_path) if events_path is not None else Path("/sys/fs/cgroup/memory.events")
+    if not path.exists():
+        raise CgroupBaselineError("cgroup memory.events is unavailable.")
+    parsed: dict = {}
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        raise CgroupBaselineError("cgroup memory.events could not be read.") from exc
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+            parsed[parts[0]] = int(parts[1])
+    missing = [key for key in MANDATORY_CGROUP_EVENT_KEYS if key not in parsed]
+    if missing:
+        raise CgroupBaselineError(f"mandatory cgroup memory.events fields missing: {missing}")
+    return {key: parsed[key] for key in MANDATORY_CGROUP_EVENT_KEYS}
 
 
 def cgroup_event_deltas(*, baseline: dict, current: dict) -> dict:
     """Campaign deltas for the mandatory memory.events counters.
 
-    ``current`` holds CURRENT absolute counters; each delta subtracts the
-    campaign baseline. Historical nonzero baselines therefore produce delta 0.
+    ``current`` holds CURRENT absolute counters; each delta subtracts the SAME
+    named campaign baseline counter. Historical nonzero baselines therefore
+    produce delta 0, and a nonzero ``oom`` baseline can never corrupt the
+    ``oom_kill`` delta.
     """
-    keys = {"max": "max", "oom": "oom", "oom_kill": "oom_kill"}
+    mapping = {
+        "max": ("max", "cgroup_events_max"),
+        "oom": ("oom", "cgroup_events_oom"),
+        "oom_kill": ("oom_kill", "cgroup_events_oom_kill"),
+    }
     return {
         name: int(current.get(cur_key, 0)) - int(baseline.get(base_key, 0))
-        for name, (base_key, cur_key) in {
-            "max": ("max", "cgroup_events_max"),
-            "oom": ("oom", "cgroup_events_oom"),
-            "oom_kill": ("oom", "cgroup_events_oom_kill"),
-        }.items()
+        for name, (base_key, cur_key) in mapping.items()
     }
 
 
@@ -328,15 +376,18 @@ def evaluate_cycle_acceptance(*, summary: dict, cycle: object) -> H5AbortEvaluat
     """Per-cycle acceptance from the real DB/API read models.
 
     ``summary`` is the experiment read model augmented with ``_evaluation``,
-    ``_items``, ``_attempt_counts`` and ``_actual_runs`` gathered from the live
-    DB/API. ``cycle`` supplies the intended item count.
+    ``_items``, ``_attempt_counts``, ``_actual_runs`` and ``_actual_recording_names``
+    gathered from the live DB/API. ``cycle`` supplies the intended item count and
+    exact intended recording names (``cycle.stems``).
     """
     intended = cycle.expected_items
+    intended_names = list(getattr(cycle, "stems", ()))
     evaluation = summary.get("_evaluation") or {}
     items = summary.get("_items") or []
     completed_items = [i for i in items if i.get("status") == "completed"]
     actual_runs = summary.get("_actual_runs") or []
     attempt_counts = summary.get("_attempt_counts") or {}
+    actual_names = summary.get("_actual_recording_names") or []
 
     checks = {
         "status_completed": summary.get("status") == "completed",
@@ -345,7 +396,12 @@ def evaluate_cycle_acceptance(*, summary: dict, cycle: object) -> H5AbortEvaluat
         "failed_items_0": summary.get("failed_items") == 0,
         "queued_items_0": summary.get("queued_items") == 0,
         "running_items_0": summary.get("running_items") == 0,
-        "item_membership_exact": len(items) == intended and len(completed_items) == intended,
+        "item_count_exact": len(items) == intended and len(completed_items) == intended,
+        "recording_names_exact": (
+            bool(intended_names)
+            and sorted(actual_names) == sorted(intended_names)
+            and len(actual_names) == intended
+        ),
         "one_attempt_per_item": all(attempt_counts.get(i.get("id")) == 1 for i in items),
         "attempt_count_exact": summary.get("attempt_count") == intended,
         "unique_runs_per_item": (
@@ -382,6 +438,24 @@ def evaluate_final_acceptance(*, cycle_summaries, concurrency_samples, resource_
     gaps = [s.interval_s for s in concurrency_samples]
     max_gap = max(gaps) if gaps else None
 
+    # Issue 7: real ownership + GPU evidence derived from actual samples.
+    owned_worker_samples = sum(
+        1 for s in concurrency_samples
+        if any(getattr(o, "pid", None) is not None for o in getattr(s, "ownership", ()))
+    )
+    unique_owned_run_ids = len({
+        o.run_id
+        for s in concurrency_samples
+        for o in getattr(s, "ownership", ())
+        if getattr(o, "pid", None) is not None
+    })
+    gpu_owned_samples = sum(
+        1 for s in concurrency_samples
+        if set(getattr(s, "gpu_compute_pids", ())).issubset(set(getattr(s, "worker_pids", ())))
+        and len(getattr(s, "gpu_compute_pids", ())) > 0
+        and set(getattr(s, "worker_pids", ()))
+    )
+
     event_deltas = {name: 0 for name in ("max", "oom", "oom_kill")}
     if resource_baseline is not None and resource_samples:
         event_deltas = cgroup_event_deltas(
@@ -398,12 +472,16 @@ def evaluate_final_acceptance(*, cycle_summaries, concurrency_samples, resource_
         "cycle_partition_16_16_8": cycle_items == [16, 16, 8],
         "max_concurrency_le_2": max_concurrency <= CONCURRENCY_BOUND,
         "all_gaps_le_max": max_gap is not None and max_gap <= H5_MAX_SAMPLE_GAP_S,
-        "concurrency_samples_present": len(list(concurrency_samples)) > 0,
-        "resource_samples_present": len(list(resource_samples)) > 0,
+        "concurrency_samples_present": len(concurrency_samples) > 0,
+        "resource_samples_present": len(resource_samples) > 0,
         "concurrency_artifact_present": bool(concurrency_artifact_present),
         "resource_artifact_present": bool(resource_artifact_present),
         "concurrency_monitor_ok": concurrency_monitor_failure is None,
         "resource_monitor_ok": resource_monitor_failure is None,
+        # Issue 7: real ownership + GPU evidence is mandatory.
+        "ownership_evidence_present": owned_worker_samples > 0,
+        "unique_owned_run_ids_seen": unique_owned_run_ids > 0,
+        "gpu_owned_evidence_present": gpu_owned_samples > 0,
         "oom_delta_0": event_deltas["oom"] == 0,
         "oom_kill_delta_0": event_deltas["oom_kill"] == 0,
         "max_delta_0": event_deltas["max"] == 0,
@@ -421,6 +499,9 @@ def evaluate_final_acceptance(*, cycle_summaries, concurrency_samples, resource_
         "actual_total_attempts": sum(a for a in actual_attempts if isinstance(a, int)),
         "max_observed_concurrency": max_concurrency,
         "max_sample_gap_s": max_gap,
+        "owned_worker_samples": owned_worker_samples,
+        "gpu_owned_samples": gpu_owned_samples,
+        "unique_owned_run_ids": unique_owned_run_ids,
         "concurrency_monitor_failure": concurrency_monitor_failure,
         "resource_monitor_failure": resource_monitor_failure,
         "cgroup_event_deltas": event_deltas,

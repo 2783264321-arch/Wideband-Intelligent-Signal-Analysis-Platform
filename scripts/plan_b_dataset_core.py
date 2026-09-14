@@ -165,44 +165,69 @@ def fetch_evaluation(app, evaluation_id: str) -> dict:
     return client.get(f"/api/dataset-benchmarks/{evaluation_id}").json()
 
 
-def gpu_memory_used_mib() -> int:
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=30,
-    ).stdout.strip().splitlines()
-    return int(out[0])
+class NvidiaSmiError(RuntimeError):
+    """nvidia-smi telemetry is unavailable or malformed (acceptance fail-closed)."""
 
 
-def compute_apps() -> list[tuple[int, int]]:
-    out = subprocess.run(
-        ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=30,
-    ).stdout.strip()
+def _run_nvidia_smi(args: list[str], *, runner=None) -> str:
+    """Run one fixed nvidia-smi query and fail closed on ANY failure."""
+    run = runner or subprocess.run
+    argv = ["nvidia-smi", *args]
+    try:
+        result = run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise NvidiaSmiError("nvidia-smi could not be executed.") from exc
+    if getattr(result, "returncode", None) != 0:
+        raise NvidiaSmiError(f"nvidia-smi exited nonzero for query {args!r}.")
+    out = (result.stdout or "").strip()
+    if out == "":
+        raise NvidiaSmiError(f"nvidia-smi returned empty output for query {args!r}.")
+    return out
+
+
+def _parse_int(value: str, *, field: str) -> int:
+    value = value.strip()
+    if not value.lstrip("-").isdigit():
+        raise NvidiaSmiError(f"nvidia-smi field {field!r} is not numeric: {value!r}")
+    return int(value)
+
+
+def gpu_memory_used_mib(*, runner=None) -> int:
+    out = _run_nvidia_smi(["--query-gpu=memory.used", "--format=csv,noheader,nounits"], runner=runner)
+    return _parse_int(out.splitlines()[0], field="memory.used")
+
+
+def compute_apps(*, runner=None) -> list[tuple[int, int]]:
+    """Return compute-app (pid, used_mib); empty ONLY when nvidia-smi succeeded."""
+    out = _run_nvidia_smi(
+        ["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], runner=runner
+    )
     apps = []
     for line in out.splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) == 2 and parts[0].isdigit():
-            apps.append((int(parts[0]), int(parts[1])))
+        if len(parts) != 2:
+            raise NvidiaSmiError(f"malformed compute-app row: {line!r}")
+        if not parts[0].isdigit() or not parts[1].isdigit():
+            raise NvidiaSmiError(f"non-numeric compute-app row: {line!r}")
+        apps.append((int(parts[0]), int(parts[1])))
     return apps
 
 
-def gpu_metrics() -> dict:
-    """GPU memory (used/free) and utilization (acceptance telemetry only)."""
-    out = subprocess.run(
-        ["nvidia-smi", "--query-gpu=memory.used,memory.free,utilization.gpu",
+def gpu_metrics(*, runner=None) -> dict:
+    """GPU memory (used/free) + utilization; fail closed on failure/malformed."""
+    out = _run_nvidia_smi(
+        ["--query-gpu=memory.used,memory.free,utilization.gpu",
          "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=30,
-    ).stdout.strip().splitlines()
-    if not out:
-        return {"used_mib": 0, "free_mib": None, "utilization_pct": None}
-    parts = [p.strip() for p in out[0].split(",")]
-    try:
-        used = int(parts[0])
-    except (ValueError, IndexError):
-        used = 0
-    free = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-    util = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
-    return {"used_mib": used, "free_mib": free, "utilization_pct": util}
+        runner=runner,
+    )
+    parts = [p.strip() for p in out.splitlines()[0].split(",")]
+    if len(parts) != 3:
+        raise NvidiaSmiError(f"malformed gpu metrics row: {out!r}")
+    return {
+        "used_mib": _parse_int(parts[0], field="memory.used"),
+        "free_mib": _parse_int(parts[1], field="memory.free"),
+        "utilization_pct": _parse_int(parts[2], field="utilization.gpu"),
+    }
 
 
 def db_counts(root: Path) -> dict:
@@ -230,13 +255,43 @@ def db_counts(root: Path) -> dict:
         connection.close()
 
 
-def wait_for_workers_drained(experiment_id: str, *, timeout_s: int = 120) -> None:
-    """Wait until no qualification local inference worker remains on the host.
+class WorkerDrainTimeout(RuntimeError):
+    """Exact H5 qualification workers did not exit within the bounded timeout."""
 
-    Keeps the concurrency monitor associated with the experiment until its
-    workers have actually exited, so a DB that terminalizes slightly before the
-    worker exits cannot be misread as an unmapped GPU PID.
+
+def wait_for_exact_workers_drained(run_ids, *, proc_root=Path("/proc"),
+                                   timeout_s: int = 120, poll_s: float = 0.5,
+                                   clock=time.time, sleep=time.sleep) -> None:
+    """Wait until every EXACT qualification worker for ``run_ids`` has exited.
+
+    Uses the exact ``-m app.analysis.local_inference_worker <run_id>`` cmdline
+    match (never a broad module-name scan). Fails closed with
+    ``WorkerDrainTimeout`` on timeout.
     """
+    import plan_b_h5_monitor as monitor
+
+    wanted = list(run_ids)
+    deadline = clock() + timeout_s
+    while clock() < deadline:
+        remaining = []
+        for run_id in wanted:
+            try:
+                if monitor.worker_pid_for_run(run_id, proc_root=proc_root) is not None:
+                    remaining.append(run_id)
+            except RuntimeError as exc:
+                raise WorkerDrainTimeout(f"ambiguous worker for {run_id}: {exc}") from exc
+        if not remaining:
+            return
+        sleep(poll_s)
+    raise WorkerDrainTimeout(
+        f"exact H5 workers for run_ids {wanted} did not exit within {timeout_s}s"
+    )
+
+
+# Retained name for compatibility; H5 uses the exact variant above.
+def wait_for_workers_drained(experiment_id: str, *, timeout_s: int = 120) -> None:
+    """Deprecated broad drain (diagnostics only). H5 authority uses
+    ``wait_for_exact_workers_drained``."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if not worker_pids():

@@ -233,19 +233,43 @@ class ResourceMonitor(_MonitorBase):
 
     def __init__(self, *, evidence_path: Path, interval_s: float,
                  gpu_metrics: Callable[[], dict],
-                 exact_worker_pids: Callable[[], list[int]],
-                 cgroup_reader: Callable[[], dict] | None = None,
+                 run_ids_for_experiment: Callable[[str], list[str]],
+                 raw_snapshot_reader: Callable[[], dict] | None = None,
+                 a1_baseline_snapshot: dict | None = None,
                  disk_free: Callable[[], int | None] | None = None,
                  db_counts: Callable[[], dict] | None = None,
+                 proc_root: Path = Path("/proc"),
                  clock: Callable[[], float] = time.time):
         super().__init__(evidence_path=evidence_path)
         self._interval_s = interval_s
         self._gpu_metrics = gpu_metrics
-        self._exact_worker_pids = exact_worker_pids
-        self._cgroup_reader = cgroup_reader or read_cgroup_sample_fields
+        self._run_ids_for_experiment = run_ids_for_experiment
+        self._raw_snapshot_reader = raw_snapshot_reader or _default_raw_snapshot
         self._disk_free = disk_free or disk_free_bytes
         self._db_counts = db_counts or (lambda: {})
+        self._proc_root = Path(proc_root)
         self._clock = clock
+        self._experiment_id: str | None = None
+        self._a1_monitor = None
+        if a1_baseline_snapshot is not None:
+            import bhq3_memory_gate as memory_gate
+            self._a1_monitor = memory_gate.MemoryMonitor(a1_baseline_snapshot)
+
+    def activate(self, experiment_id: str) -> None:
+        self._experiment_id = experiment_id
+
+    def deactivate(self) -> None:
+        self._experiment_id = None
+
+    def _exact_worker_pids(self) -> list[int]:
+        if self._experiment_id is None:
+            return []
+        pids = []
+        for run_id in self._run_ids_for_experiment(self._experiment_id):
+            pid = worker_pid_for_run(run_id, proc_root=self._proc_root)
+            if pid is not None:
+                pids.append(pid)
+        return pids
 
     def _sample(self):
         from plan_b_h5_core import ResourceSample
@@ -254,7 +278,7 @@ class ResourceMonitor(_MonitorBase):
         rss: dict[int, int] = {}
         vmhwm: dict[int, int] = {}
         for pid in self._exact_worker_pids():
-            status = Path(f"/proc/{pid}/status")
+            status = self._proc_root / str(pid) / "status"
             if not status.exists():
                 continue
             for line in status.read_text().splitlines():
@@ -262,7 +286,7 @@ class ResourceMonitor(_MonitorBase):
                     rss[pid] = int(line.split()[1])
                 elif line.startswith("VmHWM:"):
                     vmhwm[pid] = int(line.split()[1])
-        cgroup = self._cgroup_reader()
+        cgroup = read_cgroup_sample_fields()
         db = self._db_counts()
         return ResourceSample(
             timestamp=self._clock(),
@@ -280,9 +304,6 @@ class ResourceMonitor(_MonitorBase):
             cgroup_events_max=cgroup.get("events_max", 0),
             cgroup_events_oom=cgroup.get("events_oom", 0),
             cgroup_events_oom_kill=cgroup.get("events_oom_kill", 0),
-            cgroup_oom_events=cgroup.get("events_oom", 0),
-            cgroup_oom_kill_events=cgroup.get("events_oom_kill", 0),
-            cgroup_max_events=cgroup.get("events_max", 0),
             disk_free_bytes=self._disk_free(),
             db_completed_items=db.get("completed_items", 0),
             db_failed_items=db.get("failed_items", 0),
@@ -292,6 +313,27 @@ class ResourceMonitor(_MonitorBase):
             db_run_count=db.get("run_count", 0),
         )
 
+    def _evaluate(self, sample) -> None:
+        # Live A1 memory monitor (reuses the existing formulas; fail closed).
+        if self._a1_monitor is not None:
+            try:
+                reason = self._a1_monitor.check(self._raw_snapshot_reader())
+            except Exception as exc:  # noqa: BLE001 - malformed snapshot fails closed
+                self._set_abort("RESOURCE_MONITOR_FAILURE", {"a1_error": str(exc)})
+                return
+            if reason:
+                self._set_abort("A1_MEMORY_MONITOR_ABORT", {"reason": reason})
+                return
+        disk = sample.disk_free_bytes
+        if disk is not None and disk < 2 * 1024 ** 3:
+            self._set_abort("DISK_LOW", {"disk_free_bytes": disk})
+            return
+
+    def _set_abort(self, reason: str, detail: dict) -> None:
+        if self.abort_reason is None:
+            self.abort_reason = reason
+            self.abort_detail = detail
+
     def _run(self) -> None:
         while not self._stop.is_set():
             sample = self._sample()
@@ -299,19 +341,33 @@ class ResourceMonitor(_MonitorBase):
             self.last_sample_at = sample.timestamp
             self.sample_count = len(self.samples)
             self._append(asdict(sample))
+            if self.abort_reason is None:
+                self._evaluate(sample)
             self._stop.wait(self._interval_s)
 
 
+def _default_raw_snapshot() -> dict:
+    import bhq3_memory_gate as memory_gate
+
+    return memory_gate.read_snapshot()
+
+
 def read_cgroup_sample_fields() -> dict:
-    """Current cgroup absolute values reused from the A1 cache-aware derivation."""
+    """Current cgroup absolute values reused from the A1 cache-aware derivation.
+
+    Fails closed (raises) on a malformed snapshot rather than fabricating
+    zero-valued evidence.
+    """
     import bhq3_memory_gate as memory_gate
 
     snapshot = memory_gate.read_snapshot()
-    try:
-        derived = memory_gate.derive(snapshot)
-    except Exception:  # pragma: no cover - malformed snapshot
-        derived = {}
-    events = snapshot.get("events") or {}
+    derived = memory_gate.derive(snapshot)  # raises on malformed required fields
+    events = snapshot.get("events")
+    if not isinstance(events, dict):
+        raise RuntimeError("cgroup memory.events unavailable")
+    missing = [k for k in ("max", "oom", "oom_kill") if k not in events]
+    if missing:
+        raise RuntimeError(f"cgroup memory.events missing mandatory fields: {missing}")
     pressure = snapshot.get("pressure") or {}
     return {
         "memory_current": snapshot.get("memory_current"),

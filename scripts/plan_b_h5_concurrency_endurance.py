@@ -85,6 +85,7 @@ def gather_cycle_evidence(app, *, experiment_id: str, cycle: membership.H5Cycle)
     summary["_actual_runs"] = actual_runs
     summary["_actual_run_count"] = len(actual_runs)
     summary["_actual_attempt_count"] = sum(attempt_counts.values())
+    summary["_actual_recording_names"] = [i.get("recording_name") for i in items]
     summary["_evaluation"] = evaluation
     summary["_membership"] = {"expected_items": cycle.expected_items}
     summary["_experiment_id"] = experiment_id
@@ -101,12 +102,14 @@ def run_cycle(app, *, cycle: membership.H5Cycle, name: str, concurrency: int,
     membership.assert_cycle_membership(app, cycle)
     experiment_id = create_cycle_experiment(app, cycle=cycle, name=name, concurrency=concurrency)
     client = TestClient(app)
+    # Issue 1: BOTH monitors must agree on the SAME active experiment identity.
     monitor_thread.activate(experiment_id)
+    resource_monitor.activate(experiment_id)
     client.post(f"/api/dataset-experiments/{experiment_id}/run")
 
     deadline = time.time() + 3600
     while time.time() < deadline:
-        # Issue 2: fail closed if EITHER monitor thread died.
+        # Issue 2: fail closed if EITHER monitor thread died or aborted live.
         if monitor_thread.abort_reason is not None or monitor_thread.thread_failure is not None:
             raise SystemExit(f"H5 STOP: {monitor_thread.abort_reason or monitor_thread.thread_failure}")
         if resource_monitor.abort_reason is not None or resource_monitor.thread_failure is not None:
@@ -118,11 +121,15 @@ def run_cycle(app, *, cycle: membership.H5Cycle, name: str, concurrency: int,
     else:
         raise SystemExit(f"H5 STOP: cycle {cycle.index} did not reach terminal state")
 
-    # Keep the concurrency monitor associated with this experiment until the
-    # worker/GPU shutdown is observed cleanly (avoid a false unmapped-PID abort
-    # from the DB terminalizing slightly before the worker exits).
-    core.wait_for_workers_drained(experiment_id, timeout_s=120)
+    # Issue 8: exact drain of THIS experiment's workers (fail closed on timeout),
+    # keeping both monitors on the same active experiment until workers exit.
+    run_ids = _run_ids_for_experiment(app, experiment_id)
+    try:
+        core.wait_for_exact_workers_drained(run_ids, timeout_s=120)
+    except core.WorkerDrainTimeout as exc:
+        raise SystemExit(f"H5 STOP: H5_WORKER_DRAIN_TIMEOUT: {exc}") from exc
     monitor_thread.deactivate()
+    resource_monitor.deactivate()
 
     summary = gather_cycle_evidence(app, experiment_id=experiment_id, cycle=cycle)
     acceptance = h5.evaluate_cycle_acceptance(summary=summary, cycle=cycle)
@@ -144,6 +151,11 @@ def main(argv=None) -> int:
         parser.error("--run is required (real 40-execution campaign)")
 
     root = common.PLAN_B_ROOT / "h5"
+    # Issue 5: exactly-once guard BEFORE any registration/settlement.
+    fresh = h5.check_h5_fresh_state(root / "qual.db")
+    if not fresh["fresh"]:
+        raise SystemExit(f"H5 STOP: {fresh['reason']} (existing state: {fresh['counts']})")
+
     # Issue 1: before the FIRST H5 DatasetExperiment exists, the qualification-
     # owned worker set is EMPTY, so ANY pre-existing GPU compute process is foreign.
     admission = h5.run_per_campaign_admission(core, plan_b_pids=())
@@ -168,24 +180,8 @@ def main(argv=None) -> int:
     samples_path = common.EVIDENCE_DIR / "h5_concurrency_samples.jsonl"
     resource_path = common.EVIDENCE_DIR / "h5_resource_samples.jsonl"
 
-    active_experiment = {"id": None}
-
-    def _run_ids(_experiment_id):
-        return _run_ids_for_experiment(app, _experiment_id) if _experiment_id else []
-
-    def _exact_worker_pids():
-        eid = active_experiment["id"]
-        if not eid:
-            return []
-        pids = []
-        for run_id in _run_ids(eid):
-            try:
-                pid = monitor.worker_pid_for_run(run_id)
-            except RuntimeError:
-                raise
-            if pid is not None:
-                pids.append(pid)
-        return pids
+    def _run_ids(experiment_id):
+        return _run_ids_for_experiment(app, experiment_id) if experiment_id else []
 
     concurrency_monitor = monitor.ConcurrencyMonitor(
         app=app,
@@ -198,11 +194,14 @@ def main(argv=None) -> int:
     )
     concurrency_monitor.start()
 
+    # Issue 1: ResourceMonitor owns its OWN exact active-experiment lifecycle.
+    # Issue 2: it instantiates the A1 MemoryMonitor from the admission snapshot.
     resource_monitor = monitor.ResourceMonitor(
         evidence_path=resource_path,
         interval_s=h5.ENDURANCE_SAMPLE_INTERVAL_S,
         gpu_metrics=core.gpu_metrics,
-        exact_worker_pids=_exact_worker_pids,
+        run_ids_for_experiment=_run_ids,
+        a1_baseline_snapshot=admission.get("a1_snapshot"),
         db_counts=lambda: core.db_counts(root),
     )
     resource_monitor.start()
@@ -210,7 +209,6 @@ def main(argv=None) -> int:
     cycle_summaries = []
     try:
         for index, cycle in enumerate(cycles):
-            active_experiment["id"] = None
             summary = run_cycle(
                 app, cycle=cycle, name=f"Plan B H5 cycle {index + 1}",
                 concurrency=h5.CONCURRENCY_BOUND,
@@ -220,7 +218,6 @@ def main(argv=None) -> int:
             )
             cycle_summaries.append(summary)
     finally:
-        active_experiment["id"] = None
         concurrency_monitor.stop()
         resource_monitor.stop()
 
