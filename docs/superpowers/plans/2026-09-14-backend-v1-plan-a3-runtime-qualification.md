@@ -51,22 +51,30 @@ bhq3_gpu_v1   # existing sealed local_gpu (backward compatible, MUST reproduce i
   # must reproduce local:autodl_primary:gpu:7b958347b5af
 
 local_cpu_v1  # NEW operator-installable local_cpu scheme
-  material keys:
+  material keys (EXACT):
     python, platform_system, architecture,
-    numpy, scipy   (optional; null when absent)
-  # GPU-only fields (device_name, compute_capability, driver_version,
-  # cuda_available, torch/torch_cuda) are EXCLUDED so CPU identity never rotates
-  # on GPU-only state change.
+    torch, ultralytics, numpy, scipy   (null when a package is absent)
+  # Material CPU ML package versions ARE included: a CPU inference runtime may
+  # depend on torch/ultralytics even without CUDA.
+  # GPU-state fields (torch_cuda, device_name, compute_capability, driver_version,
+  # cuda_available) are EXCLUDED so a GPU hardware/driver-only change never
+  # rotates a CPU identity, while a torch/ultralytics version change DOES.
   canonical/generation: same canonical form and [:12] rule as above.
 
-legacy_opaque  # existing repo-default runtime refs whose historical derivation
-               # is not reproducible by any A3 scheme (e.g. the sealed CPU ref).
+legacy_opaque  # an existing repo-default runtime ref that is already represented
+               # by repo-default platform ExecutionCertificate authority and is
+               # NOT being re-derived by a supported A3 scheme.
+  # Legacy status comes from repo-default certificate PROVENANCE, never from
+  # pattern-matching the runtime_ref string. The pure identity module keeps no
+  # hard-coded list of historical runtime refs.
   # Treated as an already platform-certified opaque identity: remains valid
-  # exactly as today; A3 never re-derives or invalidates it.
+  # exactly as today; A3 never re-derives or invalidates it, and new A3 operator
+  # certificates are never created for it.
 ```
 
 - **Existing sealed refs MUST remain valid:** `local:autodl_primary:cpu:a1237f8faae7` (repo-default CPU) and `local:autodl_primary:gpu:7b958347b5af` (repo-default GPU, `bhq3_gpu_v1`) continue to authorize their existing repo certificates. A3 does not retroactively invalidate repo defaults merely because their generation predates A3.
-- **New operator installs require a derivable scheme.** A new A3 operator certificate must target a `runtime_ref` derivable by an A3 scheme (`bhq3_gpu_v1` for GPU, `local_cpu_v1` for CPU). Installing a new operator certificate against an opaque `legacy_opaque` ref is not permitted unless a scheme reproduces it exactly.
+- **New operator installs require a derivable scheme.** A new A3 operator certificate must target a `runtime_ref` derivable by an A3 scheme (`bhq3_gpu_v1` for GPU, `local_cpu_v1` for CPU). `legacy_opaque` is assigned only when the ref is already represented by repo-default ExecutionCertificate provenance AND no supported A3 derivation scheme is being used for it; new A3 operator certificates are never created for a `legacy_opaque` identity.
+- **Scheme authority is caller-supplied, never guessed from the ref string.** The identity scheme is resolved by the caller from the current executor, the qualification context, repo-default certificate provenance, and available identity material. The pure hash module performs no `runtime_ref`-string pattern-matching to decide `legacy_opaque` and hard-codes no historical runtime hash.
 - **Invalidated by:** any change to a scheme material field → new generation → new `runtime_ref` → the old exact certificate no longer matches.
 - **Intentionally excluded:** absolute interpreter path, hostname, MAC/CPU-serial/disk-UUID, temp paths, wall-clock time, unrelated environment variables. The operator-owned `family` label provides per-installation distinctness without machine-serial noise.
 - **Missing identity material** (a scheme field cannot be collected) → `identity_status = unavailable` → qualification cannot pass and no certificate installs. Never substitute a changing `"unknown"` string and then produce a supposedly exact certificate.
@@ -227,7 +235,7 @@ def build_runtime_doctor_report(
 ```
 
 - `provider_specs` is a tuple of `(executor, python_path, runtime_ref, device_type, precision, identity_scheme)` supplied by the caller (from `Settings`/providers) — no plugin-id branching.
-- `identity_resolver` is an injected callable returning `(configured_runtime_ref, derived_runtime_ref, identity_status)` for a provider; the default returns `not_configured`/`legacy_opaque` without any GPU call. `identity_status = unavailable` when a scheme's required material cannot be collected.
+- `identity_resolver` is an injected callable returning `(configured_runtime_ref, derived_runtime_ref, identity_scheme, identity_status)` for a provider. The scheme is supplied by the caller (from executor + qualification context + repo-default certificate provenance + available material) via `resolve_identity_scheme`. The default returns `not_configured` — or `legacy_opaque` **only** when the provider's `runtime_ref` is represented by repo-default certificate provenance — and performs no GPU call, no `runtime_ref`-string pattern matching, and no historical-hash lookup. `identity_status = unavailable` when a scheme's required material cannot be collected.
 - Doctor diagnostics (`GpuReport`) are distinct from install-eligible identity material; `nvidia-smi` is only a diagnostic on non-CUDA hosts.
 
 - [ ] **Step 1: Write failing tests**
@@ -286,35 +294,53 @@ LEGACY_OPAQUE = "legacy_opaque"
 BHQ3_GPU_V1_FIELDS = ("python", "torch", "torch_cuda", "ultralytics", "numpy",
                       "scipy", "device_name", "compute_capability",
                       "driver_version", "cuda_available")
-LOCAL_CPU_V1_FIELDS = ("python", "platform_system", "architecture", "numpy", "scipy")
+LOCAL_CPU_V1_FIELDS = ("python", "platform_system", "architecture",
+                       "torch", "ultralytics", "numpy", "scipy")
 
 def canonical_material_bytes(material: dict) -> bytes: ...     # json.dumps(sort_keys, separators)
 def derive_generation(material: dict) -> str: ...              # sha256(canonical).hexdigest()[:12]
 def derive_local_runtime_ref(*, family: str, kind: str, generation: str) -> str: ...
 def derive_generation_for_scheme(*, scheme: str, material: dict) -> str: ...
     # bhq3_gpu_v1: EXACTLY BHQ3_GPU_V1_FIELDS (extra keys -> RUNTIME_IDENTITY_INVALID)
-    # local_cpu_v1: EXACTLY LOCAL_CPU_V1_FIELDS (GPU-only keys -> RUNTIME_IDENTITY_INVALID)
-def scheme_for_executor(*, executor: str, runtime_ref: str) -> str: ...
-    # local_gpu -> bhq3_gpu_v1; local_cpu -> local_cpu_v1 if derivable else legacy_opaque
+    # local_cpu_v1: EXACTLY LOCAL_CPU_V1_FIELDS (GPU-state keys -> RUNTIME_IDENTITY_INVALID)
+def resolve_identity_scheme(
+    *, executor: str, qualification_context: str | None,
+    repo_default_runtime_refs: frozenset[str], material_available: bool,
+) -> str: ...
+    # Scheme is supplied/resolved by the CALLER from executor + qualification
+    # context + repo-default certificate provenance + available identity material.
+    # - executor == "local_gpu"                      -> bhq3_gpu_v1
+    # - executor == "local_cpu" with a qualification -> local_cpu_v1
+    # - executor == "local_cpu" and runtime_ref is in repo_default_runtime_refs
+    #   and no derivation scheme is being used        -> legacy_opaque
+    # - otherwise (absent material / no context)      -> "unavailable"
+    # NEVER pattern-matches the runtime_ref string to decide legacy_opaque and
+    # holds NO hard-coded historical runtime hashes.
 def validate_runtime_ref_against_material(*, runtime_ref, family, kind, scheme, material) -> None: ...
     # RUNTIME_IDENTITY_MISMATCH on generation/family/kind drift; RUNTIME_IDENTITY_INVALID on malformed/extra fields
 ```
 
 - `canonical_material_bytes` mirrors the existing BHQ-3 script exactly: `json.dumps(material, sort_keys=True, separators=(",", ":"))` UTF-8.
 - `bhq3_gpu_v1` reproduces the sealed generation `7b958347b5af` from the exact recorded BHQ-3 material; no extra fields may enter that canonical payload.
-- `local_cpu_v1` excludes GPU-only + torch fields so CPU identity never rotates on GPU-only state change.
-- `legacy_opaque` refs (repo defaults with no reproducible scheme) are returned as-is and are never re-derived or invalidated.
+- `local_cpu_v1` includes the material CPU ML package versions (`torch`, `ultralytics`, `numpy`, `scipy`) but excludes GPU-state fields, so a GPU hardware/driver-only change never rotates a CPU identity while a `torch`/`ultralytics` change does.
+- `legacy_opaque` is assigned only from repo-default certificate provenance (never by pattern-matching the ref string); such refs remain valid and are never re-derived/invalidated, and no new operator certificate targets them. The pure module hard-codes no historical runtime hash.
+- Version collection happens inside the configured ML interpreter through a fixed platform-owned probe; the control-plane process never imports torch/ultralytics.
 
 - [ ] **Step 1: Write failing tests**
 
 Create `backend/tests/test_runtime_identity.py` covering:
 1. **BHQ3 compatibility:** a recorded BHQ-3 GPU material dict → `derive_generation_for_scheme(scheme="bhq3_gpu_v1", material=...)` == `"7b958347b5af"` and `derive_local_runtime_ref(family="autodl_primary", kind="gpu", generation=...)` == `"local:autodl_primary:gpu:7b958347b5af"`.
 2. **No extra fields in V1:** `bhq3_gpu_v1` with an extra key (e.g. `python_version`) raises `RUNTIME_IDENTITY_INVALID`.
-3. **CPU stability:** identical `local_cpu_v1` material → identical ref; changing GPU-only state (`device_name`/`compute_capability`/`driver_version`/`cuda_available`) does not change `local_cpu_v1` generation because those keys are rejected/absent; a test builds the CPU material twice with differing GPU observation dicts and asserts an unchanged CPU ref.
-4. **CPU material change rotates:** changing `python`/`platform_system`/`architecture`/`numpy`/`scipy` changes the CPU ref.
-5. **Legacy opaque:** the sealed CPU ref `local:autodl_primary:cpu:a1237f8faae7` is classified `legacy_opaque` by `scheme_for_executor` and is not re-derived.
+3. **CPU includes material ML versions:** `LOCAL_CPU_V1_FIELDS` == `("python","platform_system","architecture","torch","ultralytics","numpy","scipy")`; an identical CPU material dict yields an identical ref, and a **GPU-only** observation change (`device_name`/`compute_capability`/`driver_version`/`cuda_available`) leaves the `local_cpu_v1` generation unchanged (those keys are GPU-state only and are not part of the CPU payload).
+4. **CPU material change rotates:** changing `torch` **or** `ultralytics` (and separately `python`/`platform_system`/`architecture`/`numpy`/`scipy`) changes the CPU ref. Both a torch-version-change test and an ultralytics-version-change test must assert a changed ref; a GPU-only-state change must NOT change it.
+5. **Legacy opaque comes from provenance, not string shape:**
+   - the sealed CPU ref `local:autodl_primary:cpu:a1237f8faae7` **with repo-default certificate provenance and no A3 derivation being used** → `resolve_identity_scheme(...) == "legacy_opaque"` and it is not re-derived;
+   - a **same-shaped arbitrary** `runtime_ref` **without** repo-default provenance → NOT classified `legacy_opaque` (it is `unavailable`/`mismatch`, never a silent legacy fallback);
+   - a new `local_cpu` qualification → `"local_cpu_v1"`;
+   - new `local_cpu` material that does **not** reproduce the configured `runtime_ref` → `RUNTIME_IDENTITY_MISMATCH`, never `legacy_opaque`.
 6. **`validate_runtime_ref_against_material`** raises `RUNTIME_IDENTITY_MISMATCH` on generation drift, `RUNTIME_IDENTITY_INVALID` on a malformed ref or extra material fields.
 7. Canonical form is deterministic and key-order independent.
+8. **No hard-coded historic identity:** a source-scan test asserts `identity.py` contains no literal historic runtime hash (e.g. `a1237f8faae7`) and does not branch on `runtime_ref`/`runtime_ref in ...` to decide the scheme.
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -327,6 +353,8 @@ Expected RED: `ModuleNotFoundError: No module named 'app.runtime_qualification.i
 - [ ] **Step 3: Minimal implementation**
 
 Create `identity.py` importing `dataclasses`, `hashlib`, `json`, `re`, `typing`, and `app.core.errors.PlatformError`. Error codes `RUNTIME_IDENTITY_MISMATCH` / `RUNTIME_IDENTITY_INVALID`.
+
+Add a fixed platform-owned **material probe** (`collect_identity_material`) that runs INSIDE the configured ML interpreter (a subprocess `-c` probe mirroring the existing BHQ-3 script) and returns the scheme material dict (for `local_cpu_v1`: `python`/`platform_system`/`architecture`/`torch`/`ultralytics`/`numpy`/`scipy`; absent packages → `null`). The control-plane process never imports torch/ultralytics.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -471,6 +499,42 @@ class QualificationTarget:
     runtime_ref: str
     runtime_descriptor: dict
 
+class LocalCpuTargetProbe:
+    # Platform-owned PRODUCTION probe. GENERIC: branches only on executor, never
+    # on plugin_id. Reuses existing platform seams (no copies):
+    #   LocalInferenceWorkerProvider.probe()
+    #   ModelReleaseStore.resolve(...)
+    #   local_inference_worker.resolve_local_assets(...)
+    #   remote_execution.assets.verify_assets(...)
+    def __init__(self, *, settings, definition, provider, model_release_store,
+                 asset_manifest,
+                 resolve_live_authority: Callable[..., "LiveAuthority"], now=...) -> None: ...
+    def __call__(self, target: QualificationTarget) -> None:
+        # raises QualificationProbeError(detail) on ANY failed check, returns None
+        # on full success. Checks, for the EXACT target:
+        #  1. CURRENT local_cpu provider exists
+        #  2. provider.name == "local_cpu"
+        #  3. provider.probe() succeeds
+        #  4. provider.runtime_ref == target.runtime_ref
+        #  5. provider.runtime_descriptor().to_metadata() == target.runtime_descriptor
+        #  6. exact technical capability present (executor/device_type/precision)
+        #  7. runtime identity material from the configured ML interpreter
+        #     validates local_cpu_v1 against the configured runtime_ref
+        #  8. exact plugin/version == current PipelineDefinition
+        #  9. ModelRelease semantics: release-less -> None; release-required ->
+        #     exact/default ResolvedModelRelease matches target.model_release_id
+        # 10. release-required: resolve trusted local assets via the existing
+        #     deployment mapping and verify EVERY asset against the exact
+        #     AssetManifest SHA via the existing platform verification seam
+        # 11. NO actual Recording inference is required for A3
+
+def build_default_target_probe(
+    *, target: QualificationTarget, settings, pipeline_registry,
+    model_release_store, executor_registry, now=...,
+) -> LocalCpuTargetProbe: ...
+    # Production default used by the CLI and the target-runner. For executors
+    # other than local_cpu the DeferredGpuQualificationRunner is still used.
+
 class QualificationRunner(Protocol):
     qualification_type: str
     def run(self, *, target: QualificationTarget) -> tuple[QualificationResult, ...]: ...
@@ -496,6 +560,7 @@ def run_qualification(
 ```
 
 - A passing `LocalCpuQualificationRunner` requires a mandatory platform-owned `target_probe` bound to the exact `QualificationTarget` (plugin/version/release/executor/runtime_ref/descriptor). Without a probe the result is `passed=False` with reason `QUALIFICATION_PROBE_UNAVAILABLE`. Tests inject deterministic fakes; A3 tests never run real inference. Core code branches only on `executor`, never `plugin_id`.
+- **Production has a real probe.** `wisa qualify --executor local_cpu` MUST construct the platform-owned `LocalCpuTargetProbe` by default (via `build_default_target_probe`) — never a permanently failing `target_probe=None`. The probe is generic (executor-only branching) and reuses the existing platform seams listed above; if importing a helper directly would create an inappropriate dependency, the smallest equivalent refactoring is allowed.
 - Runner selection is by executor: `local_cpu` → `LocalCpuQualificationRunner`; `local_gpu`/`remote_gpu` → `DeferredGpuQualificationRunner`.
 
 - [ ] **Step 1: Write failing tests**
@@ -508,6 +573,8 @@ Create `backend/tests/test_runtime_qualification.py` covering:
 5. `qualification_type_install_eligible`: `local_cpu`+`local_cpu_smoke_v1` → True; `local_gpu`/`remote_gpu` any type → False; unknown type → False.
 6. `run_qualification` echoes the exact `QualificationTarget` identity into evidence and never writes a certificate.
 7. Executor-based runner selection only (no plugin-id logic).
+8. **Production probe default (architecture test):** building the production CLI/runner for `wisa qualify --executor local_cpu` yields a real `LocalCpuTargetProbe` (assert `isinstance(probe, LocalCpuTargetProbe)` and `probe is not None`), proving production does NOT default to a permanently failing `target_probe=None`.
+9. **Production probe enforces every check:** with injectable fakes, `LocalCpuTargetProbe` raises `QualificationProbeError` when the provider is missing, `provider.name != "local_cpu"`, `provider.probe()` fails, `runtime_ref`/descriptor mismatch, the exact technical capability is absent, identity material is missing/mismatched, plugin/version mismatches, the release mismatches, or an asset fails manifest-SHA verification; full success returns `None`. No inference runs.
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -519,7 +586,7 @@ Expected RED: `ModuleNotFoundError: No module named 'app.runtime_qualification.q
 
 - [ ] **Step 3: Minimal implementation**
 
-Create `qualification.py` importing `dataclasses`, `typing`, `datetime`, `app.core.errors`, `app.runtime_qualification.evidence`.
+Create `qualification.py` importing `dataclasses`, `typing`, `datetime`, `app.core.errors`, `app.runtime_qualification.evidence`. Implement `LocalCpuQualificationRunner` (which invokes the injected `target_probe`), the generic `LocalCpuTargetProbe` and `build_default_target_probe(...)` (reusing the existing platform seams), and `DeferredGpuQualificationRunner`.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -563,7 +630,9 @@ def resolve_live_authority(*, registry, model_release_store, executor_registry,
                            plugin_id, plugin_version, executor,
                            requested_model_release_id: str | None, data_root) -> LiveAuthority: ...
     # resolves exact definition/version, exact ModelRelease (or release-less None),
-    # exact provider, provider.runtime_ref, provider.runtime_descriptor(), technical capability
+    # exact provider, provider.runtime_ref, provider.runtime_descriptor(), and the
+    # exact technical capability (executor/device_type/precision) from the CURRENT
+    # definition — NOT ExecutorRegistry.certified_capability(...)
 def validate_evidence_for_install(
     *, evidence, authority: LiveAuthority, now=..., max_age_s: int | None = None
 ) -> ExecutionCertificate: ...
@@ -583,11 +652,15 @@ class LiveAuthority:
     executor: str
     runtime_ref: str
     runtime_descriptor: dict      # provider.runtime_descriptor().to_metadata()
-    certified_capability: bool    # exact technical+certificate capability present
+    technical_capability_present: bool    # definition declares exact executor/device_type/precision
+    technical_capability: object | None   # the exact matched ExecutionCapability, if any
     provider_present: bool
+    # Deliberately NO `certified_capability`: first install MUST NOT depend on an
+    # existing certificate (that would be circular / permanently failing).
 ```
 
-- **Live authority is authoritative.** `validate_evidence_for_install` compares evidence against the CURRENT resolved `LiveAuthority` — never trusting identity claims from the evidence JSON. It requires: valid evidence (hash/shape/non-empty/ineligible-type checks), `qualification_type_install_eligible(executor, type)`, `passed is True`, plugin/version == definition, `model_release_id` == resolved release id, `executor`/`device_type`/`precision`/`runtime_ref`/`runtime_descriptor` == live provider, `provider_present`, and (for install) the technical capability present. Optional `max_age_s` staleness bound.
+- **Live authority is authoritative, and NOT certification.** `validate_evidence_for_install` compares evidence against the CURRENT resolved `LiveAuthority` — never trusting identity claims from the evidence JSON. It requires: valid evidence (hash/shape/non-empty/ineligible-type checks), `qualification_type_install_eligible(executor, type)`, `passed is True`, plugin/version == definition, `model_release_id` == resolved release id, `executor`/`device_type`/`precision`/`runtime_ref`/`runtime_descriptor` == live provider, `provider_present`, and the exact **technical capability** present.
+- **No circular dependency on existing certification (first install works).** Pre-install authority is: the CURRENT provider exists AND `provider.runtime_descriptor().executor == executor` AND `definition.technical_execution_capabilities` contains an exact `(executor, device_type, precision)` match. Install MUST NOT call `ExecutorRegistry.certified_capability(...)` as a prerequisite — that method is expected to be `None`/False before a new certificate exists. After install + registry rebuild, `certified_capability(...)` becomes non-`None`.
 - **Duplicate semantics preserved:** `build_certificate_store` uses the existing `ExecutionCertificateStore` (which rejects duplicate exact keys) — no silent dedupe. `install_certificate` resolves idempotency BEFORE writing: same operator cert → `already_installed`; repo-default already certifies the same exact key → `already_certified`; same operator key conflicting metadata/`evidence_ref` → fail closed.
 - **No hot reload:** writing the operator store does not mutate a running `app.state.executor_registry`; the new certificate is effective on the next control-plane startup / explicit registry rebuild.
 - Error codes: `QUALIFICATION_EVIDENCE_INVALID`, `EXECUTION_NOT_CERTIFIED`.
@@ -595,9 +668,9 @@ class LiveAuthority:
 - [ ] **Step 1: Write failing tests**
 
 Create `backend/tests/test_certificate_install.py` covering:
-1. **Live authority required:** valid-hash evidence but current `runtime_ref` differs → reject; current `runtime_descriptor` differs → reject; different plugin version → reject; different resolved release → reject; provider missing → reject; technical capability missing → reject.
+1. **Live authority required (technical, not certification):** valid-hash evidence but current `runtime_ref` differs → reject; current `runtime_descriptor` differs → reject; different plugin version → reject; different resolved release → reject; provider missing → reject; exact technical capability absent (definition lacks the `(executor, device_type, precision)` match) → reject.
 2. **Explicit install:** qualification alone never writes a certificate; `install_certificate` is the only writer.
-3. **Happy path:** valid evidence + matching live authority installs an exact certificate; `certified_capability` becomes non-None after a *rebuilt* store.
+3. **Happy path + first-install regression (no circular dependency):** with matching live authority, BEFORE install `technical_capability_present is True` and `executor_registry.certified_capability(...) is None` (expected — no certificate yet); `install_certificate` succeeds; after REBUILDING the certificate store, `certified_capability(...) is not None`.
 4. **Idempotency + duplicates:** same operator cert → `already_installed`; repo-default already certifies same key → `already_certified` (no operator entry); same operator key conflicting metadata → fail closed; repo+operator duplicate exact key at `build_certificate_store` → fail closed.
 5. **Ineligible/vacuous evidence:** `gpu_deferred`, unknown type, and empty-results evidence cannot install.
 6. **Six repo certificates regression:** all six repo defaults still load and remain certifiable exactly as before, including `local:autodl_primary:cpu:a1237f8faae7` and `local:autodl_primary:gpu:7b958347b5af`.
@@ -660,6 +733,7 @@ certificate list
 - `--model-release` is OPTIONAL. For a release-required plugin: explicit id → resolve that exact release; omitted → resolve the platform default via `ModelReleaseStore`. For a release-less plugin: omitted → `model_release_id=None`; supplied → `MODEL_RELEASE_MISMATCH`. Evidence stores the exact resolved id.
 - `certificate install --from <dir>` must: load and verify evidence; build current settings; resolve `pipeline_registry`/`model_release_store`/`executor_registry`; resolve exact plugin/version, exact release, exact provider; build `LiveAuthority`; then `validate_evidence_for_install` + `install_certificate`. It never synthesizes authority from evidence fields alone.
 - Install success output MUST state that the certificate is effective on the next control-plane restart / registry rebuild (no hot reload).
+- `qualify --executor local_cpu` MUST build the real platform-owned `LocalCpuTargetProbe` via `build_default_target_probe(...)` (Task 4) so the production path can actually pass; it MUST NOT default to a permanently failing `target_probe=None`. The probe is injectable for tests, which never run inference.
 - `main` returns an int exit code; `0` on success, non-zero on `PlatformError` printed as `CODE: message` on stderr (no tracebacks). All construction is injectable so tests never need a real GPU or a running server.
 
 - [ ] **Step 1: Write failing tests**
@@ -673,6 +747,7 @@ Create `backend/tests/test_cli.py` covering:
 6. `certificate install --from <dir>` on valid evidence+matching authority installs and prints the restart note; on tampered evidence or live-authority mismatch exits non-zero and does not mutate the store.
 7. `certificate list` lists installed certificates (empty when none).
 8. Unknown subcommand/flags exit non-zero with usage (no traceback).
+9. **Production probe default (architecture):** `qualify --executor local_cpu` builds a real `LocalCpuTargetProbe` via the injectable construction seam — proving the CLI does NOT default to a permanently failing `target_probe=None`.
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -684,7 +759,7 @@ Expected RED: `ModuleNotFoundError: No module named 'app.cli'`.
 
 - [ ] **Step 3: Minimal implementation**
 
-Create `cli.py` importing `argparse`, `json`, `sys`, `pathlib`, `app.core.config.Settings`, `app.core.errors.PlatformError`, `app.pipelines.registry.create_pipeline_registry`, and the `runtime_qualification` modules. Add `[project.scripts]` to `pyproject.toml`.
+Create `cli.py` importing `argparse`, `json`, `sys`, `pathlib`, `app.core.config.Settings`, `app.core.errors.PlatformError`, `app.pipelines.registry.create_pipeline_registry`, and the `runtime_qualification` modules. `qualify --executor local_cpu` builds the real probe via `build_default_target_probe(...)` (never `target_probe=None`); the probe is injectable for tests. Add `[project.scripts]` to `pyproject.toml`.
 
 - [ ] **Step 4: Run GREEN**
 
@@ -715,10 +790,10 @@ git commit -m "feat: add runtime qualification cli"
 - [ ] **Step 1: Write the integration/guard tests**
 
 Covering:
-1. **A2 sees the installed certificate after rebuild:** install for an exact tuple, rebuild the registry, `certified_capability` becomes non-None and the A2 Auto `certified` flag flips — with no A2 policy change.
+1. **A2 sees the installed certificate after rebuild (and first-install has no circular dependency):** before install the target has `technical_capability_present is True` while `certified_capability(...) is None`; `install_certificate` for the exact tuple succeeds; after rebuilding the registry, `certified_capability(...) is not None` and the A2 Auto `certified` flag flips — with no A2 policy change.
 2. **A2 policy untouched:** the Auto decision for a fixed input is identical before/after a certificate install that does not match the requested executor.
 3. **Six repo certificates remain loadable:** the merged store loads all repo defaults unchanged and each remains `certified_capability`-visible.
-4. **Legacy CPU ref not re-derived:** `local:autodl_primary:cpu:a1237f8faae7` remains valid and is classified `legacy_opaque`.
+4. **Legacy CPU ref not re-derived:** `local:autodl_primary:cpu:a1237f8faae7` remains valid and is classified `legacy_opaque` **because it is represented by repo-default certificate provenance** (not by ref-string pattern matching); the identity module hard-codes no historic hash.
 5. **A1 exact authority preserved:** `validate_frozen_execution_authority` still fails a mismatched descriptor; runtime rotation (new `runtime_ref`) invalidates the old certificate and the executor becomes uncertified until re-qualified.
 6. **Certificate/provider disappearance fails closed.**
 7. **Plugin cannot self-certify:** source scan of `app/` proves only `install.py` writes the operator certificate store.
@@ -789,10 +864,10 @@ Corrective self-review before commit:
 
 1. **Raw `runtime_ref` is never a Windows directory component.** Evidence storage uses `runtime_storage_key = sha256(runtime_ref).hexdigest()`; the raw ref lives only in JSON; the loader verifies the containing key equals `sha256(runtime_ref)`.
 2. **Existing BHQ3 GPU ref is backward compatible.** A `bhq3_gpu_v1` scheme reproduces the exact BHQ-3 canonical material → generation `7b958347b5af`; no extra fields enter the V1 payload; a compatibility test proves it.
-3. **Existing repo-default certificates are not retroactively invalidated.** Repo defaults (including the sealed CPU ref `a1237f8faae7`) remain valid; unknown-derivation refs are treated as `legacy_opaque`, never re-derived.
-4. **CPU runtime identity ignores GPU-only noise.** `local_cpu_v1` excludes GPU/torch fields; a GPU-only state change leaves the CPU ref unchanged.
+3. **Existing repo-default certificates are not retroactively invalidated.** Repo defaults (including the sealed CPU ref `a1237f8faae7`) remain valid; `legacy_opaque` is assigned only from repo-default certificate PROVENANCE (never by ref-string pattern matching), is never re-derived, and no new operator certificate targets it.
+4. **CPU runtime identity includes material ML versions but ignores GPU-only noise.** `local_cpu_v1` = (`python`,`platform_system`,`architecture`,`torch`,`ultralytics`,`numpy`,`scipy`); a GPU-only state change leaves the CPU ref unchanged, while a `torch`/`ultralytics` version change rotates it (both tested).
 5. **Runtime family has one explicit source.** `WSP_RUNTIME_FAMILY` → `Settings.runtime_family`, validated, matched against any configured `local_*_runtime_ref`, disagreement fails closed; absence does not invalidate legacy certs.
-6. **Install re-resolves CURRENT live authority.** `install_certificate`/`validate_evidence_for_install` take a `LiveAuthority` resolved from the current registry/settings; evidence identity claims are never trusted alone.
+6. **Install re-resolves CURRENT live authority and does not require existing certification.** `install_certificate`/`validate_evidence_for_install` take a `LiveAuthority` resolved from the current registry/settings and require the exact technical capability `(executor, device_type, precision)` — never `ExecutorRegistry.certified_capability(...)`. First install works; `certified_capability(...)` becomes non-None only after install + registry rebuild.
 7. **Evidence has at least one result.** `validated_passed` requires non-empty results; vacuous `results=[]` cannot be written or loaded as passing.
 8. **Qualification type is install-eligible.** A closed eligibility map authorizes only `local_cpu_smoke_v1` for `local_cpu`; `local_gpu`/`remote_gpu` have none in A3; unknown/deferred types cannot install.
 9. **GPU-deferred evidence cannot install.** `DeferredGpuQualificationRunner` never passes and `gpu_deferred` is not install-eligible.
@@ -801,5 +876,9 @@ Corrective self-review before commit:
 12. **File install requires restart/registry rebuild to become live.** No hot reload; tests prove an existing in-memory registry is unchanged and a rebuilt registry sees the new certificate.
 13. **No GPU/CUDA/server required.** Every task is `GPU REQUIRED: NO`; GPU diagnostics are optional and never define identity; real GPU/remote qualification is deferred to Plans B/C.
 14. **Only the plan document changed.** No production code, tests, config, or certificates were modified in this pass.
+15. **First-time install has no circular dependency.** Before install `technical_capability_present is True` while `certified_capability(...) is None`; install succeeds; after rebuild `certified_capability(...) is not None`.
+16. **Production local_cpu qualification has a real platform-owned probe.** `wisa qualify --executor local_cpu` builds `LocalCpuTargetProbe` by default (generic, executor-only branching), reusing existing platform seams; architecture tests prove production does not default to `target_probe=None`, and test paths need no inference.
+17. **`legacy_opaque` is provenance-based, not string-shaped.** A same-shaped arbitrary ref without repo-default provenance is NOT `legacy_opaque`; a new local_cpu qualification → `local_cpu_v1`; non-reproducing material → `RUNTIME_IDENTITY_MISMATCH`, never a legacy fallback.
+18. **No hard-coded historic runtime hash in production identity logic.** `identity.py` holds no historical ref literal (e.g. no `a1237f8faae7`) and does not branch on the `runtime_ref` string to decide the scheme.
 
 Additional invariants preserved: no PKI (SHA = integrity only); no plugin self-certification; no DB migration; no frontend; A1 authority unchanged; A2 policy unchanged; no A3/B-C scope leakage; public APIs expose no qualification internals; `.gitignore` protects the default `/data` locations only.
