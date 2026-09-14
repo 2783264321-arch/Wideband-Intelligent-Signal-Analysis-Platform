@@ -827,7 +827,23 @@ class DatasetExperimentService:
             self.session.rollback()
             raise
 
-        analysis_service.launch_prepared_run(run.id)
+        # Physical launch (A1.1 Window C). A local frozen-authority loss
+        # discovered HERE — runtime generation drift between the Transaction B
+        # intent commit and this launch — propagates as experiment-level
+        # RUNTIME_DESCRIPTOR_INVALID. AnalysisService has already terminalized the
+        # owned local Run; the owned Item must also be failed under the same
+        # generation fencing so a terminal Experiment never retains a running
+        # Item. The durable launch intent is historical truth: do not clear
+        # launch_requested_at, and do not rewrite the Run.
+        try:
+            analysis_service.launch_prepared_run(run.id)
+        except PlatformError as exc:
+            if exc.code == _RUNTIME_DESCRIPTOR_INVALID and coordinator_token is not None:
+                self._mark_item_failed(
+                    item.id, exc.code, exc.message,
+                    experiment_id=experiment.id, coordinator_token=coordinator_token,
+                )
+            raise
         self.session.refresh(attempt)
         return attempt
 
