@@ -1,4 +1,4 @@
-import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, createDatasetExperiment, getDatasetExperiment, getExecutorAvailability, getExecutorSelection, listDatasetExperimentItemAttempts, listDatasetExperimentItems, listDatasetExperiments, listPipelines, retryDatasetExperimentEvaluation, retryFailedDatasetExperimentItems, runDatasetExperiment } from "./client";
+import { apiGet, apiPostJson, PlatformApiError, compareAnalysisRuns, createAnalysisRun, createDatasetExperiment, getDatasetExperiment, getExecutorAvailability, getExecutorSelection, importAnalysisPackage, importRecording, listDatasetExperimentItemAttempts, listDatasetExperimentItems, listDatasetExperiments, listPipelines, retryDatasetExperimentEvaluation, retryFailedDatasetExperimentItems, runDatasetExperiment } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -529,4 +529,53 @@ test("listDatasetExperimentItems and attempts map to camelCase", async () => {
   expect(items[0]).toMatchObject({ experimentId: "exp_1", manifestOrder: 0, latestAnalysisRunId: null });
   const attempts = await listDatasetExperimentItemAttempts("exp_1", "item_1");
   expect(attempts[0].analysisRunId).toBe("run_1");
+});
+
+// ---------------------------------------------------------------------------
+// F6.1 — structured error convergence for multipart / compare paths
+// ---------------------------------------------------------------------------
+
+test("importRecording preserves the structured backend error", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "RECORDING_INVALID", message: "bad iq", details: { field: "sample_rate_hz" } } }),
+    { status: 422 },
+  )));
+  const form = new FormData();
+  form.append("file", new Blob(["x"]), "raw.iq");
+  let thrown: unknown;
+  try { await importRecording(form); } catch (e) { thrown = e; }
+  const err = thrown as PlatformApiError;
+  expect(err).toBeInstanceOf(PlatformApiError);
+  expect(err.status).toBe(422);
+  expect(err.code).toBe("RECORDING_INVALID");
+  expect(err.message).toBe("bad iq");
+  expect(err.details).toEqual({ field: "sample_rate_hz" });
+});
+
+test("importAnalysisPackage preserves the structured backend error", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "IMPORT_INVALID", message: "bad zip", details: {} } }),
+    { status: 400 },
+  )));
+  let thrown: unknown;
+  try { await importAnalysisPackage("rec_1", new File(["x"], "a.zip")); } catch (e) { thrown = e; }
+  const err = thrown as PlatformApiError;
+  expect(err).toBeInstanceOf(PlatformApiError);
+  expect(err.code).toBe("IMPORT_INVALID");
+  expect(err.message).toBe("bad zip");
+});
+
+test("compareAnalysisRuns preserves the structured backend error", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "COMPARE_INVALID", message: "not comparable", details: { reason: "x" } } }),
+    { status: 409 },
+  )));
+  let thrown: unknown;
+  try { await compareAnalysisRuns({ recordingId: "rec_1", runAId: "a", runBId: "b" }); } catch (e) { thrown = e; }
+  const err = thrown as PlatformApiError;
+  expect(err).toBeInstanceOf(PlatformApiError);
+  expect(err.status).toBe(409);
+  expect(err.code).toBe("COMPARE_INVALID");
+  expect(err.message).toBe("not comparable");
+  expect(err.details).toEqual({ reason: "x" });
 });

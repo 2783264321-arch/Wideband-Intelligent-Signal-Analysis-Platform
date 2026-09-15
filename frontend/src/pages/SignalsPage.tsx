@@ -3,6 +3,7 @@ import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { getDetections } from "../api/client";
+import { toErrorText } from "../api/errors";
 import type { DetectionResult } from "../api/types";
 import { bandwidthHz, centerFrequencyHz, durationS } from "../features/signals/derived";
 import { spectrumPathForRun } from "../features/signals/spectrumNavigation";
@@ -19,7 +20,7 @@ export function SignalsPage() {
     setLoading(true);
     getDetections(runId)
       .then((items) => { if (active) setDetections(items); })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Unable to load detections."); })
+      .catch((reason) => { if (active) setError(toErrorText(reason, "Unable to load detections.")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [runId]);

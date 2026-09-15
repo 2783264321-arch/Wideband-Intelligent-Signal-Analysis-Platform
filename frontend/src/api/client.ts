@@ -50,23 +50,32 @@ export class PlatformApiError extends Error {
   }
 }
 
+/**
+ * Single structured-error seam: preserves the backend contract
+ * (`{ error: { code, message, details } }`) or falls back to a generic HTTP
+ * description. Used by JSON, multipart and compare request paths alike.
+ */
+async function structuredErrorFromResponse(response: Response): Promise<PlatformApiError> {
+  let code = `HTTP_${response.status}`;
+  let message = `API request failed: ${response.status}`;
+  let details: Record<string, unknown> = {};
+  try {
+    const body = await response.json() as { error?: { code?: string; message?: string; details?: Record<string, unknown> } };
+    if (body.error && typeof body.error.code === "string" && typeof body.error.message === "string") {
+      code = body.error.code;
+      message = body.error.message;
+      details = body.error.details ?? {};
+    }
+  } catch {
+    // Non-JSON body: keep the generic HTTP fallback.
+  }
+  return new PlatformApiError({ status: response.status, code, message, details });
+}
+
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(path), init);
   if (!response.ok) {
-    let code = `HTTP_${response.status}`;
-    let message = `API request failed: ${response.status}`;
-    let details: Record<string, unknown> = {};
-    try {
-      const body = await response.json() as { error?: { code?: string; message?: string; details?: Record<string, unknown> } };
-      if (body.error && typeof body.error.code === "string" && typeof body.error.message === "string") {
-        code = body.error.code;
-        message = body.error.message;
-        details = body.error.details ?? {};
-      }
-    } catch {
-      // Non-JSON body: keep the generic HTTP fallback.
-    }
-    throw new PlatformApiError({ status: response.status, code, message, details });
+    throw await structuredErrorFromResponse(response);
   }
   return response.json() as Promise<T>;
 }
@@ -195,7 +204,7 @@ export async function registerSpaceNetDataset(datasetPath: string, split = "test
 
 export async function importRecording(form: FormData): Promise<RecordingDetail> {
   const response = await fetch(apiUrl("/api/recordings"), { method: "POST", body: form });
-  if (!response.ok) throw new Error(`API request failed: ${response.status}`);
+  if (!response.ok) throw await structuredErrorFromResponse(response);
   return mapRecording(await response.json() as RecordingWire);
 }
 
@@ -838,16 +847,7 @@ export async function compareAnalysisRuns(payload: {
       iou_threshold: 0.5,
     }),
   });
-  if (!response.ok) {
-    let message = `API request failed: ${response.status}`;
-    try {
-      const payloadError = await response.json() as { error?: { message?: string } };
-      if (payloadError.error?.message) message = payloadError.error.message;
-    } catch {
-      // Non-JSON error body; keep the generic message.
-    }
-    throw new Error(message);
-  }
+  if (!response.ok) throw await structuredErrorFromResponse(response);
   return mapCompare(await response.json() as CompareWire);
 }
 
@@ -856,16 +856,7 @@ export async function importAnalysisPackage(recordingId: string, file: File): Pr
   body.append("recording_id", recordingId);
   body.append("file", file);
   const response = await fetch(apiUrl("/api/imported-runs"), { method: "POST", body });
-  if (!response.ok) {
-    let message = `API request failed: ${response.status}`;
-    try {
-      const payload = await response.json() as { error?: { message?: string } };
-      if (payload.error?.message) message = payload.error.message;
-    } catch {
-      // Non-JSON error body; keep the generic message.
-    }
-    throw new Error(message);
-  }
+  if (!response.ok) throw await structuredErrorFromResponse(response);
   return mapAnalysisRun(await response.json() as AnalysisRunWire);
 }
 

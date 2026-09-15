@@ -104,7 +104,7 @@ test("keeps validation errors in the import dialog and allows retry", async () =
   await openModal();
   await chooseZipAndRecording();
   fireEvent.click(screen.getByRole("button", { name: "Import" }));
-  expect(await screen.findByText("Package label_space does not match the selected Recording.")).toBeInTheDocument();
+  expect(await screen.findByText(/Package label_space does not match the selected Recording\./)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Open Results" })).not.toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeEnabled());
 });

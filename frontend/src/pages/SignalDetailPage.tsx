@@ -2,6 +2,7 @@ import { Alert, Button, Card, Col, Row, Space, Spin, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { getDetection, getFFT, getGroundTruth, getSpectrogram, getWaveform } from "../api/client";
+import { toErrorText } from "../api/errors";
 import type { DetectionResult, FFTData, GroundTruthResult, SpectrogramMeta, WaveformData } from "../api/types";
 import { LineSeriesChart } from "../features/signal-detail/LineSeriesChart";
 import { SignalSummary } from "../features/signals/SignalSummary";
@@ -36,7 +37,7 @@ export function SignalDetailPage() {
         setFFT(nextFFT);
         setGroundTruth(nextGroundTruth);
       })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Unable to load signal detail."); });
+      .catch((reason) => { if (active) setError(toErrorText(reason, "Unable to load signal detail.")); });
     return () => { active = false; };
   }, [detectionId]);
 

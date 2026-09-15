@@ -280,7 +280,7 @@ test("renders a non-destructive error when compare fails", async () => {
   await chooseRun("Run A", "stft_energy_detector · run_a");
   await chooseRun("Run B", "zoomspec · run_b");
   // Auto-compare fails non-destructively; controls remain usable.
-  expect(await screen.findByText("Run must be completed.", {}, { timeout: 3000 })).toBeInTheDocument();
+  expect(await screen.findByText(/Run must be completed\./, {}, { timeout: 3000 })).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole("button", { name: /Compare/ })).toBeEnabled());
   expect(screen.getByLabelText("Recording")).toBeInTheDocument();
 });

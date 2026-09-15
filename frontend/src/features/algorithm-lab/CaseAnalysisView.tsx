@@ -9,6 +9,7 @@ import {
   listAnalysisRuns,
   listRecordings,
 } from "../../api/client";
+import { toErrorText } from "../../api/errors";
 import type {
   AlgorithmLabCompareResponse,
   AnalysisRun,
@@ -56,7 +57,7 @@ export function CaseAnalysisView({
   useEffect(() => {
     listRecordings(500, 0)
       .then((page) => setRecordings(page.items))
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to load recordings."));
+      .catch((reason: unknown) => setError(toErrorText(reason, "Unable to load recordings.")));
   }, []);
 
   // Resolve the selected Recording: from the paged list when present, otherwise
@@ -93,7 +94,7 @@ export function CaseAnalysisView({
       setRuns(nextRuns);
     };
     void load().catch((reason: unknown) => {
-      if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load analysis runs.");
+      if (!cancelled) setError(toErrorText(reason, "Unable to load analysis runs."));
     });
     return () => {
       cancelled = true;
@@ -137,7 +138,7 @@ export function CaseAnalysisView({
       applyCompare(result, nextMeta, nextGroundTruth, nextA, nextB);
     } catch (reason) {
       setCompare(null);
-      setError(reason instanceof Error ? reason.message : "Unable to compare runs.");
+      setError(toErrorText(reason, "Unable to compare runs."));
     } finally {
       setLoading(false);
     }
@@ -159,7 +160,7 @@ export function CaseAnalysisView({
         .catch((reason: unknown) => {
           if (!cancelled) {
             setCompare(null);
-            setError(reason instanceof Error ? reason.message : "Unable to compare runs.");
+            setError(toErrorText(reason, "Unable to compare runs."));
           }
         })
         .finally(() => {
@@ -181,7 +182,7 @@ export function CaseAnalysisView({
           setSelectedCaseId(undefined);
         })
         .catch((reason: unknown) => {
-          if (!cancelled) setError(reason instanceof Error ? reason.message : "Unable to load case inspection.");
+          if (!cancelled) setError(toErrorText(reason, "Unable to load case inspection."));
         });
     }
     return () => {

@@ -2,6 +2,7 @@ import { Alert, Button, Card, Empty, Form, Input, InputNumber, Modal, Space, Spi
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { importRecording, listRecordings, registerSpaceNetDataset } from "../api/client";
+import { toErrorText } from "../api/errors";
 import type { SpaceNetRegistrationSummary } from "../api/client";
 import type { RecordingDetail } from "../api/types";
 import { ImportRunModal } from "../features/imports/ImportRunModal";
@@ -40,7 +41,7 @@ export function RecordingsPage() {
       setRecordings(page.items);
       setTotal(page.total);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to load recordings.");
+      setError(toErrorText(reason, "Unable to load recordings."));
     } finally {
       setLoading(false);
     }
@@ -56,7 +57,7 @@ export function RecordingsPage() {
       setRecordings((items) => [...items, ...page.items]);
       setTotal(page.total);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to load more recordings.");
+      setError(toErrorText(reason, "Unable to load more recordings."));
     } finally {
       setLoadingMore(false);
     }
@@ -85,7 +86,7 @@ export function RecordingsPage() {
       await refresh();
       navigate(`/spectrum/${recording.id}`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to import recording.");
+      setError(toErrorText(reason, "Unable to import recording."));
     } finally {
       setSubmitting(false);
     }
@@ -100,7 +101,7 @@ export function RecordingsPage() {
       setRegistrationSummary(summary);
       await refresh();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to register dataset.");
+      setError(toErrorText(reason, "Unable to register dataset."));
     } finally {
       setRegistering(false);
     }

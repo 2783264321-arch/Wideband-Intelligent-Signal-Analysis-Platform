@@ -2,6 +2,7 @@ import { Alert, Button, Form, Modal, Select, Typography } from "antd";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { importAnalysisPackage } from "../../api/client";
+import { toErrorText } from "../../api/errors";
 import type { AnalysisRun, RecordingDetail } from "../../api/types";
 import { spectrumPathForRun } from "../signals/spectrumNavigation";
 
@@ -31,7 +32,7 @@ export function ImportRunModal({ open, recordings, onClose }: Props) {
       const run = await importAnalysisPackage(values.recordingId, file);
       setImported(run);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to import analysis package.");
+      setError(toErrorText(reason, "Unable to import analysis package."));
     } finally {
       setSubmitting(false);
     }

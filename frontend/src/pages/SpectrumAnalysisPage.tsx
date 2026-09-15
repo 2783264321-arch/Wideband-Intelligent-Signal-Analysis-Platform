@@ -2,6 +2,7 @@ import { Alert, Button, Card, Checkbox, Col, Row, Select, Space, Spin, Typograph
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
+import { toErrorText } from "../api/errors";
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
 import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
@@ -73,7 +74,7 @@ export function SpectrumAnalysisPage() {
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setError(reason instanceof Error ? reason.message : "Unable to load recording.");
+        setError(toErrorText(reason, "Unable to load recording."));
       });
     return () => { active = false; };
   }, [recordingId, runId]);
@@ -101,7 +102,7 @@ export function SpectrumAnalysisPage() {
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setSelectionError(reason instanceof Error ? reason.message : "Unable to load execution environments.");
+        setSelectionError(toErrorText(reason, "Unable to load execution environments."));
       })
       .finally(() => {
         if (!active) return;
@@ -115,7 +116,7 @@ export function SpectrumAnalysisPage() {
     runId: currentRun !== null && activeStatuses.has(currentRun.status) ? currentRun.id : undefined,
     onRun: setCurrentRun,
     onDetections: setDetections,
-    onError: (reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to poll analysis run."),
+    onError: (reason: unknown) => setError(toErrorText(reason, "Unable to poll analysis run.")),
   });
 
   const selected = useMemo(() => detections.find((d) => d.id === selectedId), [detections, selectedId]);
@@ -150,7 +151,7 @@ export function SpectrumAnalysisPage() {
       next.delete("selected");
       setSearchParams(next);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to start analysis.");
+      setError(toErrorText(reason, "Unable to start analysis."));
     }
   };
 
