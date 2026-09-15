@@ -193,10 +193,10 @@ export function SpectrumAnalysisPage() {
       />
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>{t("common.prediction")}</Checkbox>
-        <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t(common.groundTruth)}</Checkbox>
+        <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t("common.groundTruth")}</Checkbox>
         {currentRun ? (
           <RunStatusBadge status={currentRun.status} errorType={currentRun.errorType} errorMessage={currentRun.errorMessage} />
-        ) : <Typography.Text type="secondary">{t(`common.noRunSelected`)}</Typography.Text>}
+        ) : <Typography.Text type="secondary">{t("common.noRunSelected")}</Typography.Text>}
         {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
       </Space>
       <Row gutter={16} align="stretch">

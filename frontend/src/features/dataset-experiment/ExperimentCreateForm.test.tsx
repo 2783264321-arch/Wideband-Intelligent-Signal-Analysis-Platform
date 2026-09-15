@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ExperimentCreateForm } from "./ExperimentCreateForm";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
@@ -82,9 +83,11 @@ function setup() {
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
-    <MemoryRouter>
-      <ExperimentCreateForm />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentCreateForm />
+      </MemoryRouter>,
+    ),
   );
   return { urls, posted: () => posted };
 }
@@ -174,9 +177,11 @@ function authoritySetup(options: { selection: unknown; secondSelection?: unknown
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
-    <MemoryRouter>
-      <ExperimentCreateForm />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentCreateForm />
+      </MemoryRouter>,
+    ),
   );
   return { posted, resolveSecond: () => resolveSecond };
 }

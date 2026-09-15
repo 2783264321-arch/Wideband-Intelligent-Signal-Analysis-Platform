@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { AlgorithmLabPage } from "./AlgorithmLabPage";
+import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -72,12 +73,14 @@ function LocationProbe() {
 
 function renderPage(initialEntry: string) {
   return render(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <Routes>
-        <Route path="/algorithm-lab" element={<AlgorithmLabPage />} />
-      </Routes>
-      <LocationProbe />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes>
+          <Route path="/algorithm-lab" element={<AlgorithmLabPage />} />
+        </Routes>
+        <LocationProbe />
+      </MemoryRouter>,
+    ),
   );
 }
 

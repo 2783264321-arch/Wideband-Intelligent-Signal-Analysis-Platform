@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { SpectrumAnalysisPage } from "./SpectrumAnalysisPage";
+import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
 const recording = {
   id: "rec_1",
@@ -194,11 +195,13 @@ function setup(options: SetupOptions = {}) {
   }));
 
   render(
-    <MemoryRouter initialEntries={[initialPath]}>
-      <Routes>
-        <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
-      </Routes>
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter initialEntries={[initialPath]}>
+        <Routes>
+          <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
   );
   return { posted, selectionCalls, resolveDeferred: () => resolveDeferred };
 }
@@ -302,11 +305,13 @@ test("remote pending run polls to completed and renders detections", async () =>
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
-    <MemoryRouter initialEntries={["/spectrum/rec_1"]}>
-      <Routes>
-        <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
-      </Routes>
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/spectrum/rec_1"]}>
+        <Routes>
+          <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
   );
 
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
@@ -419,13 +424,15 @@ function deepLinkSetup(initialPath: string) {
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
-    <MemoryRouter initialEntries={[initialPath]}>
-      <Routes>
-        <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
-        <Route path="/signals/:runId" element={<div>Signals Page</div>} />
-        <Route path="/signals/:runId/:detectionId" element={<div>Signal Detail Page</div>} />
-      </Routes>
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter initialEntries={[initialPath]}>
+        <Routes>
+          <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+          <Route path="/signals/:runId" element={<div>Signals Page</div>} />
+          <Route path="/signals/:runId/:detectionId" element={<div>Signal Detail Page</div>} />
+        </Routes>
+      </MemoryRouter>,
+    ),
   );
 }
 

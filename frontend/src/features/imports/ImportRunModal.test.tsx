@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { RecordingsPage } from "../../pages/RecordingsPage";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 const recording = {
   id: "rec_local",
@@ -62,12 +63,14 @@ function setup(reject = false) {
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
-    <MemoryRouter initialEntries={["/"]}>
-      <Routes>
-        <Route path="/" element={<RecordingsPage />} />
-        <Route path="/spectrum/:recordingId" element={<Destination />} />
-      </Routes>
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route path="/" element={<RecordingsPage />} />
+          <Route path="/spectrum/:recordingId" element={<Destination />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
   );
 }
 

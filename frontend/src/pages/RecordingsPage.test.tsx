@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RecordingsPage } from "./RecordingsPage";
+import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
 function setup() {
   const requests: { url: string; method: string; body: unknown; contentType: string | null }[] = [];
@@ -18,9 +19,11 @@ function setup() {
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
-    <MemoryRouter initialEntries={["/"]}>
-      <Routes><Route path="/" element={<RecordingsPage />} /></Routes>
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes><Route path="/" element={<RecordingsPage />} /></Routes>
+      </MemoryRouter>,
+    ),
   );
   return requests;
 }
