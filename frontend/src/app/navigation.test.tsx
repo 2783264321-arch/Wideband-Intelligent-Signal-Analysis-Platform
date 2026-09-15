@@ -1,6 +1,16 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
+import { LocalizationProvider } from "../localization/LocalizationProvider";
+
+function AppWithLocale({ locale = "en-US" }: { locale?: "zh-CN" | "en-US" }) {
+  return (
+    <LocalizationProvider initialLocale={locale}>
+      <App />
+    </LocalizationProvider>
+  );
+}
+
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
@@ -13,7 +23,7 @@ afterEach(() => { vi.unstubAllGlobals(); });
 test("primary navigation is exactly Recordings | Experiments | Algorithm Lab", () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   const items = screen.getAllByRole("menuitem");
@@ -30,7 +40,7 @@ test("primary navigation is exactly Recordings | Experiments | Algorithm Lab", (
 test("the Experiments route renders the Experiments tab shell", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   expect(await screen.findByRole("tab", { name: "Experiments" })).toBeInTheDocument();
@@ -40,7 +50,7 @@ test("the Experiments route renders the Experiments tab shell", async () => {
 test("?tab=compare shows the Compare tab", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments?tab=compare"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   expect(await screen.findByTestId("experiment-compare-page")).toBeInTheDocument();
@@ -49,7 +59,7 @@ test("?tab=compare shows the Compare tab", async () => {
 test("the experiment detail route renders", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments/exp_1"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   expect(await screen.findByTestId("experiment-detail-page")).toBeInTheDocument();
@@ -58,7 +68,7 @@ test("the experiment detail route renders", async () => {
 test("dataset benchmarks are reachable under Experiments", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments?tab=benchmarks"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   expect((await screen.findAllByText("Benchmarks")).length).toBeGreaterThan(0);
@@ -67,7 +77,7 @@ test("dataset benchmarks are reachable under Experiments", async () => {
 test("legacy algorithm-lab benchmark links redirect to Experiments", async () => {
   render(
     <MemoryRouter initialEntries={["/algorithm-lab?tab=benchmarks&benchmark=abc"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   expect((await screen.findAllByText("Benchmarks")).length).toBeGreaterThan(0);
@@ -76,8 +86,35 @@ test("legacy algorithm-lab benchmark links redirect to Experiments", async () =>
 test("algorithm-lab query drilldown still loads the case comparison workspace", async () => {
   render(
     <MemoryRouter initialEntries={["/algorithm-lab?recording=rec1&runA=run_a&runB=run_b"]}>
-      <App />
+      <AppWithLocale />
     </MemoryRouter>,
   );
   expect((await screen.findAllByText("Algorithm Lab")).length).toBeGreaterThan(0);
+});
+
+// ---------------------------------------------------------------------------
+// L2 — default language and switch
+// ---------------------------------------------------------------------------
+
+test("fresh UI defaults to Simplified Chinese primary navigation", async () => {
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <AppWithLocale locale="zh-CN" />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByRole("menuitem", { name: /信号记录/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /数据集实验/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /算法评测实验室/ })).toBeInTheDocument();
+  expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+});
+
+test("the header language switch is present and accessible", async () => {
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <AppWithLocale locale="zh-CN" />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByLabelText("语言")).toBeInTheDocument();
+  expect(screen.getByText("中文")).toBeInTheDocument();
+  expect(screen.getByText("EN")).toBeInTheDocument();
 });
