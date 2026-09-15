@@ -71,16 +71,12 @@ def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
                                 concurrency_monitor: monitor.ConcurrencyMonitor,
                                 resource_monitor: monitor.ResourceMonitor) -> dict:
     """Accept ONLY genuine persisted evidence (Issue 7 semantics)."""
-    import json
-
     if not samples_path.exists() or samples_path.stat().st_size == 0:
         raise SystemExit("REMEDIATION FAILED: concurrency JSONL missing or empty")
     if not resource_path.exists() or resource_path.stat().st_size == 0:
         raise SystemExit("REMEDIATION FAILED: resource JSONL missing or empty")
 
-    from plan_b_h5_core import ConcurrencySample, WorkerOwnership
-
-    samples: list[ConcurrencySample] = list(concurrency_monitor.samples)
+    samples = list(concurrency_monitor.samples)
     owned = sum(
         1 for s in samples if any(getattr(o, "pid", None) is not None for o in getattr(s, "ownership", ()))
     )
@@ -104,7 +100,7 @@ def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
         raise SystemExit("REMEDIATION FAILED: concurrency bound exceeded")
     if max_gap is None or max_gap > h5.H5_MAX_SAMPLE_GAP_S:
         raise SystemExit(f"REMEDIATION FAILED: max sample gap {max_gap} > {h5.H5_MAX_SAMPLE_GAP_S}")
-    summary = {
+    return {
         "concurrency_sample_count": len(samples),
         "resource_sample_count": len(resource_monitor.samples),
         "owned_worker_samples": owned,
@@ -115,7 +111,112 @@ def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
         "concurrency_monitor_failure": concurrency_monitor.thread_failure,
         "resource_monitor_failure": resource_monitor.thread_failure,
     }
-    return summary
+
+
+def build_acceptance(*, experiment_id: str, terminal_summary: dict, items: list[dict],
+                     attempts: dict, actual_runs: set, evaluation: dict,
+                     cycle_stems, raw_evidence: dict, quiescence: dict,
+                     concurrency_artifact: Path, resource_artifact: Path) -> dict:
+    """Pure, read-only acceptance builder.
+
+    Performs NO experiment/run/attempt mutation and NO model inference. It only
+    derives the acceptance document from already-read DB/API state. Raises
+    ``SystemExit`` if any deterministic acceptance check fails.
+    """
+    completed = [i for i in items if i["status"] == "completed"]
+    actual_names = sorted(i["recording_name"] for i in items)
+    expected_names = sorted(cycle_stems)
+    checks = {
+        "status_completed": terminal_summary["status"] == "completed",
+        "expected_items_16": terminal_summary["expected_items"] == 16,
+        "completed_items_16": terminal_summary["completed_items"] == 16,
+        "failed_items_0": terminal_summary["failed_items"] == 0,
+        "queued_items_0": terminal_summary["queued_items"] == 0,
+        "running_items_0": terminal_summary["running_items"] == 0,
+        # Order-insensitive exact membership (frozen stems are not lexicographically sorted).
+        "recording_membership_exact": (
+            len(actual_names) == len(expected_names) and actual_names == expected_names
+        ),
+        "attempt_count_16": terminal_summary["attempt_count"] == 16,
+        "one_attempt_per_item": all(
+            attempts.get(item["id"]) is not None and len(attempts[item["id"]]) == 1
+            for item in items
+        ),
+        "unique_runs_16": len(actual_runs) == 16,
+        "evaluation_completed": evaluation["status"] == "completed",
+        "evaluated_16": evaluation["evaluated_recordings"] == 16,
+        "missing_0": evaluation["missing_recordings"] == 0,
+        "coverage_1": evaluation["coverage"] == 1.0,
+    }
+    if not all(checks.values()):
+        failed = {k: v for k, v in checks.items() if not v}
+        raise SystemExit(f"REMEDIATION STOP: acceptance checks failed: {failed}")
+
+    hashes = {
+        "concurrency_jsonl_sha256": _sha256(concurrency_artifact),
+        "resource_jsonl_sha256": _sha256(resource_artifact),
+    }
+    return {
+        "milestone": "H5_REOBSERVE",
+        "experiment_id": experiment_id,
+        "expected_items": 16,
+        "completed_items": len(completed),
+        "actual_runs": len(actual_runs),
+        "actual_attempts": sum(len(v) for v in attempts.values()),
+        "evaluation": {
+            "status": evaluation["status"],
+            "evaluated_recordings": evaluation["evaluated_recordings"],
+            "missing_recordings": evaluation["missing_recordings"],
+            "coverage": evaluation["coverage"],
+        },
+        "membership": actual_names,
+        "db_checks": checks,
+        "raw_evidence": raw_evidence,
+        "gpu_quiescence": quiescence,
+        "executions_consumed": 16,
+        "historical_actual_before": 136,
+        "final_actual_total": 152,
+        "artifacts": {
+            "concurrency": str(concurrency_artifact),
+            "resource": str(resource_artifact),
+            "sha256": hashes,
+        },
+    }
+
+
+def read_terminal_acceptance(app, *, experiment_id: str, final_summary: dict,
+                             cycle_stems, concurrency_monitor, resource_monitor,
+                             concurrency_artifact: Path, resource_artifact: Path,
+                             quiescence: dict) -> dict:
+    """Read-only post-run acceptance. Uses GET/DB reads ONLY (never POST /run)."""
+    items = core.fetch_items(app, experiment_id)
+    attempts: dict = {}
+    actual_runs: set = set()
+    for item in items:
+        item_attempts = core.fetch_attempts(app, experiment_id, item["id"])
+        attempts[item["id"]] = item_attempts
+        for attempt in item_attempts:
+            actual_runs.add(attempt["analysis_run_id"])
+    evaluation = core.fetch_evaluation(app, final_summary["dataset_evaluation_id"])
+    raw = assert_raw_evidence_quality(
+        samples_path=concurrency_artifact,
+        resource_path=resource_artifact,
+        concurrency_monitor=concurrency_monitor,
+        resource_monitor=resource_monitor,
+    )
+    return build_acceptance(
+        experiment_id=experiment_id,
+        terminal_summary=final_summary,
+        items=items,
+        attempts=attempts,
+        actual_runs=actual_runs,
+        evaluation=evaluation,
+        cycle_stems=cycle_stems,
+        raw_evidence=raw,
+        quiescence=quiescence,
+        concurrency_artifact=concurrency_artifact,
+        resource_artifact=resource_artifact,
+    )
 
 
 def main(argv=None) -> int:
@@ -214,73 +315,18 @@ def main(argv=None) -> int:
     core.assert_no_orphans("H5 reobserve post-run")
     quiescent = core.assert_gpu_quiescent(baseline, label="H5 reobserve")
 
-    # DB/API acceptance evidence for the single experiment.
-    items = core.fetch_items(app, experiment_id)
-    attempts = {}
-    actual_runs = set()
-    for item in items:
-        attempts[item["id"]] = core.fetch_attempts(app, experiment_id, item["id"])
-        for attempt in attempts[item["id"]]:
-            actual_runs.add(attempt["analysis_run_id"])
-    summary = core.run_experiment(app, experiment_id) if experiment_id else {}
-    evaluation = core.fetch_evaluation(app, summary["dataset_evaluation_id"])
-    names = sorted(i["recording_name"] for i in items)
-    completed = [i for i in items if i["status"] == "completed"]
-    checks = {
-        "status_completed": summary["status"] == "completed",
-        "expected_items_16": summary["expected_items"] == 16,
-        "completed_items_16": summary["completed_items"] == 16,
-        "failed_items_0": summary["failed_items"] == 0,
-        "queued_items_0": summary["queued_items"] == 0,
-        "running_items_0": summary["running_items"] == 0,
-        "recording_names_exact": names == list(cycle.stems),
-        "attempt_count_16": summary["attempt_count"] == 16,
-        "one_attempt_per_item": all(
-            attempts.get(item["id"]) is not None and len(attempts[item["id"]]) == 1
-            for item in items
-        ),
-        "unique_runs_16": len(actual_runs) == 16,
-        "evaluation_completed": evaluation["status"] == "completed",
-        "evaluated_16": evaluation["evaluated_recordings"] == 16,
-        "missing_0": evaluation["missing_recordings"] == 0,
-        "coverage_1": evaluation["coverage"] == 1.0,
-    }
-    raw = assert_raw_evidence_quality(
-        concurrency=concurrency_monitor, resource=resource_monitor,
-        samples_path=CONCURRENCY_ARTIFACT, resource_path=RESOURCE_ARTIFACT,
+    # Read-only acceptance: GET/DB reads ONLY. Never POST /run again.
+    acceptance = read_terminal_acceptance(
+        app,
+        experiment_id=experiment_id,
+        final_summary=summary,
+        cycle_stems=cycle.stems,
+        concurrency_monitor=concurrency_monitor,
+        resource_monitor=resource_monitor,
+        concurrency_artifact=CONCURRENCY_ARTIFACT,
+        resource_artifact=RESOURCE_ARTIFACT,
+        quiescence=quiescent,
     )
-    if not all(checks.values()):
-        raise SystemExit(f"REMEDIATION STOP: acceptance checks failed: "
-                          f"{ {k: v for k, v in checks.items() if not v} }")
-
-    hashes = {
-        "concurrency_jsonl_sha256": _sha256(CONCURRENCY_ARTIFACT),
-        "resource_jsonl_sha256": _sha256(RESOURCE_ARTIFACT),
-    }
-    acceptance = {
-        "milestone": "H5_REOBSERVE",
-        "experiment_id": experiment_id,
-        "expected_items": 16,
-        "completed_items": len(completed),
-        "actual_runs": len(actual_runs),
-        "actual_attempts": sum(len(v) for v in attempts.values()),
-        "evaluation": {"status": evaluation["status"],
-                        "evaluated_recordings": evaluation["evaluated_recordings"],
-                        "missing_recordings": evaluation["missing_recordings"],
-                        "coverage": evaluation["coverage"]},
-        "membership": names,
-        "db_checks": checks,
-        "raw_evidence": raw,
-        "gpu_quiescence": quiescent,
-        "executions_consumed": 16,
-        "historical_actual_before": 136,
-        "final_actual_total": 152,
-        "artifacts": {
-            "concurrency": str(CONCURRENCY_ARTIFACT),
-            "resource": str(RESOURCE_ARTIFACT),
-            "sha256": hashes,
-        },
-    }
     ACCEPTANCE_ARTIFACT.write_text(
         json.dumps(acceptance, indent=2, sort_keys=True, default=str), encoding="utf-8"
     )
