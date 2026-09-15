@@ -123,6 +123,7 @@ export const enUS = {
   "executionEnv.checking": "Checking execution environments...",
   "executionEnv.recommended": "Recommended: {executor}",
   "executionEnv.unresolved": "Auto has no runnable executor.",
+  "common.technicalDetails": "Technical details",
   "executionEnv.temporarilyUnavailable": "Temporarily unavailable",
   "executionEnv.notCertified": "Not certified",
   "executionEnv.notConfigured": "Not configured",
@@ -131,12 +132,12 @@ export const enUS = {
   "executionEnv.available": "Available",
 
   "provenance.executor": "Executor",
-  "provenance.mode": "Mode",
+  "provenance.mode": "Execution mode",
   "provenance.autoReason": "Auto reason",
   "provenance.workload": "Workload",
-  "provenance.profile": "Profile",
+  "provenance.profile": "Remote execution configuration",
   "provenance.device": "Device",
-  "provenance.runtimeCommit": "Runtime commit",
+  "provenance.runtimeCommit": "Runtime commit version",
   "provenance.payloadSha": "Payload SHA",
   "provenance.remote": "Remote",
 

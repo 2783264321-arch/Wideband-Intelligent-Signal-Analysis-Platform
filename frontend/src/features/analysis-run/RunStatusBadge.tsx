@@ -44,7 +44,7 @@ export function RunStatusBadge({ status, errorType, errorMessage }: RunStatusBad
         <Typography.Text code data-testid="run-error-code">{code}</Typography.Text>
       ) : null}
       {reasonMsgKey !== null ? <Typography.Text type="secondary">{t(reasonMsgKey)}</Typography.Text> : null}
-      {message !== null ? <Typography.Text type="danger">{message}</Typography.Text> : null}
+      {code !== null && message !== null && reasonMsgKey !== null ? (<Typography.Text type="secondary" data-testid="run-error-technical-details">{t("common.technicalDetails")}: {message}</Typography.Text>) : null}
     </Space>
   );
 }

@@ -53,7 +53,12 @@ export function ExecutionEnvironmentSelector({
     if (loading) return t("executionEnv.checking");
     if (selectedKey === "auto") {
       if (selection !== null && selection.resolvedExecutor !== null) {
-        return t("executionEnv.recommended", { executor: executorLabel(selection.resolvedExecutor) });
+        const resolvedKey = (selection.resolvedExecutor as ExecutorOptionKey) in optionLabelKey
+          ? optionLabelKey[selection.resolvedExecutor as ExecutorOptionKey]
+          : null;
+        return t("executionEnv.recommended", {
+          executor: resolvedKey !== null ? t(resolvedKey) : (selection.resolvedExecutor as string),
+        });
       }
       return selected?.reasonMessage ?? null;
     }
