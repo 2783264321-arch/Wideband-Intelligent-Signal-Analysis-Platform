@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { LinkedEvaluationSummary } from "./LinkedEvaluationSummary";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { DatasetExperiment } from "../../api/types";
 
 function experiment(overrides: Partial<DatasetExperiment> = {}): DatasetExperiment {
@@ -83,9 +84,11 @@ test("renders the linked evaluation summary and enables Retry Evaluation when el
     return new Response(JSON.stringify(evaluationWire()));
   }));
   render(
+    renderWithLocalization(
     <MemoryRouter>
       <LinkedEvaluationSummary experiment={experiment()} />
     </MemoryRouter>,
+    ),
   );
   const summary = await screen.findByTestId("linked-evaluation-summary");
   await waitFor(() => expect(summary).toHaveTextContent("eval_1"));
@@ -100,9 +103,11 @@ test("renders the linked evaluation summary and enables Retry Evaluation when el
 test("Retry Evaluation is disabled while the linked evaluation is not failed/interrupted", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(evaluationWire({ status: "completed", error_type: null, error_message: null })))));
   render(
+    renderWithLocalization(
     <MemoryRouter>
       <LinkedEvaluationSummary experiment={experiment()} />
     </MemoryRouter>,
+    ),
   );
   const summary = await screen.findByTestId("linked-evaluation-summary");
   await waitFor(() => expect(summary).toHaveTextContent("completed"));
@@ -112,9 +117,11 @@ test("Retry Evaluation is disabled while the linked evaluation is not failed/int
 test("renders nothing when there is no linked evaluation", () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(evaluationWire()))));
   render(
+    renderWithLocalization(
     <MemoryRouter>
       <LinkedEvaluationSummary experiment={experiment({ datasetEvaluationId: null })} />
     </MemoryRouter>,
+    ),
   );
   expect(screen.queryByTestId("linked-evaluation-summary")).toBeNull();
 });
@@ -143,9 +150,11 @@ test("a successful retry notifies the parent with the backend-returned experimen
   }));
   const onRetryAccepted = vi.fn();
   render(
+    renderWithLocalization(
     <MemoryRouter>
       <LinkedEvaluationSummary experiment={experiment()} onRetryAccepted={onRetryAccepted} />
     </MemoryRouter>,
+    ),
   );
   await screen.findByTestId("linked-evaluation-summary");
   fireEvent.click(screen.getByRole("button", { name: "Retry Evaluation" }));
@@ -174,14 +183,18 @@ test("refetches the linked evaluation when the experiment lifecycle changes (sam
   }));
 
   const { rerender } = render(
-    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "failed" })} /></MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "failed" })} /></MemoryRouter>,
+    ),
   );
   await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("BENCHMARK_FAILED"));
   const before = benchmarkFetches;
 
   evalStatus = "completed";
   rerender(
-    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
+    ),
   );
   await waitFor(() => expect(benchmarkFetches).toBeGreaterThan(before));
   await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("completed"));
@@ -201,12 +214,16 @@ test("a lifecycle change clears a transient linked-evaluation error on success",
   }));
 
   const { rerender } = render(
-    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "failed" })} /></MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "failed" })} /></MemoryRouter>,
+    ),
   );
   await waitFor(() => expect(screen.getByText(/BOOM: transient/)).toBeInTheDocument());
 
   rerender(
-    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
+    ),
   );
   await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("completed"));
 });

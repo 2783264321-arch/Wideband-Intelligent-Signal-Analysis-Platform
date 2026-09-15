@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { getDatasetBenchmark, PlatformApiError, retryDatasetExperimentEvaluation } from "../../api/client";
 import type { DatasetEvaluation, DatasetExperiment } from "../../api/types";
 import { EvaluationMetricsView } from "../evaluation/EvaluationMetricsView";
+import { useLocalization } from "../../localization/useLocalization";
 
 function toErrorText(reason: unknown): string {
   if (reason instanceof PlatformApiError) return reason.display;
@@ -24,6 +25,7 @@ export function LinkedEvaluationSummary({
   experiment: DatasetExperiment;
   onRetryAccepted?: (experiment: DatasetExperiment) => void;
 }) {
+  const { t } = useLocalization();
   const [evaluation, setEvaluation] = useState<DatasetEvaluation | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,15 +79,15 @@ export function LinkedEvaluationSummary({
   return (
     <Space direction="vertical" size={4} data-testid="linked-evaluation-summary">
       <Space size={8} wrap>
-        <Typography.Text>Evaluation {evaluation.id}</Typography.Text>
+        <Typography.Text>{t("evaluation.summaryPrefix")} {evaluation.id}</Typography.Text>
         <Tag>{evaluation.status}</Tag>
         <Typography.Text>{evaluation.evaluatedRecordings} / {evaluation.expectedRecordings}</Typography.Text>
-        <Typography.Text type="secondary">missing {evaluation.missingRecordings}</Typography.Text>
-        <Typography.Text type="secondary">coverage {evaluation.coverage}</Typography.Text>
+        <Typography.Text type="secondary">{t("evaluation.missing")} {evaluation.missingRecordings}</Typography.Text>
+        <Typography.Text type="secondary">{t("evaluation.coverage")} {evaluation.coverage}</Typography.Text>
       </Space>
       {evaluation.errorType !== null ? <Typography.Text code>{evaluation.errorType}</Typography.Text> : null}
       {evaluation.errorMessage !== null ? <Typography.Text type="danger">{evaluation.errorMessage}</Typography.Text> : null}
-      {eligible ? <Button onClick={() => void retry()}>Retry Evaluation</Button> : null}
+      {eligible ? <Button onClick={() => void retry()}>{t("common.retryEvaluation")}</Button> : null}
       {error !== null ? <Typography.Text type="danger">{error}</Typography.Text> : null}
       <EvaluationMetricsView evaluation={evaluation} />
     </Space>

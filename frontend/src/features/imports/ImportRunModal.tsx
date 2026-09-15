@@ -5,6 +5,7 @@ import { importAnalysisPackage } from "../../api/client";
 import { toErrorText } from "../../api/errors";
 import type { AnalysisRun, RecordingDetail } from "../../api/types";
 import { spectrumPathForRun } from "../signals/spectrumNavigation";
+import { useLocalization } from "../../localization/useLocalization";
 
 interface Props {
   open: boolean;
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function ImportRunModal({ open, recordings, onClose }: Props) {
+  const { t } = useLocalization();
   const navigate = useNavigate();
   const [form] = Form.useForm<{ recordingId: string }>();
   const recordingId = Form.useWatch("recordingId", form);
@@ -56,41 +58,41 @@ export function ImportRunModal({ open, recordings, onClose }: Props) {
 
   return (
     <Modal
-      title="Import Existing Run"
+      title={t("common.importRun")}
       open={open}
       onCancel={() => resetAndClose()}
       footer={imported ? [
-        <Button key="close" onClick={() => resetAndClose()}>Close</Button>,
-        <Button key="results" type="primary" onClick={openResults}>Open Results</Button>,
+        <Button key="close" onClick={() => resetAndClose()}>{t("common.close")}</Button>,
+        <Button key="results" type="primary" onClick={openResults}>{t("import.openResults")}</Button>,
       ] : [
-        <Button key="cancel" onClick={() => resetAndClose()}>Cancel</Button>,
+        <Button key="cancel" onClick={() => resetAndClose()}>{t("common.cancel")}</Button>,
         <Button key="import" type="primary" loading={submitting} disabled={!canImport} onClick={() => void submitImport()}>
-          Import
+          {t("import.action")}
         </Button>,
       ]}
     >
       {error ? <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} /> : null}
       {imported ? (
         <div>
-          <Alert type="success" showIcon message="Analysis package imported successfully" style={{ marginBottom: 16 }} />
+          <Alert type="success" showIcon message={t("import.success")} style={{ marginBottom: 16 }} />
           <Typography.Paragraph style={{ marginBottom: 8 }}>
             {imported.pipelineId} · {imported.pipelineVersion}
           </Typography.Paragraph>
-          <Typography.Text type="secondary">Run {imported.id}</Typography.Text>
+          <Typography.Text type="secondary">{t("analysisRun.label", { id: imported.id })}</Typography.Text>
         </div>
       ) : (
         <Form form={form} layout="vertical" onValuesChange={() => setError(null)}>
-          <Form.Item name="recordingId" label="Local Recording" rules={[{ required: true, message: "Choose a Recording" }]}>
+          <Form.Item name="recordingId" label={t("recordings.title")} rules={[{ required: true, message: t("import.chooseRecording") }]}>
             <Select
-              placeholder="Select a Recording"
+              placeholder={t("import.selectRecording")}
               options={recordings.map((item) => ({ value: item.id, label: item.name }))}
             />
           </Form.Item>
-          <Form.Item label={<label htmlFor="analysis-package-zip">Analysis Package ZIP</label>}>
+          <Form.Item label={<label htmlFor="analysis-package-zip">{t("import.zipLabel")}</label>}>
             <input id="analysis-package-zip" type="file" accept=".zip,application/zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
           </Form.Item>
           <Typography.Text type="secondary">
-            Import a ZIP containing manifest.json and detections.json generated on an AutoDL/GPU server.
+            {t("import.zipHint")}
           </Typography.Text>
         </Form>
       )}

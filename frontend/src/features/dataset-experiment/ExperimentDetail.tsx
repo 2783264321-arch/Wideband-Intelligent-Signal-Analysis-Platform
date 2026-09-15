@@ -6,6 +6,7 @@ import { ExperimentProgressHeader } from "./ExperimentProgressHeader";
 import { ExperimentItemTable } from "./ExperimentItemTable";
 import { ExperimentAttemptsTab } from "./AttemptTimeline";
 import { LinkedEvaluationSummary } from "./LinkedEvaluationSummary";
+import { useLocalization } from "../../localization/useLocalization";
 
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_failures", "failed"]);
 const POLL_INTERVAL_MS = 1000;
@@ -17,6 +18,7 @@ function toErrorText(reason: unknown): string {
 }
 
 export function ExperimentDetail({ experimentId }: { experimentId: string }) {
+  const { t } = useLocalization();
   const [experiment, setExperiment] = useState<DatasetExperiment | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Bumped when a retry is accepted so the polling lifecycle restarts from the
@@ -61,9 +63,9 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
       <ExperimentProgressHeader experiment={experiment} />
       <Tabs
         items={[
-          { key: "items", label: "Items", children: <ExperimentItemTable experimentId={experiment.id} /> },
-          { key: "attempts", label: "Attempts", children: <ExperimentAttemptsTab experimentId={experiment.id} /> },
-          { key: "evaluation", label: "Evaluation", children: (
+          { key: "items", label: t("experiment.itemsTab"), children: <ExperimentItemTable experimentId={experiment.id} /> },
+          { key: "attempts", label: t("experiment.attemptsTab"), children: <ExperimentAttemptsTab experimentId={experiment.id} /> },
+          { key: "evaluation", label: t("experiment.evaluationTab"), children: (
             <LinkedEvaluationSummary
               experiment={experiment}
               onRetryAccepted={(updated) => {

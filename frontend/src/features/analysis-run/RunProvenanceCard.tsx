@@ -1,5 +1,6 @@
 import { Space, Tag, Typography } from "antd";
 import type { AnalysisRun } from "../../api/types";
+import { useLocalization } from "../../localization/useLocalization";
 
 const SHORT_SHA_LENGTH = 8;
 
@@ -24,6 +25,7 @@ function shortSha(value: unknown): string | null {
  * none is shown (see the approved Frontend V1 plan).
  */
 export function RunProvenanceCard({ run }: { run: AnalysisRun }) {
+  const { t } = useLocalization();
   const metadata = run.executionMetadata ?? {};
   const hardware = run.hardwareInfo ?? {};
 
@@ -41,36 +43,36 @@ export function RunProvenanceCard({ run }: { run: AnalysisRun }) {
 
   return (
     <Space direction="vertical" size={4} data-testid="run-provenance-card">
-      <Tag color="geekblue">Executor: {run.executor}</Tag>
+      <Tag color="geekblue">{t("provenance.executor")}: {run.executor}</Tag>
       {requestedMode !== null ? (
-        <Typography.Text type="secondary">Mode: {requestedMode}</Typography.Text>
+        <Typography.Text type="secondary">{t("provenance.mode")}: {requestedMode}</Typography.Text>
       ) : null}
       {autoReasonCode !== null ? (
-        <Typography.Text type="secondary">Auto reason: {autoReasonCode}</Typography.Text>
+        <Typography.Text type="secondary">{t("provenance.autoReason")}: {autoReasonCode}</Typography.Text>
       ) : null}
       {autoReason !== null ? (
         <Typography.Text type="secondary">{autoReason}</Typography.Text>
       ) : null}
       {workloadClass !== null ? (
-        <Typography.Text type="secondary">Workload: {workloadClass}</Typography.Text>
+        <Typography.Text type="secondary">{t("provenance.workload")}: {workloadClass}</Typography.Text>
       ) : null}
       {remoteProfile !== null ? (
-        <Typography.Text type="secondary">Profile: {remoteProfile}</Typography.Text>
+        <Typography.Text type="secondary">{t("provenance.profile")}: {remoteProfile}</Typography.Text>
       ) : null}
       {deviceName !== null || deviceType !== null ? (
         <Typography.Text type="secondary">
-          Device: {deviceName ?? deviceType}{deviceName !== null && deviceType !== null ? ` (${deviceType})` : ""}
+          {t("provenance.device")}: {deviceName ?? deviceType}{deviceName !== null && deviceType !== null ? ` (${deviceType})` : ""}
         </Typography.Text>
       ) : null}
       {runtimeCommit !== null ? (
-        <Typography.Text type="secondary">Runtime commit: {runtimeCommit}</Typography.Text>
+        <Typography.Text type="secondary">{t("provenance.runtimeCommit")}: {runtimeCommit}</Typography.Text>
       ) : null}
       {payloadSha !== null ? (
-        <Typography.Text type="secondary">Payload SHA: {payloadSha}</Typography.Text>
+        <Typography.Text type="secondary">{t("provenance.payloadSha")}: {payloadSha}</Typography.Text>
       ) : null}
       {remoteStartedAt !== null || remoteFinishedAt !== null ? (
         <Typography.Text type="secondary">
-          Remote: {remoteStartedAt ?? "—"} → {remoteFinishedAt ?? "—"}
+          {t("provenance.remote")}: {remoteStartedAt ?? "—"} → {remoteFinishedAt ?? "—"}
         </Typography.Text>
       ) : null}
     </Space>

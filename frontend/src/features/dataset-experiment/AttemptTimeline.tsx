@@ -2,6 +2,7 @@ import { Empty, Select, Space, Table, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetExperimentItemAttempts, listDatasetExperimentItems, PlatformApiError } from "../../api/client";
+import { useLocalization } from "../../localization/useLocalization";
 import type { DatasetExperimentAttempt, DatasetExperimentItem } from "../../api/types";
 
 function toErrorText(reason: unknown): string {
@@ -16,6 +17,7 @@ function toErrorText(reason: unknown): string {
  * here from a missing run id.
  */
 export function AttemptTimeline({ experimentId, itemId }: { experimentId: string; itemId: string }) {
+  const { t } = useLocalization();
   const [attempts, setAttempts] = useState<DatasetExperimentAttempt[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -35,18 +37,18 @@ export function AttemptTimeline({ experimentId, itemId }: { experimentId: string
       rowKey="id"
       loading={loading}
       dataSource={attempts}
-      locale={{ emptyText: <Empty description={error ?? "No attempts."} /> }}
+      locale={{ emptyText: <Empty description={error ?? t("attempts.empty")} /> }}
       columns={[
-        { title: "Attempt", dataIndex: "attemptNumber", width: 90 },
+        { title: t("attempts.columnAttempt"), dataIndex: "attemptNumber", width: 90 },
         {
-          title: "Run",
+          title: t("attempts.columnRun"),
           key: "run",
           render: (_: unknown, record: DatasetExperimentAttempt) => (
             <Link to={`/signals/${record.analysisRunId}`}>{record.analysisRunId}</Link>
           ),
         },
         {
-          title: "Launch requested",
+          title: t("attempts.columnLaunchRequested"),
           dataIndex: "launchRequestedAt",
           render: (value: string | null) => <Typography.Text>{value ?? "—"}</Typography.Text>,
         },
@@ -57,6 +59,7 @@ export function AttemptTimeline({ experimentId, itemId }: { experimentId: string
 
 /** Items selector + attempt timeline for the selected item. */
 export function ExperimentAttemptsTab({ experimentId }: { experimentId: string }) {
+  const { t } = useLocalization();
   const [items, setItems] = useState<DatasetExperimentItem[]>([]);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
@@ -73,13 +76,13 @@ export function ExperimentAttemptsTab({ experimentId }: { experimentId: string }
   }, [experimentId]);
 
   if (items.length === 0) {
-    return <Empty description="No items." />;
+    return <Empty description={t("items.empty")} />;
   }
 
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
       <Select
-        aria-label="Item"
+        aria-label={t("items.columnRecording")}
         style={{ width: 320 }}
         value={selectedItemId ?? undefined}
         onChange={setSelectedItemId}

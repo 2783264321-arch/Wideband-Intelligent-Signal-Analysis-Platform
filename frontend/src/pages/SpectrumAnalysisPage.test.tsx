@@ -351,9 +351,9 @@ test("completed remote run renders allowlisted metadata only", async () => {
   await screen.findByText("Completed");
 
   expect(screen.getByText(/Executor: remote_gpu/)).toBeInTheDocument();
-  expect(screen.getByText(/Profile: autodl_primary/)).toBeInTheDocument();
+  expect(screen.getByText(/Remote execution configuration: autodl_primary/)).toBeInTheDocument();
   expect(screen.getByText(/Device: NVIDIA GeForce RTX 5090/)).toBeInTheDocument();
-  expect(screen.getByText(/Runtime commit: 6f24f379/)).toBeInTheDocument();
+  expect(screen.getByText(/Runtime commit version: 6f24f379/)).toBeInTheDocument();
   expect(screen.getByText(/Payload SHA: 20b8130a/)).toBeInTheDocument();
 
   expect(screen.queryByText(/coordinator_token/)).toBeNull();

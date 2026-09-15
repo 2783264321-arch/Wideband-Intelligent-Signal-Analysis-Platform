@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ExperimentItemTable } from "./ExperimentItemTable";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 function itemWire(overrides: Record<string, unknown> = {}) {
   return {
@@ -23,10 +24,11 @@ afterEach(() => { vi.unstubAllGlobals(); });
 
 test("renders items with status and a link to the analysis run", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([itemWire()]))));
-  render(
+  render(renderWithLocalization(
     <MemoryRouter>
       <ExperimentItemTable experimentId="exp_1" />
     </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText("rec_1")).toBeInTheDocument();
   expect(screen.getByText("completed")).toBeInTheDocument();
@@ -38,10 +40,11 @@ test("a failed item shows its bounded last error type", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([
     itemWire({ status: "failed", last_error_type: "INPUT_INCOMPATIBLE", last_error_message: "nope", latest_analysis_run_id: null }),
   ]))));
-  render(
+  render(renderWithLocalization(
     <MemoryRouter>
       <ExperimentItemTable experimentId="exp_1" />
     </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText("failed")).toBeInTheDocument();
   expect(screen.getByText("INPUT_INCOMPATIBLE")).toBeInTheDocument();
@@ -49,10 +52,11 @@ test("a failed item shows its bounded last error type", async () => {
 
 test("shows an empty state when there are no items", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([]))));
-  render(
+  render(renderWithLocalization(
     <MemoryRouter>
       <ExperimentItemTable experimentId="exp_1" />
     </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText(/No items/i)).toBeInTheDocument();
 });

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createDatasetExperiment, getExecutorSelection, listPipelines, PlatformApiError } from "../../api/client";
 import type { PipelineDefinition } from "../../api/types";
+import { useLocalization } from "../../localization/useLocalization";
 import { ExecutionEnvironmentSelector } from "../execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, type BoundExecutorSelection } from "../execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../execution-environment/types";
@@ -24,6 +25,7 @@ function toErrorText(reason: unknown): string {
  * - No evaluation-protocol picker (backend default), `parameters: {}`.
  */
 export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) => void }) {
+  const { t } = useLocalization();
   const navigate = useNavigate();
   const [pipelines, setPipelines] = useState<PipelineDefinition[]>([]);
   const [name, setName] = useState("");
@@ -95,7 +97,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
     setError(null);
     if (!canCreate) return;
     if (selectedPipeline === null) {
-      setError("Select a pipeline.");
+      setError(t("form.selectPipelineError"));
       return;
     }
     setSubmitting(true);
@@ -124,15 +126,15 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error !== null ? <Alert type="error" showIcon message="Unable to create experiment" description={error} /> : null}
       <Space direction="vertical" size={4} style={{ width: "100%" }}>
-        <Typography.Text>Name</Typography.Text>
-        <Input aria-label="Name" value={name} onChange={(event) => setName(event.target.value)} />
-        <Typography.Text>Dataset name</Typography.Text>
-        <Input aria-label="Dataset name" value={datasetName} onChange={(event) => setDatasetName(event.target.value)} />
-        <Typography.Text>Dataset split</Typography.Text>
-        <Input aria-label="Dataset split" value={datasetSplit} onChange={(event) => setDatasetSplit(event.target.value)} />
-        <Typography.Text>Label space</Typography.Text>
-        <Input aria-label="Label space" value={datasetLabelSpace} onChange={(event) => setDatasetLabelSpace(event.target.value)} />
-        <Typography.Text>Pipeline</Typography.Text>
+        <Typography.Text>{t("form.name")}</Typography.Text>
+        <Input aria-label={t("form.name")} value={name} onChange={(event) => setName(event.target.value)} />
+        <Typography.Text>{t("form.datasetName")}</Typography.Text>
+        <Input aria-label={t("form.datasetName")} value={datasetName} onChange={(event) => setDatasetName(event.target.value)} />
+        <Typography.Text>{t("form.datasetSplit")}</Typography.Text>
+        <Input aria-label={t("form.datasetSplit")} value={datasetSplit} onChange={(event) => setDatasetSplit(event.target.value)} />
+        <Typography.Text>{t("form.labelSpace")}</Typography.Text>
+        <Input aria-label={t("form.labelSpace")} value={datasetLabelSpace} onChange={(event) => setDatasetLabelSpace(event.target.value)} />
+        <Typography.Text>{t("form.pipeline")}</Typography.Text>
         <Select
           aria-label="Pipeline"
           style={{ width: 360 }}
@@ -140,9 +142,9 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
           onChange={setPipelineId}
           options={pipelines.map((item) => ({ value: item.id, label: `${item.name} ${item.version}` }))}
         />
-        <Typography.Text>Max concurrency</Typography.Text>
+        <Typography.Text>{t("form.maxConcurrency")}</Typography.Text>
         <InputNumber
-          aria-label="Max concurrency"
+          aria-label={t("form.maxConcurrency")}
           min={1}
           value={maxConcurrency}
           onChange={(value) => setMaxConcurrency(value ?? 1)}

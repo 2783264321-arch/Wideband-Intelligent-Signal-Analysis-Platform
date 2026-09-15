@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { AttemptTimeline } from "./AttemptTimeline";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -25,9 +26,11 @@ test("renders attempts with number, linked run and launch-requested time", async
   ]))));
 
   render(
-    <MemoryRouter>
-      <AttemptTimeline experimentId="exp_1" itemId="item_1" />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <AttemptTimeline experimentId="exp_1" itemId="item_1" />
+      </MemoryRouter>,
+    ),
   );
 
   expect(await screen.findByText("run_1")).toBeInTheDocument();
@@ -39,9 +42,11 @@ test("renders attempts with number, linked run and launch-requested time", async
 test("shows an empty state when there are no attempts", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([]))));
   render(
-    <MemoryRouter>
-      <AttemptTimeline experimentId="exp_1" itemId="item_1" />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <AttemptTimeline experimentId="exp_1" itemId="item_1" />
+      </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText(/No attempts/i)).toBeInTheDocument();
 });

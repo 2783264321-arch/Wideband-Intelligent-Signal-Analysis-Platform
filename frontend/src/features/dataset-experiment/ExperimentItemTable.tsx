@@ -2,6 +2,7 @@ import { Empty, Table, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetExperimentItems, PlatformApiError } from "../../api/client";
+import { useLocalization } from "../../localization/useLocalization";
 import type { DatasetExperimentItem } from "../../api/types";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -18,6 +19,7 @@ function toErrorText(reason: unknown): string {
 }
 
 export function ExperimentItemTable({ experimentId }: { experimentId: string }) {
+  const { t } = useLocalization();
   const [items, setItems] = useState<DatasetExperimentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -37,22 +39,22 @@ export function ExperimentItemTable({ experimentId }: { experimentId: string }) 
       rowKey="id"
       loading={loading}
       dataSource={items}
-      locale={{ emptyText: <Empty description={error ?? "No items."} /> }}
+      locale={{ emptyText: <Empty description={error ?? t("items.empty")} /> }}
       columns={[
-        { title: "Order", dataIndex: "manifestOrder", width: 80 },
-        { title: "Recording", dataIndex: "recordingName" },
+        { title: t("items.columnOrder"), dataIndex: "manifestOrder", width: 80 },
+        { title: t("items.columnRecording"), dataIndex: "recordingName" },
         {
-          title: "Status",
+          title: t("items.columnStatus"),
           dataIndex: "status",
           render: (status: string) => <Tag color={STATUS_COLORS[status] ?? "default"}>{status}</Tag>,
         },
         {
-          title: "Error",
+          title: t("items.columnError"),
           dataIndex: "lastErrorType",
           render: (value: string | null) => (value !== null ? <Typography.Text code>{value}</Typography.Text> : null),
         },
         {
-          title: "Run",
+          title: t("items.columnRun"),
           key: "run",
           render: (_: unknown, record: DatasetExperimentItem) =>
             record.latestAnalysisRunId !== null

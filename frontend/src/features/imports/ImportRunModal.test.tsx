@@ -84,7 +84,7 @@ async function chooseZipAndRecording() {
   fireEvent.change(screen.getByLabelText("Analysis Package ZIP"), {
     target: { files: [new File(["zip fixture"], "analysis.zip", { type: "application/zip" })] },
   });
-  fireEvent.mouseDown(screen.getByLabelText("Local Recording"));
+  fireEvent.mouseDown(screen.getByLabelText("Recording Library"));
   fireEvent.click(await screen.findByTitle("Local IQ"));
   await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeEnabled());
 }
@@ -120,7 +120,7 @@ test("requires a ZIP and a Recording before enabling Import", async () => {
     target: { files: [new File(["zip"], "analysis.zip")] },
   });
   expect(screen.getByRole("button", { name: "Import" })).toBeDisabled();
-  fireEvent.mouseDown(screen.getByLabelText("Local Recording"));
+  fireEvent.mouseDown(screen.getByLabelText("Recording Library"));
   fireEvent.click(await screen.findByTitle("Local IQ"));
   await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeEnabled());
 });
