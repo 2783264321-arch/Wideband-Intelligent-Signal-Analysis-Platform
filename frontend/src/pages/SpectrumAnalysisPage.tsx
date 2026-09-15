@@ -5,6 +5,7 @@ import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection,
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
 import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
+import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
@@ -108,18 +109,12 @@ export function SpectrumAnalysisPage() {
     return () => { active = false; };
   }, [recordingId, pipelineId, recording, pipelines]);
 
-  useEffect(() => {
-    if (!currentRun || !activeStatuses.has(currentRun.status)) return undefined;
-    const timer = window.setInterval(() => {
-      void getAnalysisRun(currentRun.id)
-        .then(async (nextRun) => {
-          setCurrentRun(nextRun);
-          if (nextRun.status === "completed") setDetections(await getDetections(nextRun.id));
-        })
-        .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to poll analysis run."));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [currentRun?.id, currentRun?.status]);
+  // Reusable, run-bound polling lifecycle. Only active while the run is non-terminal.
+  useRunPolling({
+    runId: currentRun !== null && activeStatuses.has(currentRun.status) ? currentRun.id : undefined,
+    onRun: setCurrentRun,
+    onDetections: setDetections,
+  });
 
   const selected = useMemo(() => detections.find((d) => d.id === selectedId), [detections, selectedId]);
   const runActive = currentRun ? activeStatuses.has(currentRun.status) : false;
