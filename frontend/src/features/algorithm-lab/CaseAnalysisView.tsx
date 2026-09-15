@@ -100,24 +100,41 @@ export function CaseAnalysisView({
     };
   }, [recordingId, recordings]);
 
+  const canCompare = Boolean(recordingId && runAId && runBId && runAId !== runBId);
+  const singleRun = Boolean(recordingId && runAId && (!runBId || runBId === runAId));
+
+  // Single authoritative comparison orchestration shared by the explicit Compare
+  // button and the query-driven auto-compare effect.
+  const applyCompare = (
+    result: AlgorithmLabCompareResponse,
+    nextMeta: SpectrogramMeta,
+    nextGroundTruth: GroundTruthResult[],
+    nextA: DetectionResult[],
+    nextB: DetectionResult[],
+  ) => {
+    setCompare(result);
+    setMeta(nextMeta);
+    setGroundTruth(nextGroundTruth);
+    setDetectionsA(nextA);
+    setDetectionsB(nextB);
+    setSelectedCaseId(undefined);
+  };
+
+  const fetchComparison = (id: string, a: string, b: string) => Promise.all([
+    compareAnalysisRuns({ recordingId: id, runAId: a, runBId: b }),
+    getSpectrogram(id),
+    getGroundTruth(id),
+    getDetections(a),
+    getDetections(b),
+  ]);
+
   const runCompare = async () => {
-    if (!recordingId || !runAId || !runBId || runAId === runBId) return;
+    if (!canCompare) return;
     setLoading(true);
     setError(null);
     try {
-      const [result, nextMeta, nextGroundTruth, nextA, nextB] = await Promise.all([
-        compareAnalysisRuns({ recordingId, runAId, runBId }),
-        getSpectrogram(recordingId),
-        getGroundTruth(recordingId),
-        getDetections(runAId),
-        getDetections(runBId),
-      ]);
-      setCompare(result);
-      setMeta(nextMeta);
-      setGroundTruth(nextGroundTruth);
-      setDetectionsA(nextA);
-      setDetectionsB(nextB);
-      setSelectedCaseId(undefined);
+      const [result, nextMeta, nextGroundTruth, nextA, nextB] = await fetchComparison(recordingId as string, runAId as string, runBId as string);
+      applyCompare(result, nextMeta, nextGroundTruth, nextA, nextB);
     } catch (reason) {
       setCompare(null);
       setError(reason instanceof Error ? reason.message : "Unable to compare runs.");
@@ -134,21 +151,10 @@ export function CaseAnalysisView({
     if (runBId && runBId !== runAId) {
       setLoading(true);
       setError(null);
-      Promise.all([
-        compareAnalysisRuns({ recordingId, runAId, runBId }),
-        getSpectrogram(recordingId),
-        getGroundTruth(recordingId),
-        getDetections(runAId),
-        getDetections(runBId),
-      ])
+      fetchComparison(recordingId, runAId, runBId)
         .then(([result, nextMeta, nextGroundTruth, nextA, nextB]) => {
           if (cancelled) return;
-          setCompare(result);
-          setMeta(nextMeta);
-          setGroundTruth(nextGroundTruth);
-          setDetectionsA(nextA);
-          setDetectionsB(nextB);
-          setSelectedCaseId(undefined);
+          applyCompare(result, nextMeta, nextGroundTruth, nextA, nextB);
         })
         .catch((reason: unknown) => {
           if (!cancelled) {
@@ -183,8 +189,6 @@ export function CaseAnalysisView({
     };
   }, [recordingId, runAId, runBId]);
 
-  const canCompare = Boolean(recordingId && runAId && runBId && runAId !== runBId);
-  const singleRun = Boolean(recordingId && runAId && (!runBId || runBId === runAId));
   const selectedCase = compare?.cases.find((item) => item.groundTruthId === selectedCaseId);
 
   return (
