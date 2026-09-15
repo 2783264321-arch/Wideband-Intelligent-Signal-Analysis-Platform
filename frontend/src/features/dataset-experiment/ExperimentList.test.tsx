@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ExperimentList } from "./ExperimentList";
 
@@ -74,4 +74,47 @@ test("surfaces a bounded platform error", async () => {
     </MemoryRouter>,
   );
   await waitFor(() => expect(screen.getByText(/DATASET_EXPERIMENT_NOT_FOUND/)).toBeInTheDocument());
+});
+
+// ---------------------------------------------------------------------------
+// F3.5 — Run / Retry Failed lifecycle (exact gating)
+// ---------------------------------------------------------------------------
+
+function actionSetup(experiment: Record<string, unknown>) {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    urls.push(`${options?.method ?? "GET"} ${url}`);
+    if (url.endsWith("/api/dataset-experiments") && (options?.method ?? "GET") === "GET") {
+      return new Response(JSON.stringify([experiment]));
+    }
+    return new Response(JSON.stringify(experiment));
+  }));
+  render(
+    <MemoryRouter>
+      <ExperimentList />
+    </MemoryRouter>,
+  );
+  return { urls };
+}
+
+test("a pending experiment exposes Run and starts it", async () => {
+  const { urls } = actionSetup(experimentWire({ status: "pending" }));
+  await screen.findByText("Exp A");
+  fireEvent.click(screen.getByRole("button", { name: "Run" }));
+  await waitFor(() => expect(urls.some((u) => u.includes("/api/dataset-experiments/exp_1/run"))).toBe(true));
+});
+
+test("completed_with_failures exposes Retry Failed and triggers it", async () => {
+  const { urls } = actionSetup(experimentWire({ status: "completed_with_failures", failed_items: 1, completed_items: 2 }));
+  await screen.findByText("Exp A");
+  fireEvent.click(screen.getByRole("button", { name: "Retry Failed" }));
+  await waitFor(() => expect(urls.some((u) => u.includes("/api/dataset-experiments/exp_1/retry-failed"))).toBe(true));
+});
+
+test("a generic failed experiment exposes neither Run nor Retry Failed", async () => {
+  const { urls } = actionSetup(experimentWire({ status: "failed", failed_items: 1 }));
+  await screen.findByText("Exp A");
+  expect(screen.queryByRole("button", { name: "Retry Failed" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Run" })).toBeNull();
+  expect(urls.some((u) => u.includes("/retry-failed"))).toBe(false);
 });
