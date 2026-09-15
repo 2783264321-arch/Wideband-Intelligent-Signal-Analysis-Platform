@@ -1,52 +1,54 @@
+import type { MessageKey } from "../../localization/types";
+
 /**
- * Unified readable presentation for the approved bounded status/reason classes.
+ * L3 semantic status model: maps RAW backend status/code identity to
+ * localization message keys. Language lives in the localization resources —
+ * this module contains NO English or Chinese strings.
  *
- * The raw backend code is ALWAYS preserved (unknown codes are returned verbatim);
- * nothing here replaces backend identity or turns `ANALYSIS_LAUNCH_AMBIGUOUS`
- * into a generic failure.
+ * Unknown statuses/codes return `null` so callers fall back to the raw backend
+ * identity verbatim (never an invented translation).
  */
 
-const RUN_STATUS_LABELS: Record<string, string> = {
-  pending: "Pending",
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
-  interrupted: "Interrupted",
+const RUN_STATUS_KEYS: Record<string, MessageKey> = {
+  pending: "status.pending",
+  running: "status.running",
+  completed: "status.completed",
+  failed: "status.failed",
+  interrupted: "status.interrupted",
 };
 
-const EXPERIMENT_STATUS_LABELS: Record<string, string> = {
-  pending: "Pending",
-  running: "Running",
-  evaluating: "Evaluating",
-  completed: "Completed",
-  completed_with_failures: "Completed with failures",
-  failed: "Failed",
+const EXPERIMENT_STATUS_KEYS: Record<string, MessageKey> = {
+  pending: "status.pending",
+  running: "status.running",
+  evaluating: "status.evaluating",
+  completed: "status.completed",
+  completed_with_failures: "status.completedWithFailures",
+  failed: "status.failed",
 };
 
-const REASON_DESCRIPTIONS: Record<string, string> = {
-  EXECUTION_CAPABILITY_UNAVAILABLE: "Executor is not available for this input.",
-  EXECUTION_NOT_CERTIFIED: "Executor is not certified for this release/runtime.",
-  INPUT_INCOMPATIBLE: "Pipeline cannot run for this recording label space.",
-  RUNTIME_DESCRIPTOR_INVALID: "The runtime environment changed.",
-  ANALYSIS_LAUNCH_AMBIGUOUS: "The run was interrupted with an ambiguous launch state.",
-  ANALYSIS_INTERRUPTED: "The run was interrupted.",
-  AUTO_NO_RUNNABLE_EXECUTOR: "No execution environment is runnable for this request.",
-  DATASET_EXPERIMENT_ORCHESTRATION_FAILED: "Dataset experiment orchestration failed.",
-  DATASET_EXPERIMENT_EVALUATION_FAILED: "Evaluation failed.",
-  BENCHMARK_FAILED: "Evaluation failed.",
-  BENCHMARK_INTERRUPTED: "Evaluation was interrupted.",
+const REASON_KEYS: Record<string, MessageKey> = {
+  EXECUTION_CAPABILITY_UNAVAILABLE: "reason.EXECUTION_CAPABILITY_UNAVAILABLE",
+  EXECUTION_NOT_CERTIFIED: "reason.EXECUTION_NOT_CERTIFIED",
+  INPUT_INCOMPATIBLE: "reason.INPUT_INCOMPATIBLE",
+  RUNTIME_DESCRIPTOR_INVALID: "reason.RUNTIME_DESCRIPTOR_INVALID",
+  ANALYSIS_LAUNCH_AMBIGUOUS: "reason.ANALYSIS_LAUNCH_AMBIGUOUS",
+  ANALYSIS_INTERRUPTED: "reason.ANALYSIS_INTERRUPTED",
+  AUTO_NO_RUNNABLE_EXECUTOR: "reason.AUTO_NO_RUNNABLE_EXECUTOR",
+  DATASET_EXPERIMENT_ORCHESTRATION_FAILED: "reason.DATASET_EXPERIMENT_ORCHESTRATION_FAILED",
+  DATASET_EXPERIMENT_EVALUATION_FAILED: "reason.DATASET_EXPERIMENT_EVALUATION_FAILED",
+  BENCHMARK_FAILED: "reason.BENCHMARK_FAILED",
+  BENCHMARK_INTERRUPTED: "reason.BENCHMARK_INTERRUPTED",
 };
 
-export function describeRunStatus(status: string): string {
-  return RUN_STATUS_LABELS[status] ?? status;
+export function runStatusKey(status: string): MessageKey | null {
+  return RUN_STATUS_KEYS[status] ?? null;
 }
 
-export function describeExperimentStatus(status: string): string {
-  return EXPERIMENT_STATUS_LABELS[status] ?? status;
+export function experimentStatusKey(status: string): MessageKey | null {
+  return EXPERIMENT_STATUS_KEYS[status] ?? null;
 }
 
-/** Readable description of a bounded code; unknown codes are preserved verbatim. */
-export function describeReasonCode(code: string | null | undefined): string | null {
+export function reasonKey(code: string | null | undefined): MessageKey | null {
   if (code === null || code === undefined || code === "") return null;
-  return REASON_DESCRIPTIONS[code] ?? code;
+  return REASON_KEYS[code] ?? null;
 }

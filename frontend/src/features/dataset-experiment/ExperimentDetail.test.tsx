@@ -1,6 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { LocalizationProvider } from "../../localization/LocalizationProvider";
 import { ExperimentDetail } from "./ExperimentDetail";
+
+function localized(children: React.ReactNode) {
+  return <LocalizationProvider initialLocale="en-US">{children}</LocalizationProvider>;
+}
+
 
 function experimentWire(overrides: Record<string, unknown> = {}) {
   return {
@@ -44,9 +50,11 @@ afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 test("renders status, executor, counters and auto provenance", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(experimentWire()))));
   render(
+    localized(
     <MemoryRouter>
       <ExperimentDetail experimentId="exp_1" />
-    </MemoryRouter>,
+    </MemoryRouter>
+)
   );
   expect(await screen.findByTestId("experiment-progress-header")).toHaveTextContent("Running");
   const header = screen.getByTestId("experiment-progress-header");
@@ -60,9 +68,11 @@ test("a failed experiment shows the bounded error type", async () => {
     experimentWire({ status: "failed", error_type: "DATASET_EXPERIMENT_ORCHESTRATION_FAILED", error_message: "boom" }),
   ))));
   render(
+    localized(
     <MemoryRouter>
       <ExperimentDetail experimentId="exp_1" />
-    </MemoryRouter>,
+    </MemoryRouter>
+)
   );
   const header = await screen.findByTestId("experiment-progress-header");
   expect(header).toHaveTextContent("Failed");
@@ -77,9 +87,11 @@ test("polls while non-terminal and stops on a terminal status", async () => {
     return new Response(JSON.stringify(experimentWire({ status: calls >= 2 ? "completed" : "running" })));
   }));
   render(
+    localized(
     <MemoryRouter>
       <ExperimentDetail experimentId="exp_1" />
-    </MemoryRouter>,
+    </MemoryRouter>
+)
   );
   await act(async () => { await Promise.resolve(); });
   expect(screen.getByTestId("experiment-progress-header")).toHaveTextContent("Running");
@@ -105,9 +117,11 @@ test("recovers from a transient polling error when a later poll succeeds", async
     return new Response(JSON.stringify(experimentWire({ status: "running" })));
   }));
   render(
+    localized(
     <MemoryRouter>
       <ExperimentDetail experimentId="exp_1" />
-    </MemoryRouter>,
+    </MemoryRouter>
+)
   );
   await screen.findByTestId("experiment-progress-header");
 
@@ -154,9 +168,11 @@ test("retry evaluation restarts the detail workflow from backend state", async (
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(
+    localized(
     <MemoryRouter>
       <ExperimentDetail experimentId="exp_1" />
-    </MemoryRouter>,
+    </MemoryRouter>
+)
   );
   expect(await screen.findByTestId("experiment-progress-header")).toHaveTextContent("Failed");
 
