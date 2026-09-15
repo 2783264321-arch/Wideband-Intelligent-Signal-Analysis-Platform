@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ExperimentComparePanel } from "./ExperimentComparePanel";
 
@@ -136,4 +136,92 @@ test("shows an explicit empty state when no comparison is possible", async () =>
   }));
   render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
   expect(await screen.findByText(/No completed experiments with linked evaluations to compare/i)).toBeInTheDocument();
+});
+
+// ---------------------------------------------------------------------------
+// Pre-freeze fix — in-flight compare results must be bound to A/B identity
+// ---------------------------------------------------------------------------
+
+const comparisonsWire = (comparable: boolean, reason: string) => ({
+  comparable,
+  reasons: comparable ? [] : [reason],
+  evaluation_a_id: "eval_a",
+  evaluation_b_id: "eval_b",
+  aggregate_a: null,
+  aggregate_b: null,
+  deltas: comparable ? { localization_ap50: 0.1 } : {},
+});
+
+function threeNamedExperiments() {
+  return [
+    experimentWire("exp_a1", "Exp A1", "eval_a1"),
+    experimentWire("exp_a2", "Exp A2", "eval_a2"),
+    experimentWire("exp_b1", "Exp B1", "eval_b1"),
+  ];
+}
+
+async function choose(name: string) {
+  fireEvent.mouseDown(screen.getByLabelText(name.startsWith("Exp A") ? "Experiment A" : "Experiment B"));
+  const opts = await screen.findAllByTitle(name);
+  fireEvent.click(opts[opts.length - 1]);
+}
+
+test("a stale compare success cannot render against a changed A/B identity", async () => {
+  let resolveR1: ((value: Response) => void) | undefined;
+  const r1 = new Promise<Response>((resolve) => { resolveR1 = resolve; });
+  let compareCalls = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify(threeNamedExperiments()));
+    if (url.includes("/api/dataset-benchmarks/compare")) {
+      compareCalls += 1;
+      if (compareCalls === 1) return r1;
+      return new Response(JSON.stringify(comparisonsWire(false, "R2_ONLY")));
+    }
+    if (url.includes("/items")) return new Response(JSON.stringify([]));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+
+  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  await screen.findByLabelText("Experiment A");
+  await choose("Exp A1");
+  await choose("Exp B1");
+  fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+
+  // Change A1 -> A2 while R1 is in flight.
+  await choose("Exp A2");
+  await act(async () => { resolveR1?.(new Response(JSON.stringify(comparisonsWire(false, "STALE_A1B1")))); await Promise.resolve(); });
+  expect(screen.queryByText("STALE_A1B1")).toBeNull();
+
+  // New compare for A2/B1 resolves and renders.
+  fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+  await waitFor(() => expect(screen.getByText("R2_ONLY")).toBeInTheDocument());
+});
+
+test("a stale compare error cannot render against a changed A/B identity", async () => {
+  let resolveR1: ((value: Response) => void) | undefined;
+  const r1 = new Promise<Response>((resolve) => { resolveR1 = resolve; });
+  let compareCalls = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify(threeNamedExperiments()));
+    if (url.includes("/api/dataset-benchmarks/compare")) {
+      compareCalls += 1;
+      if (compareCalls === 1) return r1;
+      return new Response(JSON.stringify(comparisonsWire(true, "")));
+    }
+    if (url.includes("/items")) return new Response(JSON.stringify([]));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+
+  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  await screen.findByLabelText("Experiment A");
+  await choose("Exp A1");
+  await choose("Exp B1");
+  fireEvent.click(screen.getByRole("button", { name: "Compare" }));
+
+  await choose("Exp A2");
+  await act(async () => {
+    resolveR1?.(new Response(JSON.stringify({ error: { code: "STALE_ERR", message: "old pair failed", details: {} } }), { status: 409 }));
+    await Promise.resolve();
+  });
+  expect(screen.queryByText(/STALE_ERR/)).toBeNull();
 });

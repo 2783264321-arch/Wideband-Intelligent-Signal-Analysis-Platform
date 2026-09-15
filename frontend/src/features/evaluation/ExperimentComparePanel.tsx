@@ -1,5 +1,5 @@
 import { Alert, Button, Select, Space } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { compareDatasetBenchmarks, listDatasetExperiments, PlatformApiError } from "../../api/client";
 import type { DatasetBenchmarkCompareResult, DatasetExperiment } from "../../api/types";
 import { CompareDeltaTable } from "./CompareDeltaTable";
@@ -16,6 +16,9 @@ export function ExperimentComparePanel() {
   const [bId, setBId] = useState<string | null>(null);
   const [result, setResult] = useState<DatasetBenchmarkCompareResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Only the request that owns the current generation may set result/error.
+  // Selector changes invalidate outstanding work synchronously.
+  const compareGenerationRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -30,21 +33,36 @@ export function ExperimentComparePanel() {
   );
   const options = eligible.map((experiment) => ({ value: experiment.id, label: experiment.name }));
 
-  // A comparison belongs to exactly one (A, B) identity; changing either selector
-  // invalidates the previously displayed result immediately.
-  useEffect(() => {
+  const invalidateComparison = () => {
+    compareGenerationRef.current += 1;
     setResult(null);
-  }, [aId, bId]);
+    setError(null);
+  };
+
+  const changeA = (id: string) => {
+    invalidateComparison();
+    setAId(id);
+  };
+
+  const changeB = (id: string) => {
+    invalidateComparison();
+    setBId(id);
+  };
 
   const run = async () => {
-    setError(null);
     const a = eligible.find((experiment) => experiment.id === aId);
     const b = eligible.find((experiment) => experiment.id === bId);
     if (!a || !b || a.datasetEvaluationId === null || b.datasetEvaluationId === null) return;
+    // Starting a newer compare invalidates any older compare still in flight.
+    const generation = ++compareGenerationRef.current;
+    setError(null);
     try {
       // Compare the experiments' linked evaluations (backend authority).
-      setResult(await compareDatasetBenchmarks(a.datasetEvaluationId, b.datasetEvaluationId));
+      const next = await compareDatasetBenchmarks(a.datasetEvaluationId, b.datasetEvaluationId);
+      if (generation !== compareGenerationRef.current) return;
+      setResult(next);
     } catch (reason) {
+      if (generation !== compareGenerationRef.current) return;
       setError(toErrorText(reason));
     }
   };
@@ -56,8 +74,8 @@ export function ExperimentComparePanel() {
         <Alert type="info" showIcon message="No completed experiments with linked evaluations to compare." />
       ) : null}
       <Space wrap>
-        <Select aria-label="Experiment A" style={{ width: 240 }} value={aId ?? undefined} onChange={setAId} options={options} />
-        <Select aria-label="Experiment B" style={{ width: 240 }} value={bId ?? undefined} onChange={setBId} options={options} />
+        <Select aria-label="Experiment A" style={{ width: 240 }} value={aId ?? undefined} onChange={changeA} options={options} />
+        <Select aria-label="Experiment B" style={{ width: 240 }} value={bId ?? undefined} onChange={changeB} options={options} />
         <Button
           type="primary"
           disabled={aId === null || bId === null || aId === bId}
