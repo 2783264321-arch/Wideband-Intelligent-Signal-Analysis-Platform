@@ -348,3 +348,117 @@ export interface DatasetBenchmarkCompareResult {
   aggregateB: DatasetBenchmarkAggregateMetrics | null;
   deltas: Record<string, number | null>;
 }
+
+// ---------------------------------------------------------------------------
+// Frontend V1 contracts (F0.2)
+//
+// Domain types are camelCase; the snake_case wire shapes live privately inside
+// api/client.ts. These were added per the approved Frontend V1 design/plan
+// Interface Ledger and are compile-verified by src/api/v1Contract.ts.
+// ---------------------------------------------------------------------------
+
+export type ExecutionMode = "manual" | "auto";
+
+export interface ExecutionCandidate {
+  executor: string; // "local_cpu" | "local_gpu" | "remote_gpu"
+  technical: boolean;
+  configured: boolean;
+  certified: boolean;
+  available: boolean;
+  reasonCode: string | null;
+  reasonMessage: string | null;
+}
+
+export interface ExecutorSelection {
+  requestedMode: ExecutionMode;
+  resolvedExecutor: string | null;
+  reasonCode: string;
+  reason: string;
+  workloadClass: string; // "SMALL" | "GPU_BENEFICIAL" | "UNKNOWN"
+  candidates: ExecutionCandidate[];
+}
+
+export type ExecutionSelectionScope =
+  | { kind: "recording"; recordingId: string }
+  | { kind: "dataset"; datasetName: string; datasetSplit: string; datasetLabelSpace: string };
+
+export interface AnalysisRunCreateRequest {
+  recordingId: string;
+  pipelineId: string;
+  executor?: string;
+  executionMode?: ExecutionMode;
+  modelReleaseId?: string | null;
+  parameters: Record<string, unknown>;
+}
+
+export interface DatasetExperimentItem {
+  id: string;
+  experimentId: string;
+  manifestOrder: number;
+  recordingId: string;
+  recordingName: string;
+  status: string; // "queued" | "running" | "completed" | "failed"
+  lastErrorType: string | null;
+  lastErrorMessage: string | null;
+  latestAnalysisRunId: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface DatasetExperimentAttempt {
+  id: string;
+  experimentItemId: string;
+  attemptNumber: number;
+  analysisRunId: string; // mandatory in the backend Attempt read model
+  launchRequestedAt: string | null;
+  createdAt: string | null;
+}
+
+export interface DatasetExperiment {
+  id: string;
+  name: string;
+  datasetName: string;
+  datasetSplit: string;
+  datasetLabelSpace: string;
+  recordingManifestHash: string;
+  pluginId: string;
+  pluginVersion: string;
+  modelReleaseId: string | null;
+  assetManifestSha256: string | null;
+  parameters: Record<string, unknown>;
+  executor: string; // frozen concrete execution identity
+  evaluationProtocol: string;
+  maxConcurrency: number;
+  status: string; // pending|running|evaluating|completed|completed_with_failures|failed
+  datasetEvaluationId: string | null;
+  errorType: string | null;
+  errorMessage: string | null;
+  requestedExecutionMode: ExecutionMode | null;
+  autoReasonCode: string | null;
+  autoReason: string | null;
+  workloadClass: string | null;
+  expectedItems: number;
+  queuedItems: number;
+  runningItems: number;
+  completedItems: number;
+  failedItems: number;
+  attemptCount: number;
+  createdAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface DatasetExperimentCreateRequest {
+  name: string;
+  datasetName: string;
+  datasetSplit: string;
+  datasetLabelSpace: string;
+  pluginId: string;
+  pluginVersion: string;
+  executionMode: ExecutionMode;
+  executor?: string;
+  modelReleaseId?: string | null;
+  parameters: Record<string, unknown>;
+  evaluationProtocol?: string; // omit to let the backend apply its default
+  maxConcurrency: number;
+}
