@@ -232,7 +232,8 @@ h5_reobserve_concurrency_samples.jsonl
   sha256 17c373e5754d5ba2693642fd897011e0c3af81b31cb5778024e1d84773452bc8
 h5_reobserve_resource_samples.jsonl
   sha256 a7882ebdf2af80077363d85c8633cd4caedec6108f42b84c7d612cfd7608d65c
-h5_reobserve_acceptance.json  sha256 (see artifacts.sha256 in that file)
+h5_reobserve_acceptance.json
+  sha256 46a66811f0ecf1da3486089fe65254849aac3c73ee8f1568a0e3722b2e0674bc
 ```
 
 ## Final execution ledger
