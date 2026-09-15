@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { getDatasetExperiment, PlatformApiError } from "../../api/client";
 import type { DatasetExperiment } from "../../api/types";
 import { ExperimentProgressHeader } from "./ExperimentProgressHeader";
+import { ExperimentItemTable } from "./ExperimentItemTable";
 
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_failures", "failed"]);
 const POLL_INTERVAL_MS = 1000;
@@ -53,7 +54,7 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
       <ExperimentProgressHeader experiment={experiment} />
       <Tabs
         items={[
-          { key: "items", label: "Items", children: <div data-testid="experiment-items-tab" /> },
+          { key: "items", label: "Items", children: <ExperimentItemTable experimentId={experiment.id} /> },
           { key: "attempts", label: "Attempts", children: <div data-testid="experiment-attempts-tab" /> },
           { key: "evaluation", label: "Evaluation", children: <div data-testid="experiment-evaluation-tab" /> },
         ]}
