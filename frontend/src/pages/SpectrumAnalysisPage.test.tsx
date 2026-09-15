@@ -313,7 +313,7 @@ test("remote pending run polls to completed and renders detections", async () =>
   await waitFor(() => expect(screen.getByRole("button", { name: "Run Analysis" })).not.toBeDisabled());
   fireEvent.click(screen.getByRole("button", { name: "Run Analysis" }));
   await waitFor(() => expect(screen.getByText(/LoRa 250kHz/)).toBeInTheDocument(), { timeout: 4000 });
-  expect(screen.getByText("completed")).toBeInTheDocument();
+  expect(screen.getByText("Completed")).toBeInTheDocument();
 });
 
 test("completed remote run renders allowlisted metadata only", async () => {
@@ -343,7 +343,7 @@ test("completed remote run renders allowlisted metadata only", async () => {
   setup({ pipelines: [remotePipeline], selection: selectionRemoteAvailable, readbackFixture: completedRemoteRun, initialPath: "/spectrum/rec_1?run=run_r" });
 
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
-  await screen.findByText("completed");
+  await screen.findByText("Completed");
 
   expect(screen.getByText(/Executor: remote_gpu/)).toBeInTheDocument();
   expect(screen.getByText(/Profile: autodl_primary/)).toBeInTheDocument();

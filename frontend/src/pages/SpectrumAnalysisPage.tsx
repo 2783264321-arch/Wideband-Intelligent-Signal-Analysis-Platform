@@ -1,10 +1,11 @@
-import { Alert, Button, Card, Checkbox, Col, Row, Select, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Col, Row, Select, Space, Spin, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
 import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
+import { RunStatusBadge } from "../features/analysis-run/RunStatusBadge";
 import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
@@ -189,8 +190,9 @@ export function SpectrumAnalysisPage() {
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>Prediction</Checkbox>
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>Ground Truth</Checkbox>
-        {currentRun ? <Tag>{currentRun.status}</Tag> : <Typography.Text type="secondary">No AnalysisRun selected yet.</Typography.Text>}
-        {currentRun?.status === "failed" ? <Typography.Text type="danger">{currentRun.errorMessage ?? "Analysis failed."}</Typography.Text> : null}
+        {currentRun ? (
+          <RunStatusBadge status={currentRun.status} errorType={currentRun.errorType} errorMessage={currentRun.errorMessage} />
+        ) : <Typography.Text type="secondary">No AnalysisRun selected yet.</Typography.Text>}
         {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
       </Space>
       <Row gutter={16} align="stretch">
