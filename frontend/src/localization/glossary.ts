@@ -16,6 +16,7 @@ export const DOMAIN_GLOSSARY = {
   experimentItem: { en: "Experiment Item", zh: "实验样本" },
   attempt: { en: "Attempt", zh: "执行尝试" },
   evaluation: { en: "Evaluation", zh: "评测" },
+  datasetEvaluation: { en: "Dataset Evaluation", zh: "数据集评测" },
   benchmark: { en: "Benchmark", zh: "基准评测" },
   compare: { en: "Compare", zh: "对比" },
   algorithmLab: { en: "Algorithm Lab", zh: "算法评测实验室" },

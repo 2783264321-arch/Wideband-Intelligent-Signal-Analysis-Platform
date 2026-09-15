@@ -20,6 +20,9 @@ export const zhCN: Record<MessageKey, string> = {
   "nav.experiments": "数据集实验",
   "nav.algorithmLab": "算法评测实验室",
 
+  "settings.title": "设置",
+  "settings.subtitle": "V1 有意保持运行时配置最小化。",
+
   "common.loading": "加载中",
   "common.loadingRecording": "正在加载信号记录与时频图…",
   "common.loadingExperiment": "正在加载数据集实验…",

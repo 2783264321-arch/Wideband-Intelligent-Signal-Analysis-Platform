@@ -7,9 +7,11 @@ import { SignalDetailPage } from "../pages/SignalDetailPage";
 import { AlgorithmLabPage } from "../pages/AlgorithmLabPage";
 import { ExperimentsPage } from "../pages/ExperimentsPage";
 import { ExperimentDetailPage } from "../pages/ExperimentDetailPage";
+import { useLocalization } from "../localization/useLocalization";
 
 function SettingsPage() {
-  return <div><h2>Settings</h2><p>V1 keeps runtime configuration intentionally minimal.</p></div>;
+  const { t } = useLocalization();
+  return <div><h2>{t("settings.title")}</h2><p>{t("settings.subtitle")}</p></div>;
 }
 
 export function App() {

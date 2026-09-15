@@ -14,6 +14,9 @@ export const enUS = {
   "nav.experiments": "Experiments",
   "nav.algorithmLab": "Algorithm Lab",
 
+  "settings.title": "Settings",
+  "settings.subtitle": "V1 keeps runtime configuration intentionally minimal.",
+
   "common.loading": "Loading",
   "common.loadingRecording": "Loading recording and STFT spectrum...",
   "common.loadingExperiment": "Loading experiment...",
