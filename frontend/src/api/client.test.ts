@@ -156,7 +156,7 @@ test("listPipelines tolerates a legacy backend without capability fields", async
   expect(pipeline.labelSpace).toBe("spacenet_14");
 });
 
-test("createAnalysisRun forwards the requested executor", async () => {
+test("createAnalysisRun translates a manual domain request into the snake_case wire body", async () => {
   let posted: Record<string, unknown> | null = null;
   vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
     expect(url).toBe("http://127.0.0.1:8000/api/analysis-runs");
@@ -164,9 +164,9 @@ test("createAnalysisRun forwards the requested executor", async () => {
     return new Response(JSON.stringify({
       id: "run_r",
       recording_id: "rec_1",
-      pipeline_id: "zoomspec_yolo26n_aug_combined_frn_v3",
-      pipeline_version: "1.0.0",
-      executor: posted.executor,
+      pipeline_id: "dummy",
+      pipeline_version: "1.0",
+      executor: "remote_gpu",
       status: "pending",
       parameters_json: {},
       hardware_info_json: null,
@@ -179,9 +179,56 @@ test("createAnalysisRun forwards the requested executor", async () => {
       execution_metadata_json: null,
     }), { status: 201 });
   }));
-  const run = await createAnalysisRun("rec_1", "zoomspec_yolo26n_aug_combined_frn_v3", "remote_gpu");
-  expect(posted).toMatchObject({ executor: "remote_gpu", parameters: {} });
+
+  const run = await createAnalysisRun({
+    recordingId: "rec_1",
+    pipelineId: "dummy",
+    executor: "remote_gpu",
+    parameters: {},
+  });
+
+  expect(posted).toMatchObject({
+    recording_id: "rec_1",
+    pipeline_id: "dummy",
+    executor: "remote_gpu",
+    parameters: {},
+  });
+  expect(posted).not.toHaveProperty("execution_mode");
   expect(run.executor).toBe("remote_gpu");
+});
+
+test("createAnalysisRun translates an auto domain request and omits executor", async () => {
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    posted = JSON.parse(String(options?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({
+      id: "run_r",
+      recording_id: "rec_1",
+      pipeline_id: "dummy",
+      pipeline_version: "1.0",
+      executor: "local_gpu",
+      status: "pending",
+      parameters_json: {},
+      hardware_info_json: null,
+      started_at: null,
+      finished_at: null,
+      error_type: null,
+      error_message: null,
+      worker_pid: 1,
+      created_at: "2026-09-05T00:00:00",
+      execution_metadata_json: null,
+    }), { status: 201 });
+  }));
+
+  await createAnalysisRun({
+    recordingId: "rec_1",
+    pipelineId: "dummy",
+    executionMode: "auto",
+    parameters: {},
+  });
+
+  expect(posted).toMatchObject({ recording_id: "rec_1", pipeline_id: "dummy", execution_mode: "auto" });
+  expect(posted).not.toHaveProperty("executor");
 });
 test("getExecutorSelection builds a recording-scoped query and maps candidates", async () => {
   let requestedUrl = "";

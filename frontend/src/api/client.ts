@@ -11,7 +11,7 @@ import type {
   ImportedBenchmarkBatch,
   OperatingMetrics,
 } from "./types";
-import type { ExecutionMode, ExecutionSelectionScope, ExecutorSelection } from "./types";
+import type { ExecutionMode, ExecutionSelectionScope, ExecutorSelection, AnalysisRunCreateRequest } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -456,17 +456,27 @@ export async function getExecutorSelection(params: {
   };
 }
 
+interface AnalysisRunCreateWire {
+  recording_id: string;
+  pipeline_id: string;
+  executor?: string;
+  execution_mode?: ExecutionMode;
+  model_release_id?: string | null;
+  parameters: Record<string, unknown>;
+}
+
 export async function createAnalysisRun(
-  recordingId: string,
-  pipelineId: string,
-  executor = "local_cpu",
+  request: AnalysisRunCreateRequest,
 ): Promise<import("./types").AnalysisRun> {
-  return mapAnalysisRun(await apiPostJson<AnalysisRunWire>("/api/analysis-runs", {
-    recording_id: recordingId,
-    pipeline_id: pipelineId,
-    executor,
-    parameters: {},
-  }));
+  const wire: AnalysisRunCreateWire = {
+    recording_id: request.recordingId,
+    pipeline_id: request.pipelineId,
+    parameters: request.parameters,
+  };
+  if (request.executor !== undefined) wire.executor = request.executor;
+  if (request.executionMode !== undefined) wire.execution_mode = request.executionMode;
+  if (request.modelReleaseId !== undefined) wire.model_release_id = request.modelReleaseId;
+  return mapAnalysisRun(await apiPostJson<AnalysisRunWire>("/api/analysis-runs", wire));
 }
 
 export async function getAnalysisRun(runId: string): Promise<import("./types").AnalysisRun> {

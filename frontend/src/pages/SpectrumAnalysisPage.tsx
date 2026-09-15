@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorAvailability, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
 import type { AnalysisRun, DetectionResult, ExecutorAvailability, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
+import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
 import { resolveExecutorForPipeline, type AvailabilityState } from "../features/spectrum/executorPolicy";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
 import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
@@ -178,7 +179,13 @@ export function SpectrumAnalysisPage() {
     const executor = resolution.executor;
     if (!executor) return;
     try {
-      const run = await createAnalysisRun(recordingId, pipelineId, executor);
+      // F1.3 compatibility migration: executorPolicy is retired in F1.4.
+      const request = buildAnalysisRunRequest({
+        recordingId,
+        pipelineId,
+        environment: { mode: "manual", executor },
+      });
+      const run = await createAnalysisRun(request);
       setCurrentRun(run);
       setDetections([]);
       setSelectedId(undefined);
