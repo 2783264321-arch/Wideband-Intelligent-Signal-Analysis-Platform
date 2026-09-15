@@ -4,6 +4,7 @@ import { getDatasetExperiment, PlatformApiError } from "../../api/client";
 import type { DatasetExperiment } from "../../api/types";
 import { ExperimentProgressHeader } from "./ExperimentProgressHeader";
 import { ExperimentItemTable } from "./ExperimentItemTable";
+import { ExperimentAttemptsTab } from "./AttemptTimeline";
 
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_failures", "failed"]);
 const POLL_INTERVAL_MS = 1000;
@@ -55,7 +56,7 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
       <Tabs
         items={[
           { key: "items", label: "Items", children: <ExperimentItemTable experimentId={experiment.id} /> },
-          { key: "attempts", label: "Attempts", children: <div data-testid="experiment-attempts-tab" /> },
+          { key: "attempts", label: "Attempts", children: <ExperimentAttemptsTab experimentId={experiment.id} /> },
           { key: "evaluation", label: "Evaluation", children: <div data-testid="experiment-evaluation-tab" /> },
         ]}
       />
