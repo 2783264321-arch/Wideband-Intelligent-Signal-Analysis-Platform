@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { AlgorithmLabPage } from "./AlgorithmLabPage";
 
@@ -86,14 +86,14 @@ test("defaults to the Case Analysis tab", async () => {
   renderPage("/algorithm-lab");
   expect(await screen.findByLabelText("Recording")).toBeInTheDocument();
   expect(screen.getByText("Case Analysis")).toBeInTheDocument();
-  expect(screen.getByText("Dataset Benchmarks")).toBeInTheDocument();
 });
 
-test("renders the Dataset Benchmarks tab from the query parameter", async () => {
+test("legacy benchmark tab query redirects to the Experiments benchmarks surface", async () => {
   stubFetch();
-  renderPage("/algorithm-lab?tab=benchmarks");
-  expect(await screen.findByRole("button", { name: "New Benchmark" })).toBeInTheDocument();
-  expect(screen.queryByLabelText("Recording")).not.toBeInTheDocument();
+  renderPage("/algorithm-lab?tab=benchmarks&benchmark=abc");
+  await waitFor(() => expect(screen.getByTestId("location").textContent).toContain("tab=benchmarks"));
+  expect(screen.getByTestId("location").textContent).toContain("benchmark=abc");
+  expect(screen.queryByRole("button", { name: "New Benchmark" })).not.toBeInTheDocument();
 });
 
 test("hydrates a case query recording outside the first 500 list through the page", async () => {
@@ -101,13 +101,4 @@ test("hydrates a case query recording outside the first 500 list through the pag
   renderPage("/algorithm-lab?tab=case&recording=rec2500&runA=run_2500");
   expect(await screen.findByText("Sample 2499")).toBeInTheDocument();
   expect(await screen.findByText(/Select Run B to compare/)).toBeInTheDocument();
-});
-
-test("switching tabs keeps unrelated query state", async () => {
-  stubFetch();
-  renderPage("/algorithm-lab?tab=case&recording=rec1");
-  fireEvent.click(screen.getByText("Dataset Benchmarks"));
-  expect(await screen.findByRole("button", { name: "New Benchmark" })).toBeInTheDocument();
-  expect(screen.getByTestId("location").textContent).toContain("tab=benchmarks");
-  expect(screen.getByTestId("location").textContent).toContain("recording=rec1");
 });

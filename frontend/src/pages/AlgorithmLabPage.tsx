@@ -1,15 +1,29 @@
 import { Tabs } from "antd";
-import { useSearchParams } from "react-router-dom";
+import { useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { CaseAnalysisView } from "../features/algorithm-lab/CaseAnalysisView";
-import { DatasetBenchmarksView } from "../features/dataset-benchmarks/DatasetBenchmarksView";
 
+/**
+ * Algorithm Lab is the per-recording deep A/B comparison workspace.
+ * Dataset-level benchmarks were re-homed under the Experiments destination; the
+ * legacy `/algorithm-lab?tab=benchmarks&benchmark=<id>` links are redirected to
+ * `/experiments?tab=benchmarks&benchmark=<id>` for compatibility.
+ */
 export function AlgorithmLabPage() {
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
-  const tab = params.get("tab") === "benchmarks" ? "benchmarks" : "case";
   const recordingId = params.get("recording") ?? undefined;
   const runAId = params.get("runA") ?? undefined;
   const runBId = params.get("runB") ?? undefined;
-  const benchmarkId = params.get("benchmark") ?? undefined;
+
+  const tab = params.get("tab");
+  useEffect(() => {
+    if (tab !== "benchmarks") return;
+    const next = new URLSearchParams({ tab: "benchmarks" });
+    const benchmarkId = params.get("benchmark");
+    if (benchmarkId) next.set("benchmark", benchmarkId);
+    navigate(`/experiments?${next.toString()}`, { replace: true });
+  }, [tab, params, navigate]);
 
   const patch = (changes: Record<string, string | undefined>) => {
     const next = new URLSearchParams(params);
@@ -22,8 +36,7 @@ export function AlgorithmLabPage() {
 
   return (
     <Tabs
-      activeKey={tab}
-      onChange={(key) => patch({ tab: key })}
+      activeKey="case"
       items={[
         {
           key: "case",
@@ -36,17 +49,6 @@ export function AlgorithmLabPage() {
               onRecordingChange={(id) => patch({ recording: id, runA: undefined, runB: undefined })}
               onRunAChange={(id) => patch({ runA: id })}
               onRunBChange={(id) => patch({ runB: id })}
-            />
-          ),
-        },
-        {
-          key: "benchmarks",
-          label: "Dataset Benchmarks",
-          children: (
-            <DatasetBenchmarksView
-              selectedBenchmarkId={benchmarkId}
-              onBenchmarkOpen={(id) => patch({ tab: "benchmarks", benchmark: id })}
-              onOpenCase={(rec, a, b) => patch({ tab: "case", recording: rec, runA: a, runB: b })}
             />
           ),
         },

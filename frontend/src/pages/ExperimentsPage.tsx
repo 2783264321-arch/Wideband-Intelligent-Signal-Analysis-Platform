@@ -4,17 +4,22 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ExperimentComparePage } from "./ExperimentComparePage";
 import { ExperimentList } from "../features/dataset-experiment/ExperimentList";
 import { ExperimentCreateForm } from "../features/dataset-experiment/ExperimentCreateForm";
+import { DatasetBenchmarksView } from "../features/dataset-benchmarks/DatasetBenchmarksView";
 
 export function ExperimentsPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [createOpen, setCreateOpen] = useState(false);
-  const tab = params.get("tab") === "compare" ? "compare" : "experiments";
+  const requestedTab = params.get("tab");
+  const tab = requestedTab === "compare" ? "compare" : requestedTab === "benchmarks" ? "benchmarks" : "experiments";
+  const benchmarkId = params.get("benchmark") ?? undefined;
 
-  const patch = (key: string) => {
+  const patch = (changes: Record<string, string | undefined>) => {
     const next = new URLSearchParams(params);
-    if (key === "experiments") next.delete("tab");
-    else next.set("tab", key);
+    for (const [key, value] of Object.entries(changes)) {
+      if (value === undefined) next.delete(key);
+      else next.set(key, value);
+    }
     setParams(next);
   };
 
@@ -22,7 +27,7 @@ export function ExperimentsPage() {
     <>
       <Tabs
         activeKey={tab}
-        onChange={patch}
+        onChange={(key) => patch({ tab: key === "experiments" ? undefined : key })}
         items={[
           {
             key: "experiments",
@@ -35,6 +40,18 @@ export function ExperimentsPage() {
             ),
           },
           { key: "compare", label: "Compare", children: <ExperimentComparePage /> },
+          {
+            key: "benchmarks",
+            label: "Benchmarks",
+            children: (
+              <DatasetBenchmarksView
+                selectedBenchmarkId={benchmarkId}
+                onBenchmarkOpen={(id) => patch({ tab: "benchmarks", benchmark: id })}
+                onOpenCase={(recordingId, runAId, runBId) =>
+                  navigate(`/algorithm-lab?recording=${recordingId}&runA=${runAId}&runB=${runBId}`)}
+              />
+            ),
+          },
         ]}
       />
       <Modal

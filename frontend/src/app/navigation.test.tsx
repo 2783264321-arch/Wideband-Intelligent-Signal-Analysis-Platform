@@ -3,7 +3,10 @@ import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
 
 beforeEach(() => {
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200 })));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/api/recordings?")) return new Response(JSON.stringify({ items: [], total: 0 }));
+    return new Response(JSON.stringify([]));
+  }));
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -48,4 +51,31 @@ test("the experiment detail route renders", async () => {
     </MemoryRouter>,
   );
   expect(await screen.findByTestId("experiment-detail-page")).toBeInTheDocument();
+});
+
+test("dataset benchmarks are reachable under Experiments", async () => {
+  render(
+    <MemoryRouter initialEntries={["/experiments?tab=benchmarks"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect((await screen.findAllByText("Benchmarks")).length).toBeGreaterThan(0);
+});
+
+test("legacy algorithm-lab benchmark links redirect to Experiments", async () => {
+  render(
+    <MemoryRouter initialEntries={["/algorithm-lab?tab=benchmarks&benchmark=abc"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect((await screen.findAllByText("Benchmarks")).length).toBeGreaterThan(0);
+});
+
+test("algorithm-lab query drilldown still loads the case comparison workspace", async () => {
+  render(
+    <MemoryRouter initialEntries={["/algorithm-lab?recording=rec1&runA=run_a&runB=run_b"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect((await screen.findAllByText("Algorithm Lab")).length).toBeGreaterThan(0);
 });
