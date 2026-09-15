@@ -46,6 +46,66 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def build_reobserve_payload(*, name: str = "Plan B H5 monitoring re-observation") -> dict:
+    """Exact outgoing DatasetExperiment create payload for the re-observation.
+
+    Workspace Dataset Name is the H5_FULL view (the frozen 16-stem dataset
+    identity), NOT the generic ``common.DATASET_NAME`` ("SpaceNet"). This is a
+    pure builder so the exact outgoing identity can be asserted by a CPU test.
+    """
+    return {
+        "name": name,
+        "dataset_name": membership.H5_FULL,
+        "dataset_split": membership.H5_SPLIT,
+        "dataset_label_space": membership.H5_LABEL_SPACE,
+        "plugin_id": PLUGIN,
+        "plugin_version": common.PLUGIN_VERSION[PLUGIN],
+        "model_release_id": common.MODEL_RELEASE,
+        "executor": "local_gpu",
+        "parameters": {},
+        "max_concurrency": h5.CONCURRENCY_BOUND,
+    }
+
+
+def create_reobserve_experiment(app, *, name: str = "Plan B H5 monitoring re-observation") -> str:
+    """Create the single re-observation experiment with the EXACT H5_FULL identity."""
+    from fastapi.testclient import TestClient
+
+    created = TestClient(app).post(
+        "/api/dataset-experiments", json=build_reobserve_payload(name=name)
+    )
+    if created.status_code != 201:
+        raise SystemExit(f"REMEDIATION STOP: create -> {created.status_code} {created.text}")
+    return created.json()["id"]
+
+
+def workload_identity(experiment_read: dict) -> dict:
+    """Persisted workload identity projection used by final acceptance."""
+    return {
+        "dataset_name": experiment_read.get("dataset_name"),
+        "dataset_split": experiment_read.get("dataset_split"),
+        "dataset_label_space": experiment_read.get("dataset_label_space"),
+        "plugin_id": experiment_read.get("plugin_id"),
+        "plugin_version": experiment_read.get("plugin_version"),
+        "model_release_id": experiment_read.get("model_release_id"),
+        "executor": experiment_read.get("executor"),
+        "max_concurrency": experiment_read.get("max_concurrency"),
+    }
+
+
+def expected_workload_identity() -> dict:
+    return {
+        "dataset_name": membership.H5_FULL,
+        "dataset_split": membership.H5_SPLIT,
+        "dataset_label_space": membership.H5_LABEL_SPACE,
+        "plugin_id": PLUGIN,
+        "plugin_version": common.PLUGIN_VERSION[PLUGIN],
+        "model_release_id": common.MODEL_RELEASE,
+        "executor": "local_gpu",
+        "max_concurrency": h5.CONCURRENCY_BOUND,
+    }
+
+
 def pre_gate(root: Path) -> dict:
     """GPU setup verification + historical/fresh-state checks (no inference)."""
     historical_roots = [common.PLAN_B_ROOT / name for name in ("h2h3", "h4", "h5")]
@@ -67,47 +127,158 @@ def pre_gate(root: Path) -> dict:
     return admission
 
 
+def parse_concurrency_jsonl(path: Path) -> list[dict]:
+    """Parse persisted concurrency JSONL (the authoritative NC-02 artifact)."""
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+    return rows
+
+
+def parse_resource_jsonl(path: Path) -> list[dict]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rows.append(json.loads(line))
+    return rows
+
+
+def assert_monitors_healthy(after_stop: dict,
+                            concurrency_monitor: monitor.ConcurrencyMonitor,
+                            resource_monitor: monitor.ResourceMonitor) -> dict:
+    """Final monitor health gate (Finding E). Fails closed on ANY residual issue."""
+    checks = {
+        "concurrency_abort_reason_none": concurrency_monitor.abort_reason is None,
+        "concurrency_thread_failure_none": concurrency_monitor.thread_failure is None,
+        "resource_abort_reason_none": resource_monitor.abort_reason is None,
+        "resource_thread_failure_none": resource_monitor.thread_failure is None,
+        "concurrency_thread_stopped": after_stop.get("concurrency_thread_stopped") is True,
+        "resource_thread_stopped": after_stop.get("resource_thread_stopped") is True,
+    }
+    if not all(checks.values()):
+        failed = {k: v for k, v in checks.items() if not v}
+        raise SystemExit(f"REMEDIATION FAILED: monitor health gate failed: {failed}")
+    return checks
+
+
 def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
                                 concurrency_monitor: monitor.ConcurrencyMonitor,
-                                resource_monitor: monitor.ResourceMonitor) -> dict:
-    """Accept ONLY genuine persisted evidence (Issue 7 semantics)."""
+                                resource_monitor: monitor.ResourceMonitor,
+                                cgroup_events_baseline: dict | None,
+                                cgroup_events_final: dict | None) -> dict:
+    """Accept ONLY genuine PERSISTED evidence (Findings E/F/G).
+
+    The persisted JSONL artifacts are the authority for NC-02, not in-memory
+    state. Parses both JSONL files, cross-checks counts, and fails closed on
+    monitor failure or nonzero cgroup event deltas.
+    """
     if not samples_path.exists() or samples_path.stat().st_size == 0:
         raise SystemExit("REMEDIATION FAILED: concurrency JSONL missing or empty")
     if not resource_path.exists() or resource_path.stat().st_size == 0:
         raise SystemExit("REMEDIATION FAILED: resource JSONL missing or empty")
 
-    samples = list(concurrency_monitor.samples)
-    owned = sum(
-        1 for s in samples if any(getattr(o, "pid", None) is not None for o in getattr(s, "ownership", ()))
-    )
-    unique_runs = len({o.run_id for s in samples for o in getattr(s, "ownership", ())
-                       if getattr(o, "pid", None) is not None})
-    gpu_owned = sum(
-        1 for s in samples
-        if set(getattr(s, "gpu_compute_pids", ()))
-        and set(getattr(s, "gpu_compute_pids", ())).issubset(set(getattr(s, "worker_pids", ())))
-    )
-    max_concurrency = h5.max_observed_concurrency(samples)
-    max_gap = max((s.interval_s for s in samples), default=None)
-    if not samples:
-        raise SystemExit("REMEDIATION STOP: no concurrency samples")
-    if unique_runs == 0 or owned == 0 or gpu_owned == 0:
+    persisted_c = parse_concurrency_jsonl(samples_path)
+    persisted_r = parse_resource_jsonl(resource_path)
+    in_memory_c = list(concurrency_monitor.samples)
+    in_memory_r = list(resource_monitor.samples)
+
+    if not persisted_c:
+        raise SystemExit("REMEDIATION STOP: persisted concurrency JSONL has no samples")
+    if not persisted_r:
+        raise SystemExit("REMEDIATION STOP: persisted resource JSONL has no samples")
+    if len(persisted_c) != len(in_memory_c):
         raise SystemExit(
-            f"REMEDIATION FAILED: no ownership evidence (owned={owned}, gpu_owned={gpu_owned}, "
-            f"unique_runs={unique_runs})"
+            f"REMEDIATION FAILED: persisted/in-memory concurrency count mismatch "
+            f"({len(persisted_c)} != {len(in_memory_c)})"
         )
+    if len(persisted_r) != len(in_memory_r):
+        raise SystemExit(
+            f"REMEDIATION FAILED: persisted/in-memory resource count mismatch "
+            f"({len(persisted_r)} != {len(in_memory_r)})"
+        )
+
+    # Concurrency: derive ownership/GPU evidence from PERSISTED rows.
+    owned = 0
+    unique_runs: set = set()
+    gpu_owned = 0
+    for row in persisted_c:
+        ownership = row.get("ownership") or []
+        worker_pids = set(row.get("worker_pids") or ())
+        gpu_pids = set(row.get("gpu_compute_pids") or ())
+        mapped = {o.get("pid") for o in ownership if o.get("pid") is not None}
+        if mapped:
+            owned += 1
+            unique_runs |= {o.get("run_id") for o in ownership if o.get("pid") is not None}
+        if gpu_pids and gpu_pids.issubset(worker_pids):
+            gpu_owned += 1
+    max_gap = max(float(row.get("interval_s", 0.0)) for row in persisted_c)
+    max_concurrency = max(len(set(row.get("worker_pids") or ())) for row in persisted_c)
+
+    if owned == 0 or gpu_owned == 0 or not unique_runs:
+        raise SystemExit(
+            f"REMEDIATION FAILED: persisted ownership evidence missing "
+            f"(owned={owned}, gpu_owned={gpu_owned}, unique_runs={len(unique_runs)})"
+        )
+    if max_gap > h5.H5_MAX_SAMPLE_GAP_S:
+        raise SystemExit(f"REMEDIATION FAILED: persisted max sample gap {max_gap} > {h5.H5_MAX_SAMPLE_GAP_S}")
     if max_concurrency > h5.CONCURRENCY_BOUND:
-        raise SystemExit("REMEDIATION FAILED: concurrency bound exceeded")
-    if max_gap is None or max_gap > h5.H5_MAX_SAMPLE_GAP_S:
-        raise SystemExit(f"REMEDIATION FAILED: max sample gap {max_gap} > {h5.H5_MAX_SAMPLE_GAP_S}")
+        raise SystemExit(f"REMEDIATION FAILED: persisted max concurrency {max_concurrency} > {h5.CONCURRENCY_BOUND}")
+
+    # Resource: require usable persisted fields + at least one RSS/VmHWM sample.
+    required_resource_fields = (
+        "gpu_memory_used_mib", "gpu_memory_free_mib", "gpu_utilization_pct",
+        "cgroup_memory_current_bytes", "cgroup_clean_file_cache_bytes",
+        "cgroup_committed_floor_bytes", "cgroup_effective_headroom_bytes",
+        "cgroup_pressure_some_avg10", "cgroup_pressure_full_avg10",
+        "cgroup_events_max", "cgroup_events_oom", "cgroup_events_oom_kill",
+        "disk_free_bytes", "db_run_count",
+    )
+    for row in persisted_r:
+        missing = [f for f in required_resource_fields if f not in row]
+        if missing:
+            raise SystemExit(f"REMEDIATION FAILED: persisted resource sample missing fields: {missing}")
+    worker_evidence = sum(
+        1 for row in persisted_r
+        if row.get("worker_rss_kb") or row.get("worker_vmhwm_kb")
+    )
+    if worker_evidence == 0:
+        raise SystemExit("REMEDIATION FAILED: no persisted worker RSS/VmHWM evidence")
+
+    # Finding F: cgroup event deltas from the campaign baseline.
+    final_events = {
+        "cgroup_events_max": persisted_r[-1].get("cgroup_events_max", 0),
+        "cgroup_events_oom": persisted_r[-1].get("cgroup_events_oom", 0),
+        "cgroup_events_oom_kill": persisted_r[-1].get("cgroup_events_oom_kill", 0),
+    }
+    baseline = cgroup_events_baseline or {"max": 0, "oom": 0, "oom_kill": 0}
+    deltas = h5.cgroup_event_deltas(baseline=baseline, current=final_events)
+    if deltas["max"] != 0 or deltas["oom"] != 0 or deltas["oom_kill"] != 0:
+        raise SystemExit(f"REMEDIATION FAILED: cgroup event delta nonzero: {deltas}")
+
+    resource_span_s = (
+        float(persisted_r[-1]["timestamp"]) - float(persisted_r[0]["timestamp"])
+        if len(persisted_r) > 1 else 0.0
+    )
     return {
-        "concurrency_sample_count": len(samples),
-        "resource_sample_count": len(resource_monitor.samples),
+        "persisted_concurrency_sample_count": len(persisted_c),
+        "persisted_resource_sample_count": len(persisted_r),
+        "in_memory_concurrency_sample_count": len(in_memory_c),
+        "in_memory_resource_sample_count": len(in_memory_r),
         "owned_worker_samples": owned,
         "gpu_owned_samples": gpu_owned,
-        "unique_owned_run_ids": unique_runs,
+        "unique_owned_run_ids": len(unique_runs),
         "max_observed_concurrency": max_concurrency,
         "max_sample_gap_s": max_gap,
+        "worker_rss_or_vmhwm_samples": worker_evidence,
+        "cgroup_events_baseline": baseline,
+        "cgroup_events_final": final_events,
+        "cgroup_event_deltas": deltas,
+        "resource_sample_span_s": resource_span_s,
         "concurrency_monitor_failure": concurrency_monitor.thread_failure,
         "resource_monitor_failure": resource_monitor.thread_failure,
     }
@@ -116,7 +287,8 @@ def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
 def build_acceptance(*, experiment_id: str, terminal_summary: dict, items: list[dict],
                      attempts: dict, actual_runs: set, evaluation: dict,
                      cycle_stems, raw_evidence: dict, quiescence: dict,
-                     concurrency_artifact: Path, resource_artifact: Path) -> dict:
+                     concurrency_artifact: Path, resource_artifact: Path,
+                     campaign_wall_time_s: float | None = None) -> dict:
     """Pure, read-only acceptance builder.
 
     Performs NO experiment/run/attempt mutation and NO model inference. It only
@@ -147,6 +319,9 @@ def build_acceptance(*, experiment_id: str, terminal_summary: dict, items: list[
         "evaluated_16": evaluation["evaluated_recordings"] == 16,
         "missing_0": evaluation["missing_recordings"] == 0,
         "coverage_1": evaluation["coverage"] == 1.0,
+        "workload_identity_exact": (
+            workload_identity(terminal_summary) == expected_workload_identity()
+        ),
     }
     if not all(checks.values()):
         failed = {k: v for k, v in checks.items() if not v}
@@ -163,6 +338,7 @@ def build_acceptance(*, experiment_id: str, terminal_summary: dict, items: list[
         "completed_items": len(completed),
         "actual_runs": len(actual_runs),
         "actual_attempts": sum(len(v) for v in attempts.values()),
+        "workload_identity": workload_identity(terminal_summary),
         "evaluation": {
             "status": evaluation["status"],
             "evaluated_recordings": evaluation["evaluated_recordings"],
@@ -173,6 +349,7 @@ def build_acceptance(*, experiment_id: str, terminal_summary: dict, items: list[
         "db_checks": checks,
         "raw_evidence": raw_evidence,
         "gpu_quiescence": quiescence,
+        "campaign_wall_time_s": campaign_wall_time_s,
         "executions_consumed": 16,
         "historical_actual_before": 136,
         "final_actual_total": 152,
@@ -187,7 +364,9 @@ def build_acceptance(*, experiment_id: str, terminal_summary: dict, items: list[
 def read_terminal_acceptance(app, *, experiment_id: str, final_summary: dict,
                              cycle_stems, concurrency_monitor, resource_monitor,
                              concurrency_artifact: Path, resource_artifact: Path,
-                             quiescence: dict) -> dict:
+                             quiescence: dict, after_stop: dict,
+                             cgroup_events_baseline: dict,
+                             campaign_wall_time_s: float | None = None) -> dict:
     """Read-only post-run acceptance. Uses GET/DB reads ONLY (never POST /run)."""
     items = core.fetch_items(app, experiment_id)
     attempts: dict = {}
@@ -198,12 +377,16 @@ def read_terminal_acceptance(app, *, experiment_id: str, final_summary: dict,
         for attempt in item_attempts:
             actual_runs.add(attempt["analysis_run_id"])
     evaluation = core.fetch_evaluation(app, final_summary["dataset_evaluation_id"])
+    monitor_health = assert_monitors_healthy(after_stop, concurrency_monitor, resource_monitor)
     raw = assert_raw_evidence_quality(
         samples_path=concurrency_artifact,
         resource_path=resource_artifact,
         concurrency_monitor=concurrency_monitor,
         resource_monitor=resource_monitor,
+        cgroup_events_baseline=cgroup_events_baseline,
+        cgroup_events_final=None,
     )
+    raw["monitor_health"] = monitor_health
     return build_acceptance(
         experiment_id=experiment_id,
         terminal_summary=final_summary,
@@ -216,6 +399,7 @@ def read_terminal_acceptance(app, *, experiment_id: str, final_summary: dict,
         quiescence=quiescence,
         concurrency_artifact=concurrency_artifact,
         resource_artifact=resource_artifact,
+        campaign_wall_time_s=campaign_wall_time_s,
     )
 
 
@@ -273,11 +457,13 @@ def main(argv=None) -> int:
     resource_monitor.start()
 
     experiment_id = None
+    after_stop = {
+        "concurrency_thread_stopped": False,
+        "resource_thread_stopped": False,
+    }
     try:
-        experiment_id = core.create_experiment(
-            app, plugin_id=PLUGIN, name="Plan B H5 monitoring re-observation",
-            concurrency=h5.CONCURRENCY_BOUND,
-        )
+        # Finding D: exact H5_FULL dataset identity, never the generic "SpaceNet".
+        experiment_id = create_reobserve_experiment(app)
         concurrency_monitor.activate(experiment_id)
         resource_monitor.activate(experiment_id)
         from fastapi.testclient import TestClient
@@ -311,9 +497,13 @@ def main(argv=None) -> int:
     finally:
         concurrency_monitor.stop()
         resource_monitor.stop()
+        # Finding E: prove monitor threads actually terminated after stop().
+        after_stop["concurrency_thread_stopped"] = not concurrency_monitor.is_alive()
+        after_stop["resource_thread_stopped"] = not resource_monitor.is_alive()
 
     core.assert_no_orphans("H5 reobserve post-run")
     quiescent = core.assert_gpu_quiescent(baseline, label="H5 reobserve")
+    campaign_wall_time_s = time.time() - started_ts
 
     # Read-only acceptance: GET/DB reads ONLY. Never POST /run again.
     acceptance = read_terminal_acceptance(
@@ -326,6 +516,9 @@ def main(argv=None) -> int:
         concurrency_artifact=CONCURRENCY_ARTIFACT,
         resource_artifact=RESOURCE_ARTIFACT,
         quiescence=quiescent,
+        after_stop=after_stop,
+        cgroup_events_baseline=cgroup_baseline,
+        campaign_wall_time_s=campaign_wall_time_s,
     )
     ACCEPTANCE_ARTIFACT.write_text(
         json.dumps(acceptance, indent=2, sort_keys=True, default=str), encoding="utf-8"

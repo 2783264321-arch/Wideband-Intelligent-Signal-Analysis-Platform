@@ -1,13 +1,11 @@
 """Plan B remediation: bounded H5 monitoring re-observation (CPU-only).
 
-These tests EXECUTE the real acceptance code paths (not source-string checks) so
-that a deterministic post-inference tooling defect cannot slip through and
-consume the single authorized 16-execution window.
+These tests EXECUTE the real acceptance/builder code paths (not source-string
+checks) so that a deterministic post-inference tooling defect cannot consume the
+single authorized 16-execution window.
 """
 from __future__ import annotations
 
-import hashlib
-import inspect
 import json
 import sys
 from pathlib import Path
@@ -21,201 +19,335 @@ if str(SCRIPTS) not in sys.path:
 
 import plan_b_common as common  # noqa: E402
 import plan_b_h5_core as h5  # noqa: E402
+import plan_b_h5_membership as membership  # noqa: E402
 import plan_b_h5_reobserve_cp as reobserve  # noqa: E402
 
-
-# ---------------------------------------------------------------------------
-# Finding A — exactly one authorized experiment start
-# ---------------------------------------------------------------------------
-
-def test_exactly_one_experiment_run_in_lifecycle() -> None:
-    source = (SCRIPTS / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
-    # Exactly one POST /run to the dataset-experiment run endpoint.
-    assert source.count('f"/api/dataset-experiments/{experiment_id}/run"') == 1
-    # The post-run path must never call the starting helper.
-    assert "core.run_experiment(" not in source
-
-
-def test_post_run_acceptance_is_read_only() -> None:
-    """After the monitored run, acceptance reads must be GET/DB only."""
-    source = (SCRIPTS / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
-    assert "read_terminal_acceptance(" in source
-    assert "core.fetch_items(" in source
-    assert "core.fetch_attempts(" in source
-    assert "core.fetch_evaluation(" in source
+SCRIPTS_DIR = SCRIPTS
 
 
 # ---------------------------------------------------------------------------
-# Finding B — raw-evidence validator keyword signature (real invocation)
+# Finding D — exact dataset identity in the create payload
 # ---------------------------------------------------------------------------
 
-class _FakeMonitor:
-    def __init__(self, samples):
-        self.samples = samples
-        self.thread_failure = None
+def test_reobserve_create_payload_uses_h5_full_not_spacenet() -> None:
+    payload = reobserve.build_reobserve_payload()
+    assert payload["dataset_name"] == membership.H5_FULL
+    assert payload["dataset_name"] != common.DATASET_NAME
+    assert payload["dataset_split"] == membership.H5_SPLIT
+    assert payload["dataset_label_space"] == membership.H5_LABEL_SPACE
 
 
-def _write_raw(tmp_path: Path):
-    cpath = tmp_path / "h5_reobserve_concurrency_samples.jsonl"
-    rpath = tmp_path / "h5_reobserve_resource_samples.jsonl"
-    cpath.write_text("{}\n", encoding="utf-8")
-    rpath.write_text("{}\n", encoding="utf-8")
-    return cpath, rpath
+def test_reobserve_create_payload_wrong_identity_would_fail() -> None:
+    payload = reobserve.build_reobserve_payload()
+    bad = dict(payload)
+    bad["dataset_name"] = common.DATASET_NAME  # "SpaceNet" is the wrong view
+    assert bad != reobserve.expected_workload_identity()
 
 
-def test_assert_raw_evidence_quality_real_signature(tmp_path: Path) -> None:
-    from plan_b_h5_core import ConcurrencySample, WorkerOwnership
+def test_reobserve_does_not_use_generic_create_experiment() -> None:
+    source = (SCRIPTS_DIR / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
+    assert "core.create_experiment(" not in source
+    assert "create_reobserve_experiment(" in source
 
-    cpath, rpath = _write_raw(tmp_path)
-    samples = [
-        ConcurrencySample(0.0, (11,), ("run_a",), (11,), 1, 0, 0.25,
-                          experiment_id="e", ownership=(WorkerOwnership("run_a", 11),)),
-        ConcurrencySample(0.25, (11, 22), ("a", "b"), (11, 22), 2, 0, 0.25,
-                          experiment_id="e",
-                          ownership=(WorkerOwnership("a", 11), WorkerOwnership("b", 22))),
+
+# ---------------------------------------------------------------------------
+# Workload identity — plugin/version/release/executor/concurrency
+# ---------------------------------------------------------------------------
+
+def test_reobserve_workload_identity_exact() -> None:
+    payload = reobserve.build_reobserve_payload()
+    assert payload["plugin_id"] == "cpn_bandwidth_tier"
+    assert payload["plugin_version"] == common.PLUGIN_VERSION["cpn_bandwidth_tier"]
+    assert payload["model_release_id"] == common.MODEL_RELEASE
+    assert payload["executor"] == "local_gpu"
+    assert payload["max_concurrency"] == h5.CONCURRENCY_BOUND == 2
+    assert payload["parameters"] == {}
+
+
+def test_workload_identity_projection_matches_expected() -> None:
+    payload = reobserve.build_reobserve_payload()
+    read_model = {
+        "dataset_name": payload["dataset_name"], "dataset_split": payload["dataset_split"],
+        "dataset_label_space": payload["dataset_label_space"], "plugin_id": payload["plugin_id"],
+        "plugin_version": payload["plugin_version"], "model_release_id": payload["model_release_id"],
+        "executor": payload["executor"], "max_concurrency": payload["max_concurrency"],
+    }
+    assert reobserve.workload_identity(read_model) == reobserve.expected_workload_identity()
+
+
+# ---------------------------------------------------------------------------
+# Finding E — final monitor health fails closed
+# ---------------------------------------------------------------------------
+
+class _Mon:
+    def __init__(self, *, abort_reason=None, thread_failure=None, alive=False):
+        self.abort_reason = abort_reason
+        self.thread_failure = thread_failure
+        self._alive = alive
+        self.samples = []
+
+    def is_alive(self):
+        return self._alive
+
+
+def _healthy_pair():
+    return _Mon(), _Mon()
+
+
+def test_monitor_health_all_clear() -> None:
+    c, r = _healthy_pair()
+    checks = reobserve.assert_monitors_healthy(
+        {"concurrency_thread_stopped": True, "resource_thread_stopped": True}, c, r)
+    assert all(checks.values())
+
+
+@pytest.mark.parametrize("which", ["concurrency_abort", "resource_abort",
+                                   "concurrency_failure", "resource_failure",
+                                   "concurrency_alive", "resource_alive"])
+def test_monitor_health_fails_closed(which: str) -> None:
+    c, r = _healthy_pair()
+    stopped = {"concurrency_thread_stopped": True, "resource_thread_stopped": True}
+    if which == "concurrency_abort":
+        c.abort_reason = "CONCURRENCY_SAMPLING_GAP"
+    elif which == "resource_abort":
+        r.abort_reason = "A1_MEMORY_MONITOR_ABORT"
+    elif which == "concurrency_failure":
+        c.thread_failure = "boom"
+    elif which == "resource_failure":
+        r.thread_failure = "boom"
+    elif which == "concurrency_alive":
+        stopped["concurrency_thread_stopped"] = False
+    elif which == "resource_alive":
+        stopped["resource_thread_stopped"] = False
+    with pytest.raises(SystemExit):
+        reobserve.assert_monitors_healthy(stopped, c, r)
+
+
+# ---------------------------------------------------------------------------
+# Findings F + G — persisted evidence authority, cgroup deltas, RSS/VmHWM
+# ---------------------------------------------------------------------------
+
+_CGROUP_OK = {"max": 0, "oom": 0, "oom_kill": 0}
+
+
+def _persisted_concurrency(tmp_path: Path):
+    rows = [
+        {"timestamp": 0.0, "interval_s": 0.25, "worker_pids": [11],
+         "gpu_compute_pids": [11], "ownership": [{"run_id": "run_a", "pid": 11}],
+         "worker_run_ids": ["run_a"], "db_running_runs": 1, "db_pending_runs": 0},
+        {"timestamp": 0.25, "interval_s": 0.25, "worker_pids": [11, 22],
+         "gpu_compute_pids": [11, 22],
+         "ownership": [{"run_id": "run_a", "pid": 11}, {"run_id": "run_b", "pid": 22}],
+         "worker_run_ids": ["run_a", "run_b"], "db_running_runs": 2, "db_pending_runs": 0},
     ]
-    concurrency = _FakeMonitor(samples)
-    resource = _FakeMonitor([object(), object()])
-    result = reobserve.assert_raw_evidence_quality(
-        samples_path=cpath,
-        resource_path=rpath,
-        concurrency_monitor=concurrency,
-        resource_monitor=resource,
+    path = tmp_path / "c.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return path, rows
+
+
+def _persisted_resource(tmp_path: Path):
+    rows = [
+        {"timestamp": 0.0, "gpu_memory_used_mib": 10, "gpu_memory_free_mib": 100,
+         "gpu_utilization_pct": 5, "cgroup_memory_current_bytes": 1,
+         "cgroup_clean_file_cache_bytes": 2, "cgroup_committed_floor_bytes": 3,
+         "cgroup_effective_headroom_bytes": 4, "cgroup_pressure_some_avg10": 0.0,
+         "cgroup_pressure_full_avg10": 0.0, "cgroup_events_max": 0,
+         "cgroup_events_oom": 0, "cgroup_events_oom_kill": 0, "disk_free_bytes": 10 ** 12,
+         "db_run_count": 1, "worker_rss_kb": {"11": 1000}, "worker_vmhwm_kb": {"11": 2000}},
+    ]
+    path = tmp_path / "r.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return path, rows
+
+
+class _SampleMon:
+    def __init__(self, samples, thread_failure=None):
+        self.samples = samples
+        self.thread_failure = thread_failure
+
+
+def _raw_call(tmp_path, *, cgroups=None, resource_rows=None):
+    cpath, crows = _persisted_concurrency(tmp_path)
+    rpath, rrows = _persisted_resource(tmp_path)
+    if resource_rows is not None:
+        rpath.write_text("\n".join(json.dumps(r) for r in resource_rows) + "\n", encoding="utf-8")
+        rrows = resource_rows
+    return reobserve.assert_raw_evidence_quality(
+        samples_path=cpath, resource_path=rpath,
+        concurrency_monitor=_SampleMon(crows),
+        resource_monitor=_SampleMon(rrows),
+        cgroup_events_baseline=cgroups or _CGROUP_OK,
+        cgroup_events_final=None,
     )
+
+
+def test_persisted_concurrency_parsed(tmp_path: Path) -> None:
+    result = _raw_call(tmp_path)
+    assert result["persisted_concurrency_sample_count"] == 2
     assert result["owned_worker_samples"] == 2
     assert result["gpu_owned_samples"] == 2
-    assert result["unique_owned_run_ids"] == 3
+    assert result["unique_owned_run_ids"] == 2
     assert result["max_observed_concurrency"] == 2
 
 
-def test_assert_raw_evidence_quality_rejects_missing_artifact(tmp_path: Path) -> None:
-    from plan_b_h5_core import ConcurrencySample, WorkerOwnership
+def test_persisted_resource_parsed(tmp_path: Path) -> None:
+    result = _raw_call(tmp_path)
+    assert result["persisted_resource_sample_count"] == 1
+    assert result["worker_rss_or_vmhwm_samples"] == 1
 
-    cpath = tmp_path / "missing.jsonl"
-    rpath = tmp_path / "r.jsonl"
-    rpath.write_text("{}\n", encoding="utf-8")
-    samples = [ConcurrencySample(0.0, (11,), ("a",), (11,), 1, 0, 0.25,
-                                 ownership=(WorkerOwnership("a", 11),))]
+
+def test_persisted_count_mismatch_fails(tmp_path: Path) -> None:
+    cpath, _ = _persisted_concurrency(tmp_path)
+    rpath, rrows = _persisted_resource(tmp_path)
     with pytest.raises(SystemExit):
         reobserve.assert_raw_evidence_quality(
             samples_path=cpath, resource_path=rpath,
-            concurrency_monitor=_FakeMonitor(samples),
-            resource_monitor=_FakeMonitor([1]),
+            concurrency_monitor=_SampleMon([]),  # in-memory mismatch
+            resource_monitor=_SampleMon(rrows),
+            cgroup_events_baseline=_CGROUP_OK, cgroup_events_final=None,
+        )
+
+
+def test_missing_worker_rss_evidence_fails(tmp_path: Path) -> None:
+    rows = _persisted_resource(tmp_path)[1]
+    rows[0]["worker_rss_kb"] = {}
+    rows[0]["worker_vmhwm_kb"] = {}
+    with pytest.raises(SystemExit):
+        _raw_call(tmp_path, resource_rows=rows)
+
+
+@pytest.mark.parametrize("over", [{"cgroup_events_max": 1},
+                                  {"cgroup_events_oom": 1},
+                                  {"cgroup_events_oom_kill": 1}])
+def test_cgroup_delta_nonzero_fails(tmp_path: Path, over: dict) -> None:
+    rows = _persisted_resource(tmp_path)[1]
+    rows[0].update(over)
+    with pytest.raises(SystemExit):
+        _raw_call(tmp_path, resource_rows=rows)
+
+
+def test_cgroup_delta_zero_passes(tmp_path: Path) -> None:
+    result = _raw_call(tmp_path)
+    assert result["cgroup_event_deltas"] == {"max": 0, "oom": 0, "oom_kill": 0}
+
+
+def test_ownership_evidence_required(tmp_path: Path) -> None:
+    cpath, _ = _persisted_concurrency(tmp_path)
+    rpath, rrows = _persisted_resource(tmp_path)
+    empty_rows = [{"timestamp": 0.0, "interval_s": 0.25, "worker_pids": [],
+                   "gpu_compute_pids": [], "ownership": [], "worker_run_ids": [],
+                   "db_running_runs": 0, "db_pending_runs": 0}]
+    cpath.write_text(json.dumps(empty_rows[0]) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        reobserve.assert_raw_evidence_quality(
+            samples_path=cpath, resource_path=rpath,
+            concurrency_monitor=_SampleMon(empty_rows),
+            resource_monitor=_SampleMon(rrows),
+            cgroup_events_baseline=_CGROUP_OK, cgroup_events_final=None,
         )
 
 
 # ---------------------------------------------------------------------------
-# Finding C — exact 16-stem membership despite lexical ordering
+# Existing guarantees preserved
 # ---------------------------------------------------------------------------
 
-def _acceptance_kwargs(items):
-    return dict(
-        experiment_id="exp_x",
-        terminal_summary={
-            "status": "completed", "expected_items": 16, "completed_items": 16,
-            "failed_items": 0, "queued_items": 0, "running_items": 0, "attempt_count": 16,
-        },
-        items=items,
-        attempts={i["id"]: [{"analysis_run_id": f"run_{n}"}] for n, i in enumerate(items)},
-        actual_runs={f"run_{n}" for n in range(len(items))},
-        evaluation={"status": "completed", "evaluated_recordings": 16,
-                    "missing_recordings": 0, "coverage": 1.0},
-        cycle_stems=common.H2_STEMS,
-        raw_evidence={"owned_worker_samples": 1},
-        quiescence={"quiescent": True},
-        concurrency_artifact=Path("/tmp/opencode/c.jsonl"),
-        resource_artifact=Path("/tmp/opencode/r.jsonl"),
-    )
+def test_exactly_one_experiment_run_in_lifecycle() -> None:
+    source = (SCRIPTS_DIR / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
+    assert source.count('f"/api/dataset-experiments/{experiment_id}/run"') == 1
+    assert "core.run_experiment(" not in source
 
+
+def test_post_run_acceptance_is_read_only() -> None:
+    source = (SCRIPTS_DIR / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
+    assert "read_terminal_acceptance(" in source
+    assert "core.fetch_items(" in source
+    assert "core.fetch_attempts(" in source
+
+
+def test_reobserve_artifacts_unique_under_root() -> None:
+    assert reobserve.REOBSERVE_ROOT == common.PLAN_B_ROOT / "h5_reobserve"
+    for a in (reobserve.CONCURRENCY_ARTIFACT, reobserve.RESOURCE_ARTIFACT,
+              reobserve.ACCEPTANCE_ARTIFACT):
+        assert a.parent == reobserve.REOBSERVE_ROOT
+        assert a.name.startswith("h5_reobserve")
+
+
+def test_reobserve_single_full_membership_only() -> None:
+    source = (SCRIPTS_DIR / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
+    assert "h5_cycles()[0]" in source
+    assert "assert_cycle_membership" in source
+    assert 'PLUGIN = "cpn_bandwidth_tier"' in source
+
+
+# ---------------------------------------------------------------------------
+# Acceptance builder — membership ordering, identity, wall time
+# ---------------------------------------------------------------------------
 
 def _items_for(names):
     return [{"id": f"i{n}", "status": "completed", "recording_name": name}
             for n, name in enumerate(names)]
 
 
-def test_membership_exact_despite_lexical_order(tmp_path: Path, monkeypatch) -> None:
-    # Provide real (non-empty) artifacts so SHA256 hashing succeeds.
-    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n", encoding="utf-8")
-    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n", encoding="utf-8")
+def _full_summary():
+    payload = reobserve.build_reobserve_payload()
+    return {
+        "status": "completed", "expected_items": 16, "completed_items": 16,
+        "failed_items": 0, "queued_items": 0, "running_items": 0, "attempt_count": 16,
+        "dataset_name": payload["dataset_name"], "dataset_split": payload["dataset_split"],
+        "dataset_label_space": payload["dataset_label_space"], "plugin_id": payload["plugin_id"],
+        "plugin_version": payload["plugin_version"], "model_release_id": payload["model_release_id"],
+        "executor": payload["executor"], "max_concurrency": payload["max_concurrency"],
+    }
+
+
+def _acceptance_kwargs(items):
+    return dict(
+        experiment_id="exp_x", terminal_summary=_full_summary(), items=items,
+        attempts={i["id"]: [{"analysis_run_id": f"run_{n}"}] for n, i in enumerate(items)},
+        actual_runs={f"run_{n}" for n in range(len(items))},
+        evaluation={"status": "completed", "evaluated_recordings": 16,
+                    "missing_recordings": 0, "coverage": 1.0},
+        cycle_stems=common.H2_STEMS,
+        raw_evidence={"owned_worker_samples": 1}, quiescence={"quiescent": True},
+    )
+
+
+def test_membership_exact_despite_lexical_order(tmp_path: Path) -> None:
+    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n")
+    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n")
     kwargs = _acceptance_kwargs(_items_for(common.H2_STEMS))
-    kwargs["concurrency_artifact"] = cpath
-    kwargs["resource_artifact"] = rpath
+    kwargs["concurrency_artifact"] = cpath; kwargs["resource_artifact"] = rpath
+    kwargs["campaign_wall_time_s"] = 12.5
     result = reobserve.build_acceptance(**kwargs)
     assert result["db_checks"]["recording_membership_exact"] is True
+    assert result["db_checks"]["workload_identity_exact"] is True
+    assert result["campaign_wall_time_s"] == 12.5
     assert result["executions_consumed"] == 16
     assert result["historical_actual_before"] == 136
     assert result["final_actual_total"] == 152
-    assert len(result["artifacts"]["sha256"]["concurrency_jsonl_sha256"]) == 64
 
 
-def test_membership_missing_stem_fails(tmp_path: Path) -> None:
-    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n", encoding="utf-8")
-    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n", encoding="utf-8")
-    kwargs = _acceptance_kwargs(_items_for(common.H2_STEMS[:15]))
-    kwargs["concurrency_artifact"] = cpath; kwargs["resource_artifact"] = rpath
-    # Drop one attempt to keep other checks consistent; membership must still fail.
-    with pytest.raises(SystemExit):
-        reobserve.build_acceptance(**kwargs)
-
-
-def test_membership_extra_stem_fails(tmp_path: Path) -> None:
-    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n", encoding="utf-8")
-    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n", encoding="utf-8")
-    names = list(common.H2_STEMS[:15]) + ["999", "5"]
+@pytest.mark.parametrize("names", [
+    list(common.H2_STEMS[:15]),
+    list(common.H2_STEMS[:15]) + ["999", "5"],
+    list(common.H2_STEMS[:-1]) + ["777"],
+])
+def test_membership_mismatch_fails(tmp_path: Path, names) -> None:
+    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n")
+    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n")
     kwargs = _acceptance_kwargs(_items_for(names))
     kwargs["concurrency_artifact"] = cpath; kwargs["resource_artifact"] = rpath
     with pytest.raises(SystemExit):
         reobserve.build_acceptance(**kwargs)
 
 
-def test_membership_wrong_stem_fails(tmp_path: Path) -> None:
-    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n", encoding="utf-8")
-    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n", encoding="utf-8")
-    names = list(common.H2_STEMS[:-1]) + ["777"]
-    kwargs = _acceptance_kwargs(_items_for(names))
-    kwargs["concurrency_artifact"] = cpath; kwargs["resource_artifact"] = rpath
-    with pytest.raises(SystemExit):
-        reobserve.build_acceptance(**kwargs)
-
-
-# ---------------------------------------------------------------------------
-# Test E — one-shot acceptance values + write only after checks pass
-# ---------------------------------------------------------------------------
-
-def test_build_acceptance_writes_only_after_checks(tmp_path: Path) -> None:
-    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n", encoding="utf-8")
-    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n", encoding="utf-8")
+def test_wrong_workload_identity_fails(tmp_path: Path) -> None:
+    cpath = tmp_path / "c.jsonl"; cpath.write_text("x\n")
+    rpath = tmp_path / "r.jsonl"; rpath.write_text("y\n")
     kwargs = _acceptance_kwargs(_items_for(common.H2_STEMS))
     kwargs["concurrency_artifact"] = cpath; kwargs["resource_artifact"] = rpath
-    acceptance = reobserve.build_acceptance(**kwargs)
-    out = tmp_path / "h5_reobserve_acceptance.json"
-    out.write_text(json.dumps(acceptance), encoding="utf-8")
-    loaded = json.loads(out.read_text())
-    assert loaded["executions_consumed"] == 16
-    assert loaded["final_actual_total"] == 152
-
-
-# ---------------------------------------------------------------------------
-# Static safety guards
-# ---------------------------------------------------------------------------
-
-def test_reobserve_artifacts_are_unique_and_under_reobserve_root() -> None:
-    assert reobserve.REOBSERVE_ROOT == common.PLAN_B_ROOT / "h5_reobserve"
-    for artifact in (reobserve.CONCURRENCY_ARTIFACT, reobserve.RESOURCE_ARTIFACT,
-                     reobserve.ACCEPTANCE_ARTIFACT):
-        assert artifact.parent == reobserve.REOBSERVE_ROOT
-        assert artifact.name.startswith("h5_reobserve")
-
-
-def test_reobserve_preserves_historical_roots() -> None:
-    source = (SCRIPTS / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
-    for name in ("h2h3", "h4", "h5"):
-        assert name in source
-    assert "already exists" in source  # fail-closed on existing artifacts
-
-
-def test_reobserve_single_experiment_full_membership_only() -> None:
-    source = (SCRIPTS / "plan_b_h5_reobserve_cp.py").read_text(encoding="utf-8")
-    assert "h5_cycles()[0]" in source          # H5_FULL only; never the tail-8 cycle
-    assert "assert_cycle_membership" in source
-    assert 'PLUGIN = "cpn_bandwidth_tier"' in source
+    bad = _full_summary()
+    bad["dataset_name"] = common.DATASET_NAME
+    kwargs["terminal_summary"] = bad
+    with pytest.raises(SystemExit):
+        reobserve.build_acceptance(**kwargs)

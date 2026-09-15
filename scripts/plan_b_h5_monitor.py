@@ -131,6 +131,10 @@ class _MonitorBase:
         if self._thread is not None:
             self._thread.join(timeout=10)
 
+    def is_alive(self) -> bool:
+        """True if the monitor thread is still running (post-stop health check)."""
+        return self._thread is not None and self._thread.is_alive()
+
     def _record_failure(self, exc: BaseException) -> None:
         self.thread_failure = f"{type(exc).__name__}: {exc}"
         if self.abort_reason is None:
