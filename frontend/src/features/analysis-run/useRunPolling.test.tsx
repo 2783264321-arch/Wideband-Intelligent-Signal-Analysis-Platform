@@ -6,12 +6,14 @@ function Harness({
   runId,
   onRun,
   onDetections,
+  onError = () => {},
 }: {
   runId: string | undefined;
   onRun: (run: AnalysisRun) => void;
   onDetections: (detections: DetectionResult[]) => void;
+  onError?: (reason: unknown) => void;
 }) {
-  useRunPolling({ runId, onRun, onDetections });
+  useRunPolling({ runId, onRun, onDetections, onError });
   return null;
 }
 
@@ -176,3 +178,96 @@ test("unmount cancels polling", async () => {
 function runJson(id: string): Response {
   return jsonResponse(runWire("pending", id));
 }
+
+// ---------------------------------------------------------------------------
+// F2 polling corrective (Phase A)
+// ---------------------------------------------------------------------------
+
+test("serializes polling: at most one request in flight for a runId", async () => {
+  let runFetches = 0;
+  let resolveFirst: ((value: Response) => void) | undefined;
+  const firstDeferred = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/detections")) return jsonResponse([]);
+    runFetches += 1;
+    if (runFetches === 1) return firstDeferred;
+    return jsonResponse(runWire("pending", "run_1"));
+  }));
+  render(<Harness runId="run_1" onRun={vi.fn()} onDetections={vi.fn()} />);
+
+  await tick(); // first poll starts and is deferred
+  expect(runFetches).toBe(1);
+
+  // Advancing well beyond multiple intervals must NOT start overlapping polls.
+  await tick(5000);
+  expect(runFetches).toBe(1);
+
+  // Resolve first poll; only then may the next poll be scheduled.
+  await act(async () => {
+    resolveFirst?.(jsonResponse(runWire("pending", "run_1")));
+    await Promise.resolve();
+  });
+  await tick();
+  expect(runFetches).toBe(2);
+});
+
+test("completed fetches detections exactly once and never re-polls", async () => {
+  let runFetches = 0;
+  let detectionFetches = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/detections")) { detectionFetches += 1; return jsonResponse([{ id: "det_1" }]); }
+    runFetches += 1;
+    return jsonResponse(runWire("completed", "run_1"));
+  }));
+  const onDetections = vi.fn();
+  render(<Harness runId="run_1" onRun={vi.fn()} onDetections={onDetections} />);
+
+  await tick();
+  expect(runFetches).toBe(1);
+  expect(detectionFetches).toBe(1);
+  expect(onDetections).toHaveBeenCalledTimes(1);
+
+  await tick(6000);
+  expect(runFetches).toBe(1);
+  expect(detectionFetches).toBe(1);
+});
+
+test("a transient poll failure is surfaced and polling continues", async () => {
+  let runFetches = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/detections")) return jsonResponse([]);
+    runFetches += 1;
+    if (runFetches === 1) return new Response(JSON.stringify({ error: { code: "BOOM", message: "transient" } }), { status: 503 });
+    return jsonResponse(runWire("pending", "run_1"));
+  }));
+  const onError = vi.fn();
+  const onRun = vi.fn();
+  render(<Harness runId="run_1" onRun={onRun} onDetections={vi.fn()} onError={onError} />);
+
+  await tick();
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onRun).not.toHaveBeenCalled();
+
+  await tick();
+  expect(runFetches).toBe(2);
+  expect(onRun).toHaveBeenCalledTimes(1);
+});
+
+test("a detections failure after completion is surfaced and does not restart polling", async () => {
+  let runFetches = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/detections")) return new Response("nope", { status: 500 });
+    runFetches += 1;
+    return jsonResponse(runWire("completed", "run_1"));
+  }));
+  const onError = vi.fn();
+  const onDetections = vi.fn();
+  render(<Harness runId="run_1" onRun={vi.fn()} onDetections={onDetections} onError={onError} />);
+
+  await tick();
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onDetections).not.toHaveBeenCalled();
+
+  await tick(6000);
+  expect(runFetches).toBe(1);
+});

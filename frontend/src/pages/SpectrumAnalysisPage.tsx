@@ -115,6 +115,7 @@ export function SpectrumAnalysisPage() {
     runId: currentRun !== null && activeStatuses.has(currentRun.status) ? currentRun.id : undefined,
     onRun: setCurrentRun,
     onDetections: setDetections,
+    onError: (reason: unknown) => setError(reason instanceof Error ? reason.message : "Unable to poll analysis run."),
   });
 
   const selected = useMemo(() => detections.find((d) => d.id === selectedId), [detections, selectedId]);
