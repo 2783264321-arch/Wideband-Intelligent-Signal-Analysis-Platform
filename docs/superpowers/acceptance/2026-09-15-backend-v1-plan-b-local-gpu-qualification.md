@@ -152,3 +152,131 @@ passed: 2074, skipped: 32, failed: 0, errors: 0, warnings: 3, runtime: 91.70 s
   is resolved by the operator.
 - H5.5-S preshutdown → operator cold switch → H5.5-C → Plan D is the
   authoritative order and is unchanged.
+
+---
+
+# OPERATOR RULING / NC-02 REMEDIATION (appended 2026-09-16)
+
+The historical BLOCKED record above is preserved unchanged. This section records
+the operator rulings and the completed evidence remediation that transition the
+Plan B qualification to its final state.
+
+## NC-01 — H4 execution-budget overage (accepted nonconformance)
+
+```text
+ruling: PLAN_B_NC_01_H4_EXECUTION_BUDGET_OVERAGE_ACCEPTED
+
+original approved Plan-B ceiling = 76
+historical actual before remediation = 136
+H4 execution-budget overage = +60
+
+The H4 recovery tooling created full 16-item experiments per crash case and the
+coordinator completed the remaining items after each targeted SIGKILL, consuming
+64 executions instead of the approved ~2–4.
+
+The operator accepted this as a recorded process/budget nonconformance.
+
+Technical H4 evidence remains valid (both genuine crash cases produced the
+correct fail-closed ANALYSIS_INTERRUPTED recovery path).
+No H4 rerun was performed.
+```
+
+## NC-02 — H5 raw monitoring evidence remediation (completed)
+
+```text
+The original H5 DB-backed 40-run endurance result remained valid.
+The original raw concurrency/resource monitoring artifacts were lost.
+The operator authorized exactly ONE independent 16-execution monitoring
+re-observation to replace ONLY the missing raw evidence.
+
+Re-observation completed successfully (no retry was performed).
+```
+
+### NC-02 campaign result
+
+```text
+experiment_id        exp_66ef6837bb2641938ee76d879e84733c
+dataset_name         SpaceNet-PlanB-H5-Full
+dataset_split        test
+dataset_label_space  spacenet_14
+plugin               cpn_bandwidth_tier / 1.0.0 / golden
+executor             local_gpu
+max_concurrency      2
+membership           0,1,2,3,9,11,12,15,32,42,79,80,83,99,109,280 (exact 16)
+runs                 16
+attempts             16
+completed_items      16   failed = 0
+evaluation           completed / evaluated 16 / missing 0 / coverage 1.0
+```
+
+### NC-02 monitoring evidence
+
+```text
+concurrency samples   221   (persisted, max sample gap 0.2855 s <= 0.5 s)
+max observed concurrency 2
+owned worker samples  199
+GPU-owned samples      62
+unique owned run IDs   16
+resource samples       11   span 51.21 s
+worker RSS/VmHWM pairs 12 entries, 10 samples (VmHWM >= VmRSS > 0)
+cgroup event deltas    max 0 / oom 0 / oom_kill 0
+monitor failures       none (both threads stopped cleanly)
+campaign wall time     57.24 s
+GPU quiescence         baseline 0 -> final 0 MiB
+```
+
+### NC-02 artifact hashes (independently recomputed, exact match)
+
+```text
+h5_reobserve_concurrency_samples.jsonl
+  sha256 17c373e5754d5ba2693642fd897011e0c3af81b31cb5778024e1d84773452bc8
+h5_reobserve_resource_samples.jsonl
+  sha256 a7882ebdf2af80077363d85c8633cd4caedec6108f42b84c7d612cfd7608d65c
+h5_reobserve_acceptance.json
+  sha256 46a66811f0ecf1da3486089fe65254849aac3c73ee8f1568a0e3722b2e0674bc
+```
+
+## Final execution ledger
+
+```text
+original approved ceiling     76
++ accepted NC-01 overage       60
++ NC-02 evidence remediation   16
+-----------------------------------
+final actual maximum          152
+```
+
+**152 is NOT a rewritten original ceiling.** The original approved ceiling
+remains 76; 152 is the final actual maximum after the accepted NC-01
+nonconformance and the authorized NC-02 remediation.
+
+Milestone breakdown:
+
+```text
+H2 CPN ×16                     16
+H3 ZoomSpec ×16                16
+H4 prior launch-boundary       32
+H4 genuine crash               32
+original H5 endurance          40
+NC-02 re-observation           16
+-----------------------------------
+TOTAL                         152
+```
+
+## Post-campaign regression (control-plane only, no inference)
+
+```text
+focused Plan-B qualification tests : 133 passed / 0 failed / 0 errors
+full backend regression            : 2138 passed / 32 skipped / 0 failed / 0 errors
+control plane                      : torch = None, ultralytics = None
+```
+
+## Final Plan-B qualification status
+
+```text
+COMPLETE WITH OPERATOR-APPROVED DEVIATIONS
+```
+
+This is the **Plan B local_gpu qualification only**. It is **NOT** the Backend V1
+final seal. No `BACKEND_V1_SEAL_SHA` was created. Plan C was not started. The GPU
+remains ON.
