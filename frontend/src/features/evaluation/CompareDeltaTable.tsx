@@ -33,6 +33,8 @@ export function CompareDeltaTable({ result }: { result: DatasetBenchmarkCompareR
   useEffect(() => {
     if (!result.comparable) return undefined;
     let active = true;
+    // A new result invalidates any previously resolved shared-recording drilldown.
+    setShared(null);
     Promise.all([
       listDatasetBenchmarkItems(result.evaluationAId),
       listDatasetBenchmarkItems(result.evaluationBId),

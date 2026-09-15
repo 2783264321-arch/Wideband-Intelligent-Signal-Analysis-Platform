@@ -153,3 +153,60 @@ test("a successful retry notifies the parent with the backend-returned experimen
   expect(onRetryAccepted.mock.calls[0][0].status).toBe("evaluating");
   expect(urls.some((u) => u.includes("/api/dataset-experiments/exp_1/retry-evaluation"))).toBe(true);
 });
+
+// ---------------------------------------------------------------------------
+// Review corrective A1 — bind linked evaluation to the experiment lifecycle
+// ---------------------------------------------------------------------------
+
+test("refetches the linked evaluation when the experiment lifecycle changes (same id)", async () => {
+  let evalStatus = "failed";
+  let benchmarkFetches = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/api/dataset-benchmarks/")) {
+      benchmarkFetches += 1;
+      return new Response(JSON.stringify(evaluationWire({
+        status: evalStatus,
+        error_type: evalStatus === "failed" ? "BENCHMARK_FAILED" : null,
+        error_message: null,
+      })));
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+
+  const { rerender } = render(
+    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "failed" })} /></MemoryRouter>,
+  );
+  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("BENCHMARK_FAILED"));
+  const before = benchmarkFetches;
+
+  evalStatus = "completed";
+  rerender(
+    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
+  );
+  await waitFor(() => expect(benchmarkFetches).toBeGreaterThan(before));
+  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("completed"));
+});
+
+test("a lifecycle change clears a transient linked-evaluation error on success", async () => {
+  let failOnce = true;
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/api/dataset-benchmarks/")) {
+      if (failOnce) {
+        failOnce = false;
+        return new Response(JSON.stringify({ error: { code: "BOOM", message: "transient" } }), { status: 503 });
+      }
+      return new Response(JSON.stringify(evaluationWire({ status: "completed", error_type: null, error_message: null })));
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+
+  const { rerender } = render(
+    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "failed" })} /></MemoryRouter>,
+  );
+  await waitFor(() => expect(screen.getByText(/BOOM: transient/)).toBeInTheDocument());
+
+  rerender(
+    <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
+  );
+  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("completed"));
+});

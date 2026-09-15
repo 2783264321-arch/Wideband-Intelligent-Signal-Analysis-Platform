@@ -1,4 +1,4 @@
-import { Descriptions, Typography } from "antd";
+import { Descriptions, Table, Typography } from "antd";
 import type { DatasetEvaluation } from "../../api/types";
 
 function formatMetric(value: unknown): string {
@@ -25,6 +25,9 @@ export function EvaluationMetricsView({ evaluation }: { evaluation: DatasetEvalu
 
   const localization = aggregate.localization;
   const classification = aggregate.classificationOnMatched;
+  const perClass = evaluation.perClassMetrics ?? [];
+  const confusion = evaluation.confusion ?? [];
+  const inapplicable = `N/A — ${aggregate.classificationReason ?? "not applicable"}`;
 
   return (
     <div data-testid="evaluation-metrics-view">
@@ -39,11 +42,50 @@ export function EvaluationMetricsView({ evaluation }: { evaluation: DatasetEvalu
         {aggregate.classificationApplicable ? (
           <Descriptions.Item label="Matched accuracy">{formatMetric(classification?.matchedAccuracy)}</Descriptions.Item>
         ) : (
-          <Descriptions.Item label="Classification">
-            {`N/A — ${aggregate.classificationReason ?? "not applicable"}`}
-          </Descriptions.Item>
+          <Descriptions.Item label="Classification">{inapplicable}</Descriptions.Item>
         )}
       </Descriptions>
+      <Typography.Title level={5}>Per-class</Typography.Title>
+      {!aggregate.classificationApplicable ? (
+        <Typography.Text type="secondary">{inapplicable}</Typography.Text>
+      ) : perClass.length > 0 ? (
+        <Table
+          rowKey={(record) => String(record.classId)}
+          pagination={false}
+          size="small"
+          dataSource={perClass}
+          columns={[
+            { title: "Class", render: (_: unknown, record) => `${record.className} (${record.classId})` },
+            { title: "GT", dataIndex: "gtCount" },
+            { title: "Pred", dataIndex: "predictionCount" },
+            { title: "AP50", render: (_: unknown, record) => formatMetric(record.ap50) },
+            { title: "AP50:95", render: (_: unknown, record) => formatMetric(record.ap50_95) },
+            { title: "Precision", render: (_: unknown, record) => formatMetric(record.operating?.precision) },
+            { title: "Recall", render: (_: unknown, record) => formatMetric(record.operating?.recall) },
+            { title: "F1", render: (_: unknown, record) => formatMetric(record.operating?.f1) },
+          ]}
+        />
+      ) : (
+        <Typography.Text type="secondary">No per-class metrics available.</Typography.Text>
+      )}
+      <Typography.Title level={5}>Confusion</Typography.Title>
+      {!aggregate.classificationApplicable ? (
+        <Typography.Text type="secondary">{inapplicable}</Typography.Text>
+      ) : confusion.length > 0 ? (
+        <Table
+          rowKey={(record) => `${record.gtClassId}->${record.predClassId}`}
+          pagination={false}
+          size="small"
+          dataSource={confusion}
+          columns={[
+            { title: "GT class", render: (_: unknown, record) => `${record.gtClassName} (${record.gtClassId})` },
+            { title: "Predicted class", render: (_: unknown, record) => `${record.predClassName} (${record.predClassId})` },
+            { title: "Count", dataIndex: "count" },
+          ]}
+        />
+      ) : (
+        <Typography.Text type="secondary">No confusion data available.</Typography.Text>
+      )}
     </div>
   );
 }

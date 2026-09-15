@@ -30,6 +30,12 @@ export function ExperimentComparePanel() {
   );
   const options = eligible.map((experiment) => ({ value: experiment.id, label: experiment.name }));
 
+  // A comparison belongs to exactly one (A, B) identity; changing either selector
+  // invalidates the previously displayed result immediately.
+  useEffect(() => {
+    setResult(null);
+  }, [aId, bId]);
+
   const run = async () => {
     setError(null);
     const a = eligible.find((experiment) => experiment.id === aId);

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { CompareDeltaTable } from "./CompareDeltaTable";
 import type { DatasetBenchmarkCompareResult } from "../../api/types";
@@ -53,4 +53,36 @@ test("renders deltas with N/A for null and a shared-recording drilldown link", a
 
   const link = await screen.findByRole("link", { name: /Algorithm Lab/i });
   expect(link.getAttribute("href")).toBe("/algorithm-lab?recording=rec_1&runA=run_a&runB=run_b");
+});
+
+test("a new result clears the stale shared-recording drilldown immediately", async () => {
+  const r1: DatasetBenchmarkCompareResult = { ...result, evaluationAId: "eval_a", evaluationBId: "eval_b" };
+  const r2: DatasetBenchmarkCompareResult = { ...result, evaluationAId: "eval_c", evaluationBId: "eval_d" };
+  const item = (id: string, evaluationId: string, recordingId: string, runId: string) => ({
+    id, evaluation_id: evaluationId, manifest_order: 0, recording_id: recordingId,
+    recording_name: recordingId, analysis_run_id: runId, status: "included", gt_count: 1,
+    prediction_count: 1, error_reason: null,
+  });
+  let deferred = false;
+  let resolveDeferred: ((value: Response) => void) | undefined;
+  const pending = new Promise<Response>((resolve) => { resolveDeferred = resolve; });
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (deferred) return pending;
+    if (url.includes("/eval_a/items")) return new Response(JSON.stringify([item("i1", "eval_a", "rec_1", "run_a")]));
+    if (url.includes("/eval_b/items")) return new Response(JSON.stringify([item("i2", "eval_b", "rec_1", "run_b")]));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+
+  const { rerender } = render(<MemoryRouter><CompareDeltaTable result={r1} /></MemoryRouter>);
+  expect(await screen.findByRole("link", { name: /Algorithm Lab/i })).toBeInTheDocument();
+
+  deferred = true;
+  rerender(<MemoryRouter><CompareDeltaTable result={r2} /></MemoryRouter>);
+  expect(screen.queryByRole("link", { name: /Algorithm Lab/i })).toBeNull();
+
+  // Later authoritative R2 items resolve -> link may reappear.
+  await act(async () => {
+    resolveDeferred?.(new Response(JSON.stringify([])));
+    await Promise.resolve();
+  });
 });

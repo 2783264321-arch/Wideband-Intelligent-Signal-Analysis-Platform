@@ -30,11 +30,19 @@ export function LinkedEvaluationSummary({
   useEffect(() => {
     if (experiment.datasetEvaluationId === null) return undefined;
     let active = true;
+    // A lifecycle change (status or evaluation id) invalidates the previously
+    // displayed evaluation; do not show a stale failed evaluation for a new lifecycle.
+    setEvaluation(null);
+    setError(null);
     getDatasetBenchmark(experiment.datasetEvaluationId)
-      .then((next) => { if (active) setEvaluation(next); })
+      .then((next) => {
+        if (!active) return;
+        setError(null);
+        setEvaluation(next);
+      })
       .catch((reason: unknown) => { if (active) setError(toErrorText(reason)); });
     return () => { active = false; };
-  }, [experiment.datasetEvaluationId]);
+  }, [experiment.datasetEvaluationId, experiment.status]);
 
   if (experiment.datasetEvaluationId === null) {
     return null;
