@@ -5,7 +5,7 @@ import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection,
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
-import { optionsFromSelection } from "../features/execution-environment/executionEnvironment";
+import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
 import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
@@ -74,10 +74,14 @@ export function SpectrumAnalysisPage() {
   const [showPredictions, setShowPredictions] = useState(true);
   const [showGroundTruth, setShowGroundTruth] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Backend execution-environment projection (sole authority). Never computed client-side.
-  const [selection, setSelection] = useState<ExecutorSelection | null>(null);
+  // Backend execution-environment projection (sole authority), bound to the exact
+  // (recording, pipeline) scope identity that produced it.
+  const selectionScopeKey = scopeKeyFor(recordingId, pipelineId);
+  const [boundSelection, setBoundSelection] = useState<BoundExecutorSelection | null>(null);
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
+  // A stale selection (different scope) can never authorize the current request.
+  const effectiveSelection = effectiveSelectionForScope(boundSelection, selectionScopeKey);
   // User's explicit execution environment value. Auto stays Auto across the request boundary.
   const [environment, setEnvironment] = useState<ExecutionEnvironmentValue>({ mode: "auto", executor: null });
 
@@ -113,11 +117,12 @@ export function SpectrumAnalysisPage() {
   // for the previous pipeline is ignored (active flag torn down). Auto is reset to
   // avoid carrying a manual choice across pipelines.
   useEffect(() => {
-    setSelection(null);
+    setBoundSelection(null);
     setSelectionError(null);
     setSelectionLoading(false);
     setEnvironment({ mode: "auto", executor: null });
     if (!recording || !pipelines.length) return undefined;
+    const scopeKey = scopeKeyFor(recordingId, pipelineId);
     let active = true;
     setSelectionLoading(true);
     void getExecutorSelection({
@@ -126,7 +131,7 @@ export function SpectrumAnalysisPage() {
     })
       .then((result) => {
         if (!active) return;
-        setSelection(result);
+        setBoundSelection({ scopeKey, value: result });
       })
       .catch((reason: unknown) => {
         if (!active) return;
@@ -155,7 +160,7 @@ export function SpectrumAnalysisPage() {
   const selected = useMemo(() => detections.find((d) => d.id === selectedId), [detections, selectedId]);
   const runActive = currentRun ? activeStatuses.has(currentRun.status) : false;
 
-  const environmentOptions = useMemo(() => optionsFromSelection(selection), [selection]);
+  const environmentOptions = useMemo(() => optionsFromSelection(effectiveSelection), [effectiveSelection]);
   const selectedEnvironmentOption = useMemo(
     () => environmentOptions.find((option) => option.key === (environment.mode === "auto" ? "auto" : environment.executor)) ?? null,
     [environmentOptions, environment.mode, environment.executor],
@@ -215,7 +220,7 @@ export function SpectrumAnalysisPage() {
         </Space>
       </div>
       <ExecutionEnvironmentSelector
-        selection={selection}
+        selection={effectiveSelection}
         loading={selectionLoading}
         error={selectionError}
         value={environment}

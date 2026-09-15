@@ -132,3 +132,28 @@ export function executorLabel(executor: string | null): string | null {
   }
   return executor;
 }
+
+/**
+ * A backend selection bound to the exact scope identity (recording, pipeline) that
+ * produced it. Binding prevents a stale selection from authorizing a different scope.
+ */
+export interface BoundExecutorSelection {
+  scopeKey: string;
+  value: ExecutorSelection;
+}
+
+/** Stable scope identity for a recording + pipeline pair (no delimiter ambiguity). */
+export function scopeKeyFor(recordingId: string, pipelineId: string): string {
+  return JSON.stringify([recordingId, pipelineId]);
+}
+
+/**
+ * The only selection that may authorize/present execution environments for the
+ * current scope. A selection bound to any other scope (or absent) is discarded.
+ */
+export function effectiveSelectionForScope(
+  bound: BoundExecutorSelection | null,
+  scopeKey: string,
+): ExecutorSelection | null {
+  return bound !== null && bound.scopeKey === scopeKey ? bound.value : null;
+}

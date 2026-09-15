@@ -2,8 +2,10 @@ import type { ExecutionCandidate, ExecutorSelection } from "../../api/types";
 import {
   EXECUTOR_OPTIONS,
   autoOptionState,
+  effectiveSelectionForScope,
   optionStateFromCandidate,
   optionsFromSelection,
+  scopeKeyFor,
 } from "./executionEnvironment";
 
 function candidate(overrides: Partial<ExecutionCandidate> & { executor: string }): ExecutionCandidate {
@@ -115,4 +117,17 @@ test("Auto is unresolved while selection is still loading (null)", () => {
   const unresolved = autoOptionState(null);
   expect(unresolved.enabled).toBe(false);
   expect(unresolved.state).toBe("unresolved");
+});
+
+test("scopeKeyFor distinguishes recording and pipeline identity", () => {
+  expect(scopeKeyFor("rec_1", "pA")).not.toBe(scopeKeyFor("rec_1", "pB"));
+  expect(scopeKeyFor("rec_1", "pA")).not.toBe(scopeKeyFor("rec_2", "pA"));
+});
+
+test("a selection bound to another scope can never authorize the current scope", () => {
+  const bound = { scopeKey: scopeKeyFor("rec_1", "pA"), value: selection() };
+  expect(effectiveSelectionForScope(bound, scopeKeyFor("rec_1", "pB"))).toBeNull();
+  expect(effectiveSelectionForScope(bound, scopeKeyFor("rec_2", "pA"))).toBeNull();
+  expect(effectiveSelectionForScope(bound, scopeKeyFor("rec_1", "pA"))).not.toBeNull();
+  expect(effectiveSelectionForScope(null, scopeKeyFor("rec_1", "pA"))).toBeNull();
 });
