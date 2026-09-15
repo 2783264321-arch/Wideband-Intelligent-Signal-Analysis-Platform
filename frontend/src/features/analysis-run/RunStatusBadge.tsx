@@ -1,12 +1,5 @@
 import { Space, Tag, Typography } from "antd";
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: "Pending",
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
-  interrupted: "Interrupted",
-};
+import { describeReasonCode, describeRunStatus } from "./statusModel";
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "default",
@@ -34,7 +27,7 @@ function nonEmptyString(value: unknown): string | null {
  * (never "Failed") with the raw code and message preserved.
  */
 export function RunStatusBadge({ status, errorType, errorMessage }: RunStatusBadgeProps) {
-  const label = STATUS_LABELS[status] ?? status;
+  const label = describeRunStatus(status);
   const code = nonEmptyString(errorType);
   const message = nonEmptyString(errorMessage);
 
@@ -43,6 +36,9 @@ export function RunStatusBadge({ status, errorType, errorMessage }: RunStatusBad
       <Tag color={STATUS_COLORS[status] ?? "default"}>{label}</Tag>
       {code !== null ? (
         <Typography.Text code data-testid="run-error-code">{code}</Typography.Text>
+      ) : null}
+      {code !== null && describeReasonCode(code) !== code ? (
+        <Typography.Text type="secondary">{describeReasonCode(code)}</Typography.Text>
       ) : null}
       {message !== null ? <Typography.Text type="danger">{message}</Typography.Text> : null}
     </Space>

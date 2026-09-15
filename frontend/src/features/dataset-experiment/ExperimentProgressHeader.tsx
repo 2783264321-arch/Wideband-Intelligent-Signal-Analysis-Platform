@@ -1,14 +1,6 @@
 import { Space, Tag, Typography } from "antd";
 import type { DatasetExperiment } from "../../api/types";
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: "Pending",
-  running: "Running",
-  evaluating: "Evaluating",
-  completed: "Completed",
-  completed_with_failures: "Completed with failures",
-  failed: "Failed",
-};
+import { describeExperimentStatus, describeReasonCode } from "../analysis-run/statusModel";
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "default",
@@ -34,7 +26,7 @@ export function ExperimentProgressHeader({ experiment }: { experiment: DatasetEx
     <Space direction="vertical" size={4} data-testid="experiment-progress-header">
       <Space size={8} wrap>
         <Tag color={STATUS_COLORS[experiment.status] ?? "default"}>
-          {STATUS_LABELS[experiment.status] ?? experiment.status}
+          {describeExperimentStatus(experiment.status)}
         </Tag>
         <Typography.Text>Executor: {experiment.executor}</Typography.Text>
         {requestedMode !== null ? <Typography.Text type="secondary">Mode: {requestedMode}</Typography.Text> : null}
@@ -55,6 +47,9 @@ export function ExperimentProgressHeader({ experiment }: { experiment: DatasetEx
       {autoReason !== null ? <Typography.Text type="secondary">{autoReason}</Typography.Text> : null}
       {errorType !== null ? (
         <Typography.Text code data-testid="experiment-error-code">{errorType}</Typography.Text>
+      ) : null}
+      {errorType !== null && describeReasonCode(errorType) !== errorType ? (
+        <Typography.Text type="secondary">{describeReasonCode(errorType)}</Typography.Text>
       ) : null}
       {errorMessage !== null ? <Typography.Text type="danger">{errorMessage}</Typography.Text> : null}
     </Space>
