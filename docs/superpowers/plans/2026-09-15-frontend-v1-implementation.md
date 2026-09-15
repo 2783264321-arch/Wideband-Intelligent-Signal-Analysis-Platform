@@ -73,8 +73,8 @@ New production files (each with a single responsibility):
 ```text
 frontend/src/features/execution-environment/types.ts                 selector value/state types (re-exported domain types)
 frontend/src/features/execution-environment/ExecutionEnvironmentSelector.tsx   reusable selector
-frontend/src/features/execution-environment/executionEnvironment.ts  pure helpers: option state, request builder
-frontend/src/features/analysis-run/AnalysisRunForm.tsx               create-run form composition
+frontend/src/features/execution-environment/executionEnvironment.ts  pure helpers: option state enumeration/mapping
+frontend/src/features/analysis-run/requestBuilder.ts                 pure helper: buildAnalysisRunRequest (camelCase domain)
 frontend/src/features/analysis-run/RunStatusBadge.tsx                status badge + bounded error
 frontend/src/features/analysis-run/RunProvenanceCard.tsx             resolved executor + mode/reason provenance
 frontend/src/features/analysis-run/useRunPolling.ts                  polling lifecycle hook
@@ -101,6 +101,7 @@ frontend/src/features/execution-environment/ExecutionEnvironmentSelector.test.ts
 frontend/src/features/analysis-run/analysisRun.test.ts
 frontend/src/features/analysis-run/useRunPolling.test.tsx
 frontend/src/features/analysis-run/RunStatusBadge.test.tsx
+frontend/src/features/analysis-run/RunProvenanceCard.test.tsx
 frontend/src/features/dataset-experiment/experimentContract.test.ts
 frontend/src/features/dataset-experiment/ExperimentCreateForm.test.tsx
 frontend/src/features/dataset-experiment/ExperimentList.test.tsx
@@ -111,7 +112,7 @@ frontend/src/features/evaluation/EvaluationMetricsView.test.tsx
 frontend/src/features/evaluation/ExperimentComparePanel.test.tsx
 frontend/src/features/evaluation/CompareDeltaTable.test.tsx
 frontend/src/app/navigation.test.tsx
-frontend/src/api/v1Contract.test.ts
+frontend/src/api/v1Contract.ts                 (type-consumption fixture; compiled by `tsc -b`, not a Vitest test)
 ```
 
 Do NOT reorganize the entire frontend; do not move existing folders except the
@@ -153,12 +154,14 @@ export type ExecutionSelectionScope =
   | { kind: "recording"; recordingId: string }
   | { kind: "dataset"; datasetName: string; datasetSplit: string; datasetLabelSpace: string };
 
+// Public/domain request types are camelCase. snake_case exists ONLY in the
+// private wire bodies inside api/client.ts (camelCase → wire translation).
 export interface AnalysisRunCreateRequest {
-  recording_id: string;
-  pipeline_id: string;
+  recordingId: string;
+  pipelineId: string;
   executor?: string;
-  execution_mode?: ExecutionMode;
-  model_release_id?: string | null;
+  executionMode?: ExecutionMode;
+  modelReleaseId?: string | null;
   parameters: Record<string, unknown>;
 }
 
@@ -180,7 +183,7 @@ export interface DatasetExperimentAttempt {
   id: string;
   experimentItemId: string;
   attemptNumber: number;
-  analysisRunId: string | null;
+  analysisRunId: string;         // mandatory in the backend Attempt read model
   launchRequestedAt: string | null;
   createdAt: string | null;
 }
@@ -191,27 +194,37 @@ export interface DatasetExperiment {
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
+  recordingManifestHash: string;
+
   pluginId: string;
   pluginVersion: string;
   modelReleaseId: string | null;
   assetManifestSha256: string | null;
+  parameters: Record<string, unknown>;
+
+  executor: string;              // frozen concrete execution identity
+
+  evaluationProtocol: string;
+  maxConcurrency: number;
+
   status: string;                // pending|running|evaluating|completed|completed_with_failures|failed
   datasetEvaluationId: string | null;
+
   errorType: string | null;
   errorMessage: string | null;
-  requestedExecutionMode: ExecutionMode;
+
+  requestedExecutionMode: ExecutionMode | null;
   autoReasonCode: string | null;
   autoReason: string | null;
   workloadClass: string | null;
+
   expectedItems: number;
   queuedItems: number;
   runningItems: number;
   completedItems: number;
   failedItems: number;
   attemptCount: number;
-  evaluationProtocol: string;
-  maxConcurrency: number;
-  parameters: Record<string, unknown>;
+
   createdAt: string | null;
   startedAt: string | null;
   completedAt: string | null;
@@ -219,17 +232,17 @@ export interface DatasetExperiment {
 
 export interface DatasetExperimentCreateRequest {
   name: string;
-  dataset_name: string;
-  dataset_split: string;
-  dataset_label_space: string;
-  plugin_id: string;
-  plugin_version: string;
-  execution_mode: ExecutionMode;
+  datasetName: string;
+  datasetSplit: string;
+  datasetLabelSpace: string;
+  pluginId: string;
+  pluginVersion: string;
+  executionMode: ExecutionMode;
   executor?: string;
-  model_release_id?: string | null;
+  modelReleaseId?: string | null;
   parameters: Record<string, unknown>;
-  evaluation_protocol: string;
-  max_concurrency: number;
+  evaluationProtocol: string;
+  maxConcurrency: number;
 }
 ```
 
@@ -264,6 +277,40 @@ Existing functions retained unchanged: `getExecutorAvailability` (recording-scop
 `listPipelines`, `getAnalysisRun`, `listAnalysisRuns`, `getDetections`,
 `getSpectrogram`, `getRecording`, `getGroundTruth`, dataset-benchmark evaluation
 functions, `compareAnalysisRuns`, `PlatformApiError`.
+
+Private wire request bodies (defined inside `api/client.ts` only; NOT exported to
+features/pages):
+
+```ts
+interface AnalysisRunCreateWire {
+  recording_id: string;
+  pipeline_id: string;
+  executor?: string;
+  execution_mode?: ExecutionMode;
+  model_release_id?: string | null;
+  parameters: Record<string, unknown>;
+}
+
+interface DatasetExperimentCreateWire {
+  name: string;
+  dataset_name: string;
+  dataset_split: string;
+  dataset_label_space: string;
+  plugin_id: string;
+  plugin_version: string;
+  execution_mode: ExecutionMode;
+  executor?: string;
+  model_release_id?: string | null;
+  parameters: Record<string, unknown>;
+  evaluation_protocol: string;
+  max_concurrency: number;
+}
+```
+
+`createAnalysisRun()` and `createDatasetExperiment()` translate the camelCase
+domain request into the private wire body. `buildAnalysisRunRequest()` and
+`toCreateRequest()` return **domain camelCase** request objects, never wire
+objects.
 
 `frontend/src/features/execution-environment/types.ts`:
 
@@ -345,11 +392,12 @@ export function toCreateRequest(value: ExperimentFormValue): import("../../api/t
 - [ ] Step 4: if baseline fails, STOP implementation and report; otherwise proceed
 - [ ] Step 5: commit — none (evidence recorded in the task report; no file change)
 
-### F0.2 V1 contracts in API/types
+### F0.2 V1 contract + domain types (compile-verified)
 
 **Files:**
 - Modify: `frontend/src/api/types.ts`
-- Test: `frontend/src/api/v1Contract.test.ts`
+- Test: `frontend/src/api/v1Contract.ts` (a type-consumption fixture compiled by
+  `tsc -b`; not a runtime Vitest test)
 
 **Interfaces:**
 - Consumes: backend wire shapes at `d4b22ee`.
@@ -358,62 +406,58 @@ export function toCreateRequest(value: ExperimentFormValue): import("../../api/t
   `DatasetExperimentItem`, `DatasetExperimentAttempt`, `DatasetExperiment`,
   `DatasetExperimentCreateRequest` (exact fields per Interface Ledger).
 
-- [ ] Step 1: write failing tests asserting the exported types exist with the
-  exact camelCase fields (compile-time presence + runtime object shape for mappers)
-- [ ] Step 2: run `cd frontend; npx vitest run src/api/v1Contract.test.ts`; expected
-  RED: missing exports / type errors
+Type-only RED/GREEN uses the TypeScript compiler, not Vitest (Vitest/esbuild does
+not typecheck). `tsconfig.app.json` includes the whole `src`, so compile errors
+surface through `npm run build` (`tsc -b`).
+
+- [ ] Step 1: add a type-consumption fixture `frontend/src/api/v1Contract.ts`
+  that imports the intended names and constructs representative objects
+  (camelCase fields, `requestedExecutionMode: ExecutionMode | null`,
+  `DatasetExperimentAttempt.analysisRunId: string`, concrete
+  `DatasetExperiment.executor: string`)
+- [ ] Step 2: run `cd frontend; npm run build`; expected RED = TypeScript compile
+  failure due to missing type exports / incompatible object shape
 - [ ] Step 3: add the interfaces exactly as in the Interface Ledger (no extra
-  authority fields; derive nothing)
-- [ ] Step 4: run focused test; expect PASS
-- [ ] Step 5: run `npm test -- --run` for the surrounding suite; expect PASS
+  authority fields; derive nothing; do NOT export `runtime_descriptor_json`)
+- [ ] Step 4: run `cd frontend; npm run build`; expect GREEN (exit 0)
+- [ ] Step 5: run `cd frontend; npm test -- --run` for the surrounding suite;
+  expect no regressions
 - [ ] Step 6: commit `feat(frontend): add frontend v1 contract types`
-
-### F0.3 Contract guardrails
-
-**Files:**
-- Modify: `frontend/src/api/client.ts`
-- Test: `frontend/src/api/client.test.ts`
-
-**Interfaces:**
-- Consumes: `ExecutionSelectionScope`.
-- Produces: `assertSelectionScope(scope): void` (internal) that rejects mixed or
-  empty scope before request construction; `PlatformApiError` preserved on
-  non-2xx.
-
-- [ ] Step 1: write failing tests: recording scope and dataset scope map to the
-  correct query params; a scope with neither or both is rejected before any
-  `fetch` call; a 400 body `{error:{code,message,details}}` produces a
-  `PlatformApiError` with the same code/message/details
-- [ ] Step 2: run focused test; expected RED
-- [ ] Step 3: implement `assertSelectionScope` and the error-preservation path
-- [ ] Step 4: focused test PASS
-- [ ] Step 5: `npm test -- --run`
-- [ ] Step 6: commit `feat(frontend): enforce execution selection scope guardrails`
 
 ---
 
 ## Part II — F1 Execution Environment Foundations
 
-### F1.1 `getExecutorSelection` client + mapping
+### F1.1 `getExecutorSelection` client + scope guardrails + mapping
 
 **Files:**
 - Modify: `frontend/src/api/client.ts`
 - Test: `frontend/src/api/client.test.ts`
 
 **Interfaces:**
-- Consumes: `ExecutionSelectionScope`, `ExecutorSelection`, `ExecutionCandidate`.
-- Produces: `getExecutorSelection({ scope, pipelineId, modelReleaseId? })`.
+- Consumes: `ExecutionSelectionScope`, `ExecutorSelection`, `ExecutionCandidate`,
+  `PlatformApiError`.
+- Produces: `getExecutorSelection({ scope, pipelineId, modelReleaseId? })` and the
+  internal `assertSelectionScope(scope)` used before request construction.
+
+This task owns the whole executor-selection client concern so F0 never tests a
+function that does not yet exist. The discriminated `ExecutionSelectionScope`
+union gives compile-time scope safety; `assertSelectionScope` is the runtime guard
+for malformed JS/casts.
 
 - [ ] Step 1: failing tests — recording scope calls
   `/api/executor-selection?recording_id=…&pipeline_id=…`; dataset scope calls
   `…?dataset_name=…&dataset_split=…&dataset_label_space=…&pipeline_id=…`;
-  optional `model_release_id` included only when provided; response maps
-  snake_case → camelCase including `candidates` with
-  `technical/configured/certified/available/reason_code/reason_message`
-- [ ] Step 2: RED
-- [ ] Step 3: implement `getExecutorSelection` + `mapExecutorSelection`
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+  optional `model_release_id` included only when provided; a scope with neither or
+  both members is rejected before any `fetch` call; a non-2xx
+  `{error:{code,message,details}}` produces a `PlatformApiError` preserving
+  code/message/details; response maps snake_case → camelCase including
+  `candidates` with `technical/configured/certified/available/reason_code/reason_message`
+- [ ] Step 2: run `cd frontend; npm test -- --run src/api/client.test.ts`; expected RED
+- [ ] Step 3: implement `assertSelectionScope`, `getExecutorSelection`, and
+  `mapExecutorSelection`
+- [ ] Step 4: run `cd frontend; npm test -- --run src/api/client.test.ts`; PASS
+- [ ] Step 5: run `cd frontend; npm test -- --run`; expect no regressions
 - [ ] Step 6: commit `feat(frontend): add executor selection client`
 
 ### F1.2 `ExecutionEnvironmentSelector`
@@ -451,24 +495,28 @@ export function toCreateRequest(value: ExperimentFormValue): import("../../api/t
 ### F1.3 Request semantics (manual vs auto)
 
 **Files:**
-- Create: `frontend/src/features/analysis-run/AnalysisRunForm.tsx`
+- Create: `frontend/src/features/analysis-run/requestBuilder.ts` (pure helper;
+  no `AnalysisRunForm.tsx` component is planned — behavior is composed directly by
+  `SpectrumAnalysisPage`, so YAGNI applies)
 - Modify: `frontend/src/api/client.ts` (`createAnalysisRun` signature change)
 - Test: `frontend/src/features/analysis-run/analysisRun.test.ts`,
   `frontend/src/api/client.test.ts`
 
 **Interfaces:**
 - Consumes: `ExecutionEnvironmentValue`, `AnalysisRunCreateRequest`.
-- Produces: `buildAnalysisRunRequest({ recordingId, pipelineId, environment, modelReleaseId? }): AnalysisRunCreateRequest`.
+- Produces: `buildAnalysisRunRequest({ recordingId, pipelineId, environment, modelReleaseId? }): AnalysisRunCreateRequest` (domain camelCase).
 
 - [ ] Step 1: failing tests: manual → `{executor:"local_cpu"}` and NO
-  `execution_mode:"auto"`; manual `local_gpu`/`remote_gpu` identical shape; auto →
-  `{execution_mode:"auto"}` and NO `executor`; `parameters` always `{}`;
-  `createAnalysisRun(request)` posts the request object unchanged
-- [ ] Step 2: RED
-- [ ] Step 3: implement `buildAnalysisRunRequest`; change `createAnalysisRun`
-  signature to accept `AnalysisRunCreateRequest`; update all callers
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+  `executionMode:"auto"`; manual `local_gpu`/`remote_gpu` identical shape; auto →
+  `{executionMode:"auto"}` and NO `executor`; `parameters` always `{}`;
+  `createAnalysisRun(request)` translates the camelCase domain request into the
+  private snake_case wire body and posts it
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/analysis-run/analysisRun.test.ts`; RED
+- [ ] Step 3: implement `buildAnalysisRunRequest`; implement the client-side
+  camelCase→wire translation and change `createAnalysisRun` signature to accept
+  `AnalysisRunCreateRequest`; update all callers
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): enforce manual/auto request semantics`
 
 ### F1.4 Retire client-side executor policy
@@ -611,13 +659,15 @@ environment foundation before F2).
   Interface Ledger).
 
 - [ ] Step 1: failing mapping tests for each function (snake_case → camelCase),
-  including counters, `requested_execution_mode`, `auto_reason_code`,
-  `workload_class`, `model_release_id`, `asset_manifest_sha256`, item statuses,
-  attempt fields
-- [ ] Step 2: RED
-- [ ] Step 3: implement client + mappers
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+  including `recording_manifest_hash`, the concrete `executor`,
+  `requested_execution_mode` (nullable), `auto_reason_code`, `auto_reason`,
+  `workload_class`, `model_release_id`, `asset_manifest_sha256`, counters, item
+  statuses, and attempt fields (mandatory `analysis_run_id`); `runtime_descriptor_json`
+  is NOT surfaced in the domain type
+- [ ] Step 2: run `cd frontend; npm test -- --run src/api/client.test.ts`; RED
+- [ ] Step 3: implement client + mappers (camelCase domain; private wire types)
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add dataset experiment client`
 
 ### F3.2 Routes + navigation shell
@@ -679,19 +729,21 @@ environment foundation before F2).
   `createDatasetExperiment`, `toCreateRequest`.
 - Produces: `ExperimentFormValue`, `toCreateRequest`, `ExperimentCreateForm`.
 
-- [ ] Step 1: failing tests: form posts `dataset_name`/`dataset_split`/
-  `dataset_label_space` exactly as entered; `parameters` is `{}`;
-  `evaluation_protocol` and `max_concurrency` sent; manual environment sends
-  `executor` with no `execution_mode:"auto"`; auto environment sends
-  `execution_mode:"auto"` with no `executor`; does NOT send
+- [ ] Step 1: failing tests: `toCreateRequest` returns a camelCase domain
+  request with `datasetName`/`datasetSplit`/`datasetLabelSpace` exactly as
+  entered; `parameters` is `{}`; `evaluationProtocol` and `maxConcurrency` set;
+  manual environment sets `executor` and no `executionMode:"auto"`; auto
+  environment sets `executionMode:"auto"` and no `executor`; the client-translated
+  wire body contains `dataset_name`/`dataset_split`/`dataset_label_space`
+  (`plugin_id`/`plugin_version`) and does NOT contain
   `recording_manifest_hash`/`asset_manifest_sha256`/`runtime_descriptor_json`;
-  `model_release_id` omitted unless supplied externally; NO hardcoded
+  `modelReleaseId` omitted unless supplied externally; NO hardcoded
   `SpaceNet`/`test`/`spacenet_14`
-- [ ] Step 2: RED
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/dataset-experiment/ExperimentCreateForm.test.tsx`; RED
 - [ ] Step 3: implement; call `getExecutorSelection` with dataset scope for the
   selector; never call `getExecutorAvailability`
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add dataset experiment create form`
 
 ### F3.5 Run / start lifecycle
@@ -723,18 +775,24 @@ environment foundation before F2).
 - Test: `frontend/src/features/dataset-experiment/ExperimentDetail.test.tsx`
 
 **Interfaces:**
-- Consumes: `getDatasetExperiment`, counters, `status`, `errorType`.
-- Produces: progress header (status badge + counters) and detail composition.
+- Consumes: `getDatasetExperiment`, counters, `status`, the concrete `executor`,
+  `requestedExecutionMode`/`autoReasonCode`/`autoReason`/`workloadClass`,
+  `errorType`.
+- Produces: progress header (status badge + counters + frozen executor) and detail
+  composition.
 
 - [ ] Step 1: failing tests: renders statuses
   `pending|running|evaluating|completed|completed_with_failures|failed`;
   renders counters `expected/queued/running/completed/failed/attempt_count` as
-  provided (never recomputed as authority); renders bounded `errorType` on
-  failure; polling continues while non-terminal and stops on terminal
-- [ ] Step 2: RED
+  provided (never recomputed as authority); renders the concrete `executor`
+  (frozen execution identity) and, when present, `requestedExecutionMode` +
+  `autoReasonCode`/`autoReason`; handles `requestedExecutionMode === null`;
+  renders bounded `errorType` on failure; polling continues while non-terminal and
+  stops on terminal
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/dataset-experiment/ExperimentDetail.test.tsx`; RED
 - [ ] Step 3: implement
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add experiment detail and progress`
 
 ### F3.7 Item table
@@ -770,15 +828,24 @@ environment foundation before F2).
   `retryFailedDatasetExperimentItems`.
 - Produces: per-item attempt timeline; retry action refreshes.
 
-- [ ] Step 1: failing tests: attempts render `attemptNumber` and linked run;
-  retry-failed calls the client and refreshes; launch-ambiguous state
-  (`latestAnalysisRunId === null` with `launchRequestedAt` set) is surfaced with
-  a bounded code, not hidden
-- [ ] Step 2: RED
-- [ ] Step 3: implement
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+`DatasetExperimentAttempt.analysisRunId` is mandatory; `latestAnalysisRunId` is
+derived from the newest attempt. Launch ambiguity is NEVER inferred locally from a
+missing run id.
+
+- [ ] Step 1: failing tests: an attempt renders `attemptNumber`,
+  `analysisRunId` and `launchRequestedAt`, and links to the AnalysisRun; retry-
+  failed calls the client and refreshes the experiment; the component never
+  computes an ambiguity state from a null run id
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/dataset-experiment/AttemptTimeline.test.tsx`; RED
+- [ ] Step 3: implement (display + link only; no local ambiguity inference)
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add experiment attempts and retry`
+
+Launch ambiguity is surfaced only from authoritative backend state: an
+`AnalysisRun.errorType === "ANALYSIS_LAUNCH_AMBIGUOUS"` (status `interrupted`),
+or an item-level bounded error projection if one is actually returned. F3 does not
+manufacture that state locally.
 
 ### F3.9 Linked evaluation entry
 
@@ -816,21 +883,25 @@ environment foundation before F2).
 - Test: `frontend/src/features/evaluation/EvaluationMetricsView.test.tsx`
 
 **Interfaces:**
-- Consumes: `DatasetEvaluation` (coverage, `aggregateMetrics`,
-  `perClassMetrics`, `classificationApplicable`, `classificationReason`).
+- Consumes: `DatasetEvaluation` (coverage, `aggregateMetrics`, `perClassMetrics`,
+  `confusion`); classification applicability is read from
+  `aggregateMetrics?.classificationApplicable` and
+  `aggregateMetrics?.classificationReason` (NOT top-level fields).
 - Produces: `EvaluationMetricsView`.
 
-- [ ] Step 1: failing tests: coverage shown; localization `ap50`/`ap50_95`
-  shown; a null metric renders `N/A` (never `0`); `classificationApplicable=false`
-  renders `N/A` + the bounded `classificationReason`
+- [ ] Step 1: failing tests: coverage shown; localization `ap50`/`ap50_95` shown;
+  `aggregateMetrics === null` renders an explicit metrics-unavailable/pending/empty
+  state without inventing numbers; a null metric renders `N/A` (never `0`);
+  `aggregateMetrics.classificationApplicable === false` renders classification
+  metrics as `N/A` + the bounded `aggregateMetrics.classificationReason`
   (`detection_only_pipeline` | `label_space_mismatch` |
   `unknown_classification_semantics`); per-class/confusion sections render an
   explicit empty/inapplicable state rather than a bare empty table
-- [ ] Step 2: RED
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/evaluation/EvaluationMetricsView.test.tsx`; RED
 - [ ] Step 3: implement; reuse existing `features/dataset-benchmarks` formatting
   helpers where they already exist
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add evaluation metrics with N/A semantics`
 
 ### F4.2 Experiment A/B selection + comparability
@@ -874,8 +945,6 @@ environment foundation before F2).
 - [ ] Step 4: PASS
 - [ ] Step 5: `npm test -- --run`
 - [ ] Step 6: commit `feat(frontend): add compare deltas and drilldown`
-
-**Review checkpoint: after F4/F5.**
 
 ---
 
@@ -933,6 +1002,9 @@ environment foundation before F2).
 - [ ] Step 4: PASS
 - [ ] Step 5: `npm test -- --run`
 - [ ] Step 6: commit `feat(frontend): link experiment compare to algorithm lab`
+
+**Review checkpoint: after F4/F5 (i.e. after F5.3).** Human/independent F4/F5
+integration review runs once F5.3 is complete, before F6.
 
 ---
 
@@ -1038,8 +1110,9 @@ execute F7/F8.
 ### F7.1 Reconcile YELLOW contract drift
 
 **Files:**
-- Modify: `frontend/src/api/client.ts`, `frontend/src/api/types.ts`
-- Test: `frontend/src/api/client.test.ts`, `frontend/src/api/v1Contract.test.ts`
+- Modify: `frontend/src/api/client.ts`, `frontend/src/api/types.ts`,
+  `frontend/src/api/v1Contract.ts`
+- Test: `frontend/src/api/client.test.ts`
 
 **Interfaces:**
 - Consumes: final frozen Backend V1 API.
@@ -1112,28 +1185,56 @@ execute F7/F8.
 - [ ] Step 7: commit acceptance tests only if new tests were added
   (`test(frontend): add frontend v1 workflow acceptance`)
 
-### F8.2 Final source audit
+### F8.2 Acceptance invariants (behavioral) + explicit source audit
 
 **Files:**
-- Test: `frontend/src/app/guardrails.test.ts` (source-invariant test)
+- Modify/Test: reuse and extend behavioral tests already created in F1/F2/F4/F6
+  (no artificial source-string unit test is created)
 
 **Interfaces:**
-- Produces: acceptance invariants enforced as tests.
+- Produces: behavioral acceptance evidence for the design invariants, plus a
+  manually-reviewed source audit.
 
-- [ ] Step 1: add tests asserting:
+No `frontend/src/app/guardrails.test.ts` source-string scanner is planned. The
+invariants are proven behaviorally; textual checks are performed as explicit
+review commands, not fake runtime unit tests.
+
+Behavioral acceptance tests (extend the existing feature/page tests):
+
+- [ ] Step 1: prove no plugin-id authority — feed the same backend capability
+  facts with two different arbitrary pipeline ids and assert identical executor UI
+  behavior (extend `ExecutionEnvironmentSelector.test.tsx`)
+- [ ] Step 2: prove no client fallback — given an unavailable executor the UI
+  disables/substitutes nothing and never returns another executor
+  (extend `ExecutionEnvironmentSelector.test.tsx` / `SpectrumAnalysisPage.test.tsx`)
+- [ ] Step 3: prove N/A semantics — a null metric renders `N/A` and
+  `aggregateMetrics.classificationApplicable === false` renders `N/A` + reason,
+  never `0` (extend `EvaluationMetricsView.test.tsx` / `CompareDeltaTable.test.tsx`)
+- [ ] Step 4: prove no operator internals rendered — a response carrying
+  `environment_ref` / absolute interpreter path fields renders none of them
+  (extend the relevant provenance/detail tests)
+- [ ] Step 5: prove no hardcoded ModelRelease choices — the models/release UI
+  offers no literal `golden` choice (extend the create-form tests)
+- [ ] Step 6: prove primary navigation is exactly
+  `Recordings | Experiments | Algorithm Lab` (extend `navigation.test.tsx`)
+- [ ] Step 7: run `cd frontend; npm test -- --run`; expect all pass
+- [ ] Step 8: run `cd frontend; npm run build`; expect exit 0
+- [ ] Step 9: commit only if new behavioral tests were added
+  (`test(frontend): add frontend v1 acceptance invariants`)
+
+Explicit final source audit (acceptance evidence, NOT automated unit tests):
+
+- [ ] Step 10: run bounded review commands (e.g. `git grep` for suspicious
+  patterns) and SEMANTICALLY review every match; a grep match is evidence to
+  inspect, never an automatic failure. Suggested checks:
   ```text
-  no client-side executor fallback (no path returns a different executor than resolved)
-  no plugin-id capability branches (no pipeline.id/plugin id comparison driving executor)
-  no hardcoded ModelRelease choices (no literal "golden" in UI choices)
-  no N/A → 0 (null metrics render as N/A)
-  no operator internals rendered (no environment_ref, no absolute interpreter paths)
-  primary navigation is exactly Recordings | Experiments | Algorithm Lab
+  git grep -n "executorPolicy" frontend/src
+  git grep -n "executor-availability" frontend/src/features/dataset-experiment frontend/src/pages/ExperimentsListPage.tsx
+  git grep -n "golden" frontend/src
+  git grep -n "environment_ref" frontend/src
   ```
-- [ ] Step 2: run focused test; RED for any violation
-- [ ] Step 3: fix violations without changing approved design
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`; `npm run build`
-- [ ] Step 6: commit `test(frontend): enforce frontend v1 acceptance invariants`
+- [ ] Step 11: record the audit outcome (matches + semantic verdict) in the F8
+  task report; fix any real violation without changing the approved design
 
 **Review checkpoint: at F8.**
 
@@ -1175,14 +1276,21 @@ independently approved PLAN HEAD. Do NOT create it in this round.
 ## TDD / Test Strategy
 
 - Every production change starts with a failing test (RED) and ends with a
-  focused GREEN run plus the surrounding `npm test -- --run`.
-- API contract/mapping tests live in `api/client.test.ts` (+ `v1Contract.test.ts`).
+  focused GREEN run plus the surrounding suite.
+- **Command convention (normative):** a task's "Step 2: RED" / focused run means
+  `cd frontend; npm test -- --run <the task's Test file(s)>`; the surrounding
+  regression is `cd frontend; npm test -- --run` (all tests).
+- **Type/build authority:** `cd frontend; npm run build` (`tsc -b && vite build`).
+  Vitest is not a typechecker. Do not invent a separate typecheck command and do
+  not use `npx` (no opportunistic downloads).
+- API contract/mapping tests live in `api/client.test.ts`; the F0.2 type fixture
+  `api/v1Contract.ts` is compiled by `npm run build` (not a runtime Vitest test).
 - Selector state-matrix tests live in `executionEnvironment.test.ts` and
   `ExecutionEnvironmentSelector.test.tsx`.
 - Workflow tests are page/feature level.
 - Tests stub `fetch` via `vi.stubGlobal` (existing convention); no MSW.
-- `npm run build` (`tsc -b && vite build`) is a gate at F6/F7/F8. Do not invent a
-  separate typecheck command.
+- `npm run build` is a gate after F0.2, F1.3, F1.4, F3.x, F4.x, F6.x, F7.x, and
+  throughout F8.
 
 ---
 
@@ -1192,9 +1300,9 @@ independently approved PLAN HEAD. Do NOT create it in this round.
 
 | Design requirement | Task(s) |
 |---|---|
-| F0 baseline + contracts + guardrails | F0.1, F0.2, F0.3 |
+| F0 baseline + compile-verified types | F0.1, F0.2 |
 | ExecutionEnvironmentSelector (fixed vocabulary, backend state) | F1.2 |
-| executor-selection client (discriminated scope) | F0.3, F1.1 |
+| executor-selection client + scope guardrails (discriminated scope) | F1.1 |
 | manual/auto request semantics | F1.3 |
 | retire client executor policy | F1.4 |
 | Workflow A (run/status/detections/provenance) | F2.1–F2.4 |
@@ -1203,12 +1311,13 @@ independently approved PLAN HEAD. Do NOT create it in this round.
 | Workflow B (experiments) | F3.1–F3.9 |
 | Dataset exact triple; no hardcoded SpaceNet | F3.4, F7.2 |
 | DatasetExperiment MUST NOT call executor-availability | F3.4 |
+| DatasetExperiment frozen `executor` + `recording_manifest_hash` | F3.1, F3.6 |
 | Workflow C (evaluation + compare + drilldown) | F4.1–F4.3 |
-| Evaluation N/A semantics | F4.1, F4.3 |
+| Evaluation N/A semantics (from `aggregateMetrics`) | F4.1, F4.3 |
 | Algorithm Lab role + dedup + drilldown | F5.1–F5.3 |
 | F6 status/error + nav | F6.1–F6.4 |
 | F7 reconciliation (blocked) | F7.1, F7.2 |
-| F8 acceptance (blocked) | F8.1, F8.2 |
+| F8 acceptance (blocked, behavioral) | F8.1, F8.2 |
 | Stack constraints / no new deps | Global Constraints; enforced across all tasks |
 | Operator boundary | F1.2, F2.1, F8.2 |
 
@@ -1222,9 +1331,14 @@ exact files, interfaces, and verification commands.
 
 `ExecutionCandidate`, `ExecutorSelection`, `ExecutionSelectionScope`,
 `ExecutionEnvironmentValue`, `ExecutionEnvironmentSelectorProps`,
-`AnalysisRunCreateRequest`, `DatasetExperiment*`, and the evaluation/compare
-types use one definition each (Interface Ledger) and are referenced by the same
-names in every task. No drift between F1/F2/F3/F4 tasks.
+`AnalysisRunCreateRequest`, `DatasetExperimentCreateRequest`,
+`DatasetExperiment`, `DatasetExperimentItem`,
+`DatasetExperimentAttempt` (mandatory `analysisRunId: string`), and the
+evaluation/compare types use one definition each (Interface Ledger). Public/domain
+request types are camelCase; snake_case exists only in the private wire bodies
+inside `api/client.ts`. `DatasetExperiment.executor` is a required concrete
+string; `requestedExecutionMode` is `ExecutionMode | null`. No drift between
+F1/F2/F3/F4 tasks.
 
 ### Backend contract accuracy
 
@@ -1236,6 +1350,9 @@ DatasetExperiment calls executor-availability           — NOT done (F3.4 datas
 generic dataset catalog exists                          — NOT assumed (F3.4 exact triple)
 AnalysisRunRead exposes model_release_id                — NOT assumed (F2.1/F7.2 conditional)
 PipelineDefinitionRead exposes parameter_schema         — NOT assumed (F1.3/F3.4 parameters={}; F7.2 conditional)
+DatasetEvaluation top-level classificationApplicable    — NOT assumed (F4.1 reads aggregateMetrics.*)
+Attempt.analysisRunId optional                         — NOT assumed (required string)
+launch ambiguity from a missing run id                  — NOT assumed (F3.8 uses backend error only)
 ```
 
 ### Design invariants
@@ -1244,13 +1361,45 @@ Confirmed: Auto default; backend-only executor authority; no fallback; Compare
 under Experiments; Settings not primary nav; N/A + reason; F0–F6 start now;
 F7/F8 blocked until freeze.
 
+### Contract corrections applied (second review)
+
+1. `DatasetExperiment` now includes the concrete `executor` and
+   `recordingManifestHash`; nullable fields kept nullable
+   (`requestedExecutionMode: ExecutionMode | null`); `runtime_descriptor_json` is
+   not surfaced.
+2. `DatasetExperimentAttempt.analysisRunId` is a required `string`.
+3. Create request types are camelCase; snake_case lives only in private wire
+   bodies in `api/client.ts` with explicit translation in
+   `createAnalysisRun`/`createDatasetExperiment`.
+4. F0.2 uses a compile-time RED/GREEN via `npm run build`, not a Vitest assertion
+   of erased types.
+5. F0.3 removed; execution-selection scope/query/mapping/error behavior is owned
+   entirely by F1.1 (no test for a not-yet-created function).
+6. F4.1 reads classification applicability from
+   `aggregateMetrics.classificationApplicable` / `.classificationReason`.
+7. F3.8 never infers launch ambiguity from a missing run id; ambiguity comes only
+   from authoritative backend error state.
+8. F8.2 uses behavioral acceptance tests plus an explicitly reviewed source audit;
+   no source-string guardrail unit test (`guardrails.test.ts` removed).
+9. The F4/F5 review checkpoint is now after F5.3.
+10. YAGNI: no unused `AnalysisRunForm.tsx`; `buildAnalysisRunRequest` lives in the
+    pure module `features/analysis-run/requestBuilder.ts`.
+11. Command convention: focused runs are `cd frontend; npm test -- --run <file>`;
+    `npm run build` is the Type/build authority; no `npx`.
+
+### Task count (updated)
+
+F0 = 2 tasks (F0.1, F0.2); F1 = 4; F2 = 4; F3 = 9; F4 = 3; F5 = 3; F6 = 4;
+F7 = 2 (blocked); F8 = 2 (blocked). Total = 33 task headings.
+
 ---
 
-## Changed Files This Round
+## Changed Files (this corrective round)
 
 ```text
-docs/superpowers/specs/2026-09-15-frontend-v1-design.md      status bookkeeping only
-docs/superpowers/plans/2026-09-15-frontend-v1-implementation.md   new plan
+docs/superpowers/plans/2026-09-15-frontend-v1-implementation.md   corrected
 ```
 
-No frontend source/test change, no backend change, no dependency change.
+The approved design spec `docs/superpowers/specs/2026-09-15-frontend-v1-design.md`
+is NOT modified by this round. No frontend source/test change, no backend change,
+no dependency change.
