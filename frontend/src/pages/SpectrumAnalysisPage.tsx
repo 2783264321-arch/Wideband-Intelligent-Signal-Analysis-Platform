@@ -4,6 +4,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
+import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
@@ -18,43 +19,6 @@ function pipelineOptionLabel(item: PipelineDefinition): string {
     return `${base} · Detection & localization only`;
   }
   return base;
-}
-
-const SHORT_SHA_LENGTH = 8;
-
-function RemoteRunSummary({ run }: { run: AnalysisRun }) {
-  const metadata = run.executionMetadata ?? {};
-  const hardware = run.hardwareInfo ?? {};
-  const runtimeCommit = typeof metadata.required_remote_runtime_commit === "string"
-    ? metadata.required_remote_runtime_commit.slice(0, SHORT_SHA_LENGTH)
-    : null;
-  const payloadSha = typeof metadata.payload_sha256 === "string"
-    ? metadata.payload_sha256.slice(0, SHORT_SHA_LENGTH)
-    : null;
-  const deviceName = typeof hardware.device_name === "string" ? hardware.device_name : null;
-  const deviceType = typeof hardware.device_type === "string" ? hardware.device_type : null;
-  const remoteProfile = typeof metadata.remote_profile === "string" ? metadata.remote_profile : null;
-  const startedAt = typeof metadata.remote_started_at === "string" ? metadata.remote_started_at : null;
-  const finishedAt = typeof metadata.remote_finished_at === "string" ? metadata.remote_finished_at : null;
-
-  return (
-    <Space direction="vertical" size={4} data-testid="remote-run-summary">
-      <Tag color="geekblue">Executor: {run.executor}</Tag>
-      {remoteProfile ? <Typography.Text type="secondary">Profile: {remoteProfile}</Typography.Text> : null}
-      {deviceName || deviceType ? (
-        <Typography.Text type="secondary">
-          Device: {deviceName ?? deviceType}{deviceName && deviceType ? ` (${deviceType})` : ""}
-        </Typography.Text>
-      ) : null}
-      {runtimeCommit ? <Typography.Text type="secondary">Runtime commit: {runtimeCommit}</Typography.Text> : null}
-      {payloadSha ? <Typography.Text type="secondary">Payload SHA: {payloadSha}</Typography.Text> : null}
-      {startedAt || finishedAt ? (
-        <Typography.Text type="secondary">
-          Remote: {startedAt ?? "—"} → {finishedAt ?? "—"}
-        </Typography.Text>
-      ) : null}
-    </Space>
-  );
 }
 
 export function SpectrumAnalysisPage() {
@@ -232,7 +196,7 @@ export function SpectrumAnalysisPage() {
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>Ground Truth</Checkbox>
         {currentRun ? <Tag>{currentRun.status}</Tag> : <Typography.Text type="secondary">No AnalysisRun selected yet.</Typography.Text>}
         {currentRun?.status === "failed" ? <Typography.Text type="danger">{currentRun.errorMessage ?? "Analysis failed."}</Typography.Text> : null}
-        {currentRun?.executor === "remote_gpu" ? <RemoteRunSummary run={currentRun} /> : null}
+        {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
       </Space>
       <Row gutter={16} align="stretch">
         <Col xs={24} xl={18}>
