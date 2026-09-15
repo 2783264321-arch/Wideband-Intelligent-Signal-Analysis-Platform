@@ -1,6 +1,7 @@
 import { Tabs } from "antd";
 import { useSearchParams } from "react-router-dom";
 import { ExperimentComparePage } from "./ExperimentComparePage";
+import { ExperimentList } from "../features/dataset-experiment/ExperimentList";
 
 export function ExperimentsPage() {
   const [params, setParams] = useSearchParams();
@@ -18,7 +19,7 @@ export function ExperimentsPage() {
       activeKey={tab}
       onChange={patch}
       items={[
-        { key: "experiments", label: "Experiments", children: <div data-testid="experiments-tab">Experiments</div> },
+        { key: "experiments", label: "Experiments", children: <ExperimentList /> },
         { key: "compare", label: "Compare", children: <ExperimentComparePage /> },
       ]}
     />
