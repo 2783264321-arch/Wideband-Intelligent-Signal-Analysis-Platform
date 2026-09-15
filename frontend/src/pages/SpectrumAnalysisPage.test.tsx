@@ -371,3 +371,88 @@ test("exposes STFT Energy Detector with detection-only copy and submits its id",
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ pipeline_id: "stft_energy_detector", execution_mode: "auto" });
 });
+
+// ---------------------------------------------------------------------------
+// F2.4 — Signals / Signal Detail / deep-link preservation (regression only)
+// ---------------------------------------------------------------------------
+
+const deepLinkDetection = {
+  id: "det_1",
+  run_id: "run_2",
+  recording_id: "rec_1",
+  t_start_s: 0.01,
+  t_end_s: 0.02,
+  f_low_hz: 2440600000,
+  f_high_hz: 2440700000,
+  class_id: 9,
+  class_name: "LoRa 250kHz",
+  confidence: 0.94,
+  scores_json: null,
+};
+
+const deepLinkRun = {
+  id: "run_2",
+  recording_id: "rec_1",
+  pipeline_id: "dummy",
+  pipeline_version: "1.0",
+  executor: "local_cpu",
+  status: "completed",
+  parameters_json: {},
+  hardware_info_json: null,
+  execution_metadata_json: null,
+  started_at: null,
+  finished_at: null,
+  error_type: null,
+  error_message: null,
+  worker_pid: null,
+  created_at: null,
+};
+
+function deepLinkSetup(initialPath: string) {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify([localPipeline]));
+    if (url.endsWith("/api/recordings/rec_1")) return new Response(JSON.stringify(recording));
+    if (url.includes("/spectrogram")) return new Response(JSON.stringify(spectrogram));
+    if (url.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionLocalAvailable));
+    if (url.endsWith("/api/analysis-runs/run_2")) return new Response(JSON.stringify(deepLinkRun));
+    if (url.endsWith("/api/analysis-runs/run_2/detections")) return new Response(JSON.stringify([deepLinkDetection]));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(
+    <MemoryRouter initialEntries={[initialPath]}>
+      <Routes>
+        <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+        <Route path="/signals/:runId" element={<div>Signals Page</div>} />
+        <Route path="/signals/:runId/:detectionId" element={<div>Signal Detail Page</div>} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+test("deep link ?run= loads the specified AnalysisRun", async () => {
+  deepLinkSetup("/spectrum/rec_1?run=run_2");
+  await screen.findByText("Burst Demo");
+  await waitFor(() => expect(screen.getByTestId("run-status-badge")).toHaveTextContent("Completed"));
+});
+
+test("deep link ?selected= preserves the selected detection", async () => {
+  deepLinkSetup("/spectrum/rec_1?run=run_2&selected=det_1");
+  await screen.findByText("Burst Demo");
+  await waitFor(() => expect(screen.getByText(/Selected: LoRa 250kHz/)).toBeInTheDocument());
+});
+
+test("View All navigates to /signals/:runId", async () => {
+  deepLinkSetup("/spectrum/rec_1?run=run_2");
+  await screen.findByText("Burst Demo");
+  await waitFor(() => expect(screen.getByTestId("run-status-badge")).toHaveTextContent("Completed"));
+  fireEvent.click(screen.getByRole("button", { name: "View All" }));
+  await screen.findByText("Signals Page");
+});
+
+test("View Details navigates to /signals/:runId/:detectionId", async () => {
+  deepLinkSetup("/spectrum/rec_1?run=run_2");
+  await screen.findByText("Burst Demo");
+  await screen.findByText(/LoRa 250kHz/);
+  fireEvent.click(screen.getByRole("button", { name: "View Details" }));
+  await screen.findByText("Signal Detail Page");
+});
