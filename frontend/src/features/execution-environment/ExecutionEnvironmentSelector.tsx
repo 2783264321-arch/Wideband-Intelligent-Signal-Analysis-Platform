@@ -1,6 +1,6 @@
 import { Button, Radio, Space, Typography } from "antd";
 import { useMemo, useState } from "react";
-import { executorLabel, optionsFromSelection, type ExecutorOptionKey, type ExecutorOptionStateKind } from "./executionEnvironment";
+import { optionsFromSelection, type ExecutorOptionKey, type ExecutorOptionStateKind } from "./executionEnvironment";
 import { useLocalization } from "../../localization/useLocalization";
 import type { MessageKey } from "../../localization/types";
 import type { ExecutionEnvironmentSelectorProps } from "./types";

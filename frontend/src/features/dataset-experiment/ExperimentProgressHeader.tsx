@@ -48,14 +48,28 @@ export function ExperimentProgressHeader({ experiment }: { experiment: DatasetEx
         <Typography.Text type="secondary">{t("experiment.attemptsTab")} {experiment.attemptCount}</Typography.Text>
       </Space>
       {autoReasonCode !== null ? (
-        <Typography.Text type="secondary">{t("provenance.autoReason")}: {autoReasonCode}</Typography.Text>
+        <Typography.Text type="secondary" data-testid="experiment-auto-reason">
+          {t("provenance.autoReason")}: {autoReasonCode}
+        </Typography.Text>
       ) : null}
-      {autoReason !== null ? <Typography.Text type="secondary">{autoReason}</Typography.Text> : null}
+      {reasonKey(autoReasonCode) !== null && autoReason !== null ? (
+        <Typography.Text type="secondary" data-testid="experiment-auto-reason-technical">
+          {t("common.technicalDetails")}: {autoReason}
+        </Typography.Text>
+      ) : null}
       {errorType !== null ? (
         <Typography.Text code data-testid="experiment-error-code">{errorType}</Typography.Text>
       ) : null}
       {reasonMsgKey !== null ? <Typography.Text type="secondary">{t(reasonMsgKey)}</Typography.Text> : null}
-      {errorMessage !== null ? <Typography.Text type="danger">{errorMessage}</Typography.Text> : null}
+      {errorMessage !== null ? (
+        reasonMsgKey !== null ? (
+          <Typography.Text type="secondary" data-testid="experiment-error-technical-details">
+            {t("common.technicalDetails")}: {errorMessage}
+          </Typography.Text>
+        ) : (
+          <Typography.Text type="danger">{errorMessage}</Typography.Text>
+        )
+      ) : null}
     </Space>
   );
 }
