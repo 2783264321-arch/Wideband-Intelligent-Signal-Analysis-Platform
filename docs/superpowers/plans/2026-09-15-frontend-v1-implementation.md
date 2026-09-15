@@ -85,12 +85,13 @@ frontend/src/features/dataset-experiment/ExperimentDetail.tsx        detail comp
 frontend/src/features/dataset-experiment/ExperimentProgressHeader.tsx status badge + counters
 frontend/src/features/dataset-experiment/ExperimentItemTable.tsx      items
 frontend/src/features/dataset-experiment/AttemptTimeline.tsx          attempts + retry-failed
+frontend/src/features/dataset-experiment/LinkedEvaluationSummary.tsx  minimal linked evaluation summary + retry-evaluation
 frontend/src/features/evaluation/EvaluationMetricsView.tsx           coverage + metrics + N/A
 frontend/src/features/evaluation/ExperimentComparePanel.tsx          A/B selection + comparability
 frontend/src/features/evaluation/CompareDeltaTable.tsx               deltas + shared-recording drilldown
-frontend/src/pages/ExperimentsListPage.tsx                           experiments list page
+frontend/src/pages/ExperimentsPage.tsx                               Experiments destination tab shell (experiments|compare|benchmarks)
 frontend/src/pages/ExperimentDetailPage.tsx                          experiment detail page
-frontend/src/pages/ExperimentComparePage.tsx                         compare page (inside Experiments)
+frontend/src/pages/ExperimentComparePage.tsx                         compare tab content (mounted inside ExperimentsPage)
 ```
 
 New test files (one per production concern):
@@ -108,6 +109,7 @@ frontend/src/features/dataset-experiment/ExperimentList.test.tsx
 frontend/src/features/dataset-experiment/ExperimentDetail.test.tsx
 frontend/src/features/dataset-experiment/ExperimentItemTable.test.tsx
 frontend/src/features/dataset-experiment/AttemptTimeline.test.tsx
+frontend/src/features/dataset-experiment/LinkedEvaluationSummary.test.tsx
 frontend/src/features/evaluation/EvaluationMetricsView.test.tsx
 frontend/src/features/evaluation/ExperimentComparePanel.test.tsx
 frontend/src/features/evaluation/CompareDeltaTable.test.tsx
@@ -241,7 +243,7 @@ export interface DatasetExperimentCreateRequest {
   executor?: string;
   modelReleaseId?: string | null;
   parameters: Record<string, unknown>;
-  evaluationProtocol: string;
+  evaluationProtocol?: string;   // omit to let the backend apply its default
   maxConcurrency: number;
 }
 ```
@@ -302,7 +304,7 @@ interface DatasetExperimentCreateWire {
   executor?: string;
   model_release_id?: string | null;
   parameters: Record<string, unknown>;
-  evaluation_protocol: string;
+  evaluation_protocol?: string;   // included ONLY when explicitly provided
   max_concurrency: number;
 }
 ```
@@ -362,14 +364,19 @@ export interface ExperimentFormValue {
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
-  pluginId: string;
-  pluginVersion: string;
+  pluginId: string;              // from the selected /api/pipelines definition
+  pluginVersion: string;         // from the selected /api/pipelines definition
   environment: import("../execution-environment/types").ExecutionEnvironmentValue;
   maxConcurrency: number;
-  evaluationProtocol: string;
+  // No evaluationProtocol: generic V1 omits it and the backend applies its default.
 }
 
 export function toCreateRequest(value: ExperimentFormValue): import("../../api/types").DatasetExperimentCreateRequest;
+```
+
+`toCreateRequest` returns a camelCase domain request and OMITS
+`evaluationProtocol` (the backend default applies). `evaluationProtocol` is only
+included when an authoritative caller explicitly supplies it.
 ```
 
 ---
@@ -492,19 +499,27 @@ for malformed JS/casts.
 - [ ] Step 7: `npm test -- --run`
 - [ ] Step 8: commit `feat(frontend): add execution environment selector`
 
-### F1.3 Request semantics (manual vs auto)
+### F1.3 Request semantics (manual vs auto) + migrate the existing caller
 
 **Files:**
 - Create: `frontend/src/features/analysis-run/requestBuilder.ts` (pure helper;
   no `AnalysisRunForm.tsx` component is planned — behavior is composed directly by
   `SpectrumAnalysisPage`, so YAGNI applies)
 - Modify: `frontend/src/api/client.ts` (`createAnalysisRun` signature change)
+- Modify: `frontend/src/pages/SpectrumAnalysisPage.tsx` (minimum compatibility
+  migration of the existing positional caller)
 - Test: `frontend/src/features/analysis-run/analysisRun.test.ts`,
   `frontend/src/api/client.test.ts`
 
 **Interfaces:**
 - Consumes: `ExecutionEnvironmentValue`, `AnalysisRunCreateRequest`.
 - Produces: `buildAnalysisRunRequest({ recordingId, pipelineId, environment, modelReleaseId? }): AnalysisRunCreateRequest` (domain camelCase).
+
+`SpectrumAnalysisPage.tsx` really calls `createAnalysisRun(recordingId, pipelineId, executor)`
+today. Changing the signature without migrating that caller breaks `npm run build`,
+so F1.3 migrates it minimally:
+`existing client-side executorPolicy output → buildAnalysisRunRequest(...) → createAnalysisRun(request)`.
+F1.3 does NOT retire `executorPolicy`; that is F1.4.
 
 - [ ] Step 1: failing tests: manual → `{executor:"local_cpu"}` and NO
   `executionMode:"auto"`; manual `local_gpu`/`remote_gpu` identical shape; auto →
@@ -514,9 +529,11 @@ for malformed JS/casts.
 - [ ] Step 2: run `cd frontend; npm test -- --run src/features/analysis-run/analysisRun.test.ts`; RED
 - [ ] Step 3: implement `buildAnalysisRunRequest`; implement the client-side
   camelCase→wire translation and change `createAnalysisRun` signature to accept
-  `AnalysisRunCreateRequest`; update all callers
+  `AnalysisRunCreateRequest`; migrate the `SpectrumAnalysisPage` caller to build
+  the request object from the existing `executorPolicy` output
 - [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
-- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0 (this is the gate
+  proving there is NO stale positional `createAnalysisRun` caller anywhere in `src`)
 - [ ] Step 6: commit `feat(frontend): enforce manual/auto request semantics`
 
 ### F1.4 Retire client-side executor policy
@@ -611,13 +628,18 @@ environment foundation before F2).
 - Consumes: `AnalysisRun.status`, `errorType`, `errorMessage`.
 - Produces: `RunStatusBadge` with mapped label + preserved bounded code.
 
-- [ ] Step 1: failing tests: each status maps to a label; a failed run shows the
-  bounded `errorType` (e.g. `ANALYSIS_LAUNCH_AMBIGUOUS`, `INPUT_INCOMPATIBLE`)
-  alongside human-readable text; code is never dropped
-- [ ] Step 2: RED
+- [ ] Step 1: failing tests: each status maps to a label; ANY terminal run
+  carrying `errorType` renders the bounded code (never dropped). Specifically:
+  - `failed` + `errorType` → displays the bounded code (e.g. `INPUT_INCOMPATIBLE`)
+  - `interrupted` + `errorType === "ANALYSIS_LAUNCH_AMBIGUOUS"` → displays
+    "Interrupted" plus the raw bounded code/message (NOT "failed")
+  (Backend recovery sets status `interrupted` with
+  `error_type = ANALYSIS_LAUNCH_AMBIGUOUS`; the badge must not hide `errorType`
+  because the status is `interrupted`.)
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/analysis-run/RunStatusBadge.test.tsx`; RED
 - [ ] Step 3: implement `RunStatusBadge`; wire into Spectrum
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add run status badge with bounded errors`
 
 ### F2.4 Preserve Signals/Signal Detail and deep links
@@ -674,31 +696,33 @@ environment foundation before F2).
 
 **Files:**
 - Modify: `frontend/src/app/App.tsx`, `frontend/src/app/MainLayout.tsx`
-- Create: `frontend/src/pages/ExperimentsListPage.tsx` (thin shell),
-  `frontend/src/pages/ExperimentDetailPage.tsx` (thin shell),
-  `frontend/src/pages/ExperimentComparePage.tsx` (thin shell)
+- Create: `frontend/src/pages/ExperimentsPage.tsx` (tab shell for the Experiments
+  destination), `frontend/src/pages/ExperimentDetailPage.tsx` (thin shell),
+  `frontend/src/pages/ExperimentComparePage.tsx` (thin shell, mounted as a tab)
 - Test: `frontend/src/app/navigation.test.tsx`
 
 **Interfaces:**
 - Consumes: react-router-dom.
-- Produces: routes `/experiments`, `/experiments/:experimentId`,
-  `/experiments/compare`; sidebar items exactly `Recordings`, `Experiments`,
-  `Algorithm Lab` (no `Settings`).
+- Produces: `/experiments` → `ExperimentsPage` tab shell (tabs `experiments`,
+  `compare`, and later `benchmarks` in F5.3) via `?tab=`;
+  `/experiments/:experimentId` → detail; sidebar items exactly `Recordings`,
+  `Experiments`, `Algorithm Lab` (no `Settings`).
 
 - [ ] Step 1: failing navigation test: sidebar contains exactly the three
-  primary items and no Settings; `/experiments` routes resolve to a shell
-- [ ] Step 2: RED
-- [ ] Step 3: add routes and update `MainLayout` navigation (keep `/settings`
-  route resolvable but out of the sidebar)
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+  primary items and no Settings; `/experiments` resolves to the Experiments tab
+  shell; `?tab=compare` shows the compare tab
+- [ ] Step 2: run `cd frontend; npm test -- --run src/app/navigation.test.tsx`; RED
+- [ ] Step 3: add routes and the `ExperimentsPage` tab shell; update `MainLayout`
+  navigation (keep `/settings` route resolvable but out of the sidebar)
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add experiments routes and navigation`
 
 ### F3.3 Experiment list
 
 **Files:**
 - Create: `frontend/src/features/dataset-experiment/ExperimentList.tsx`
-- Modify: `frontend/src/pages/ExperimentsListPage.tsx`
+- Modify: `frontend/src/pages/ExperimentsPage.tsx`
 - Test: `frontend/src/features/dataset-experiment/ExperimentList.test.tsx`
 
 **Interfaces:**
@@ -715,33 +739,48 @@ environment foundation before F2).
 - [ ] Step 5: `npm test -- --run`
 - [ ] Step 6: commit `feat(frontend): add experiment list`
 
-### F3.4 Create form (exact dataset triple; dataset-scoped selection)
+### F3.4 Create form (exact dataset triple; pipeline from /api/pipelines; dataset-scoped selection)
 
 **Files:**
 - Create: `frontend/src/features/dataset-experiment/types.ts`,
   `frontend/src/features/dataset-experiment/ExperimentCreateForm.tsx`
-- Modify: `frontend/src/pages/ExperimentsListPage.tsx`
+- Modify: `frontend/src/pages/ExperimentsPage.tsx`
 - Test: `frontend/src/features/dataset-experiment/ExperimentCreateForm.test.tsx`,
   `frontend/src/features/dataset-experiment/experimentContract.test.ts`
 
 **Interfaces:**
-- Consumes: `getExecutorSelection` (dataset scope), `optionsFromSelection`,
+- Consumes: `listPipelines` (authoritative `PipelineDefinition` projection),
+  `getExecutorSelection` (dataset scope), `optionsFromSelection`,
   `createDatasetExperiment`, `toCreateRequest`.
 - Produces: `ExperimentFormValue`, `toCreateRequest`, `ExperimentCreateForm`.
 
-- [ ] Step 1: failing tests: `toCreateRequest` returns a camelCase domain
-  request with `datasetName`/`datasetSplit`/`datasetLabelSpace` exactly as
-  entered; `parameters` is `{}`; `evaluationProtocol` and `maxConcurrency` set;
-  manual environment sets `executor` and no `executionMode:"auto"`; auto
+Plugin/version authority: the user selects a pipeline **object** from
+`listPipelines()`; the request takes `pluginId = pipeline.id` and
+`pluginVersion = pipeline.version`. No free-text version, no hardcoded version, no
+derivation from a plugin id.
+
+Evaluation protocol authority: generic V1 does NOT expose a protocol picker or
+free-text field. `toCreateRequest` OMITS `evaluationProtocol`; the backend applies
+its authoritative default. After creation/read, `DatasetExperiment.evaluationProtocol`
+is rendered as backend-resolved provenance. Do not hardcode
+`physical_tf_detection_ap_v2` in the generic form.
+
+- [ ] Step 1: failing tests: the pipeline choice is populated from
+  `listPipelines()` and `pluginId`/`pluginVersion` come directly from the selected
+  `PipelineDefinition` (`id`/`version`); `toCreateRequest` returns a camelCase
+  domain request with `datasetName`/`datasetSplit`/`datasetLabelSpace` exactly as
+  entered; `parameters` is `{}`; `maxConcurrency` set; `evaluationProtocol` is
+  OMITTED; manual environment sets `executor` and no `executionMode:"auto"`; auto
   environment sets `executionMode:"auto"` and no `executor`; the client-translated
   wire body contains `dataset_name`/`dataset_split`/`dataset_label_space`
   (`plugin_id`/`plugin_version`) and does NOT contain
-  `recording_manifest_hash`/`asset_manifest_sha256`/`runtime_descriptor_json`;
-  `modelReleaseId` omitted unless supplied externally; NO hardcoded
-  `SpaceNet`/`test`/`spacenet_14`
+  `recording_manifest_hash`/`asset_manifest_sha256`/`runtime_descriptor_json` or
+  `evaluation_protocol`; `modelReleaseId` omitted unless supplied externally; NO
+  hardcoded `SpaceNet`/`test`/`spacenet_14`
 - [ ] Step 2: run `cd frontend; npm test -- --run src/features/dataset-experiment/ExperimentCreateForm.test.tsx`; RED
-- [ ] Step 3: implement; call `getExecutorSelection` with dataset scope for the
-  selector; never call `getExecutorAvailability`
+- [ ] Step 3: implement; load pipelines via `listPipelines`; call
+  `getExecutorSelection` with dataset scope for the selector; never call
+  `getExecutorAvailability`
 - [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
 - [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add dataset experiment create form`
@@ -755,15 +794,20 @@ environment foundation before F2).
 
 **Interfaces:**
 - Consumes: `runDatasetExperiment`, `retryFailedDatasetExperimentItems`.
-- Produces: run/retry actions with lifecycle-aware enablement.
+- Produces: run/retry-failed actions with exact lifecycle enablement.
 
-- [ ] Step 1: failing tests: a `pending` experiment exposes Run; a `failed`/
-  `completed_with_failures` experiment exposes Retry Failed; actions call the
-  correct client function and refresh the experiment
-- [ ] Step 2: RED
-- [ ] Step 3: implement
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+Retry Failed is allowed ONLY from `completed_with_failures` (and failed items
+exist). It is NOT exposed merely because the experiment `status === "failed"`.
+Retry Evaluation is a separate concept owned by F3.9.
+
+- [ ] Step 1: failing tests: a `pending` experiment exposes the Run action; a
+  `completed_with_failures` experiment exposes Retry Failed; a `failed`
+  experiment does NOT expose/ enable Retry Failed; actions call the correct
+  client function and refresh the experiment
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/dataset-experiment/ExperimentDetail.test.tsx`; RED
+- [ ] Step 3: implement exact status-gated enablement
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `feat(frontend): add experiment run and retry-failed actions`
 
 ### F3.6 Experiment detail + progress header
@@ -847,27 +891,61 @@ Launch ambiguity is surfaced only from authoritative backend state: an
 or an item-level bounded error projection if one is actually returned. F3 does not
 manufacture that state locally.
 
-### F3.9 Linked evaluation entry
+### F3.9 Linked evaluation summary + retry-evaluation
 
 **Files:**
+- Create: `frontend/src/features/dataset-experiment/LinkedEvaluationSummary.tsx`
 - Modify: `frontend/src/features/dataset-experiment/ExperimentDetail.tsx`
-- Test: `frontend/src/features/dataset-experiment/ExperimentDetail.test.tsx`
+- Test: `frontend/src/features/dataset-experiment/LinkedEvaluationSummary.test.tsx`
 
 **Interfaces:**
-- Consumes: `datasetEvaluationId`, `retryDatasetExperimentEvaluation`,
-  `getDatasetBenchmark`.
-- Produces: linked-evaluation section on the experiment detail.
+- Consumes: `getDatasetBenchmark` (existing evaluation read client),
+  `retryDatasetExperimentEvaluation`, `DatasetExperiment.datasetEvaluationId`,
+  `DatasetExperiment.status`, item counters.
+- Produces: `LinkedEvaluationSummary` (one exact minimal deliverable).
 
-- [ ] Step 1: failing tests: when `datasetEvaluationId` is set, the detail shows
-  the linked evaluation summary (via F4 view or a minimal placeholder that
-  renders `status` + coverage); `evaluating` state disables retry-evaluation;
-  `retryDatasetExperimentEvaluation` calls the correct endpoint (not the generic
-  benchmark retry)
-- [ ] Step 2: RED
-- [ ] Step 3: implement
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
-- [ ] Step 6: commit `feat(frontend): link experiment evaluation`
+F3.9 has ONE exact deliverable: a **minimal Linked Evaluation Summary** using the
+existing `DatasetEvaluation` contract and existing client. It does NOT create
+`EvaluationMetricsView` early. F4.1 later replaces/extends only the metrics area
+of this summary.
+
+Rendered fields:
+
+```text
+evaluation id
+status
+coverage
+evaluated / expected
+missing
+errorType / errorMessage when present
+Retry Evaluation action when eligible
+```
+
+Retry Evaluation eligibility (UI preview only; the backend remains authoritative
+and may still reject stale state): enabled only when ALL hold:
+
+```text
+experiment.status == failed
+datasetEvaluationId != null
+all inference items completed (queuedItems == 0 && runningItems == 0
+  && failedItems == 0 && completedItems == expectedItems)
+linked evaluation.status in { failed, interrupted }
+```
+
+`retryDatasetExperimentEvaluation` is used (NOT the generic benchmark retry).
+
+- [ ] Step 1: failing tests: when `datasetEvaluationId` is null, no summary is
+  shown; when set, the summary renders id/status/coverage/evaluated/expected/
+  missing and `errorType`/`errorMessage` when present; Retry Evaluation is
+  enabled only under the exact eligibility above (`failed` experiment + linked
+  `failed`/`interrupted` evaluation + all items completed) and disabled for
+  `evaluating`/`completed`/`running`/`pending`; the action calls
+  `retryDatasetExperimentEvaluation`
+- [ ] Step 2: run `cd frontend; npm test -- --run src/features/dataset-experiment/LinkedEvaluationSummary.test.tsx`; RED
+- [ ] Step 3: implement `LinkedEvaluationSummary` + wire into `ExperimentDetail`
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
+- [ ] Step 6: commit `feat(frontend): link experiment evaluation summary`
 
 **Review checkpoint: after F3.**
 
@@ -888,6 +966,10 @@ manufacture that state locally.
   `aggregateMetrics?.classificationApplicable` and
   `aggregateMetrics?.classificationReason` (NOT top-level fields).
 - Produces: `EvaluationMetricsView`.
+
+Dependency: F4.1 replaces/extends ONLY the metrics area of the F3.9
+`LinkedEvaluationSummary` with the full `EvaluationMetricsView` (summary shell,
+eligibility, and Retry Evaluation behavior remain owned by F3.9).
 
 - [ ] Step 1: failing tests: coverage shown; localization `ap50`/`ap50_95` shown;
   `aggregateMetrics === null` renders an explicit metrics-unavailable/pending/empty
@@ -983,25 +1065,58 @@ manufacture that state locally.
 - [ ] Step 4: `npm test -- --run`
 - [ ] Step 5: commit `refactor(frontend): de-duplicate algorithm lab compare`
 
-### F5.3 Experiments → Algorithm Lab drilldown
+### F5.3 Dataset Benchmarks re-home + Experiments → Algorithm Lab drilldown
 
 **Files:**
-- Modify: `frontend/src/pages/AlgorithmLabPage.tsx`,
-  `frontend/src/features/evaluation/CompareDeltaTable.tsx` (link consumer only)
-- Test: `frontend/src/pages/AlgorithmLabPage.test.tsx`
+- Modify: `frontend/src/pages/ExperimentsPage.tsx` (add the `benchmarks` tab that
+  mounts the existing `frontend/src/features/dataset-benchmarks/DatasetBenchmarksView.tsx`)
+- Modify: `frontend/src/pages/AlgorithmLabPage.tsx` (remove the benchmarks tab;
+  add compatibility redirect for old benchmark deep links)
+- Modify: `frontend/src/features/evaluation/CompareDeltaTable.tsx` (link consumer only)
+- Test: `frontend/src/pages/AlgorithmLabPage.test.tsx`,
+  `frontend/src/pages/ExperimentsPage.test.tsx`
 
 **Interfaces:**
-- Consumes: URL params `recording`, `runA`, `runB`.
-- Produces: Algorithm Lab opens the per-recording case from a compare drilldown.
+- Consumes: URL params `recording`, `runA`, `runB`; the existing
+  `DatasetBenchmarksView` + `features/dataset-benchmarks/*` (unchanged); its
+  `onOpenCase` callback (which navigates to the Algorithm Lab case tab).
+- Produces: the `benchmarks` tab inside the Experiments destination mounting the
+  existing M8 `DatasetBenchmarksView`; Algorithm Lab opens the per-recording case
+  from a compare drilldown.
 
-- [ ] Step 1: failing test: navigating with `recording`/`runA`/`runB` opens the
-  case tab with the correct selection; the dataset-benchmarks tab is re-homed
-  under Experiments without breaking existing `/algorithm-lab?tab=…` links
-- [ ] Step 2: RED
-- [ ] Step 3: implement
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
-- [ ] Step 6: commit `feat(frontend): link experiment compare to algorithm lab`
+Re-home requirement: existing M8 dataset-benchmark functionality MUST remain
+reachable, now inside the Experiments destination (NOT a fourth primary nav item):
+
+```text
+Experiments (ExperimentsPage tabs)
+├── experiments   (ExperimentList)
+├── compare       (ExperimentComparePage)
+└── benchmarks    (existing DatasetBenchmarksView)   ← re-homed here in F5.3
+```
+
+Preserved functionality (must remain working via the Experiments tab):
+`benchmark list`, imported-batch benchmark creation, benchmark detail, existing
+benchmark compare behavior, and per-recording `Open Case Comparison` links
+(`onOpenCase` still navigates to `/algorithm-lab?tab=case&recording=…&runA=…&runB=…`).
+
+Compatibility: old deep links
+`/algorithm-lab?tab=benchmarks&benchmark=<id>` must redirect/alias to
+`/experiments?tab=benchmarks&benchmark=<id>` (either a redirect route or an alias
+handler in `AlgorithmLabPage`). Existing `/algorithm-lab?tab=case&…` links remain
+valid.
+
+- [ ] Step 1: failing tests: `/experiments?tab=benchmarks` renders the existing
+  `DatasetBenchmarksView`; the benchmark list/detail/compare and imported-batch
+  creation remain reachable; a legacy `/algorithm-lab?tab=benchmarks&benchmark=<id>`
+  link redirects/aliases to the Experiments benchmarks tab; navigating with
+  `recording`/`runA`/`runB` on `/algorithm-lab` opens the case tab with the
+  correct selection
+- [ ] Step 2: run `cd frontend; npm test -- --run src/pages/AlgorithmLabPage.test.tsx src/pages/ExperimentsPage.test.tsx`; RED
+- [ ] Step 3: add the `benchmarks` tab to `ExperimentsPage`, remove the benchmarks
+  tab from `AlgorithmLabPage`, add the compatibility redirect/alias
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
+- [ ] Step 6: commit `feat(frontend): re-home dataset benchmarks under experiments`
 
 **Review checkpoint: after F4/F5 (i.e. after F5.3).** Human/independent F4/F5
 integration review runs once F5.3 is complete, before F6.
@@ -1019,23 +1134,47 @@ integration review runs once F5.3 is complete, before F6.
   `frontend/src/pages/SpectrumAnalysisPage.tsx`,
   `frontend/src/features/imports/ImportRunModal.tsx`,
   `frontend/src/features/algorithm-lab/CaseAnalysisView.tsx`,
-  `frontend/src/api/client.ts` (`compareAnalysisRuns`, `importAnalysisPackage`
-  must rethrow `PlatformApiError`, not a plain `Error`)
-- Test: `frontend/src/features/imports/ImportRunModal.test.tsx`,
+  `frontend/src/api/client.ts`
+- Test: `frontend/src/api/client.test.ts`,
+  `frontend/src/features/imports/ImportRunModal.test.tsx`,
   `frontend/src/pages/SpectrumAnalysisPage.test.tsx`
 
 **Interfaces:**
 - Consumes: `PlatformApiError`.
-- Produces: consistent `PlatformApiError.display` rendering and preserved codes.
+- Produces: consistent `PlatformApiError.display` rendering and preserved codes,
+  including the multipart import paths.
 
-- [ ] Step 1: failing tests: `compareAnalysisRuns` and `importAnalysisPackage`
-  rethrow `PlatformApiError`; pages render `code: message` (not a collapsed
-  generic message)
-- [ ] Step 2: RED
-- [ ] Step 3: implement; replace `reason instanceof Error ? reason.message`
-  collapse in the listed pages with `PlatformApiError`-aware rendering
-- [ ] Step 4: PASS
-- [ ] Step 5: `npm test -- --run`
+Client scope for structured-error convergence (ALL of these must throw
+`PlatformApiError`): `importRecording`, `importAnalysisPackage`,
+`compareAnalysisRuns`. Today `importRecording` performs a raw `fetch` and throws a
+plain `Error("API request failed: …")`; that path joins the convergence.
+
+For multipart `FormData` requests (`importRecording`, `importAnalysisPackage`),
+reuse a shared structured-error parsing seam (the same one used by
+`apiRequest`) that:
+```text
+preserves status
+preserves backend error.code
+preserves backend error.message
+preserves backend error.details
+does NOT force a Content-Type header for FormData
+```
+Do not change successful-response behavior.
+
+- [ ] Step 1: failing tests:
+  - `importRecording` structured 4xx → `PlatformApiError` with exact
+    code/message/details
+  - `importAnalysisPackage` structured 4xx → `PlatformApiError`
+  - `compareAnalysisRuns` structured 4xx → `PlatformApiError`
+  - pages render `PlatformApiError.display` (`code: message`), not a collapsed
+    generic message
+- [ ] Step 2: run `cd frontend; npm test -- --run src/api/client.test.ts`; RED
+- [ ] Step 3: implement the shared multipart-aware structured-error seam; route
+  `importRecording`/`importAnalysisPackage`/`compareAnalysisRuns` through it;
+  replace `reason instanceof Error ? reason.message` collapse in the listed pages
+  with `PlatformApiError`-aware rendering
+- [ ] Step 4: run `cd frontend; npm test -- --run`; PASS
+- [ ] Step 5: run `cd frontend; npm run build`; expect exit 0
 - [ ] Step 6: commit `fix(frontend): preserve platform error codes across pages`
 
 ### F6.2 Status / error model
@@ -1149,8 +1288,13 @@ execute F7/F8.
 - [ ] Step 3: IF `PipelineDefinitionRead` exposes `parameter_schema`:
   optionally add schema-driven controls (test: generic `{}` remains the fallback;
   no plugin-id branches)
-- [ ] Step 4: run `npm test -- --run`; `npm run build`
-- [ ] Step 5: commit each implemented condition separately under its own
+- [ ] Step 4: IF an authoritative evaluation-protocol choice surface exists
+  (protocol catalog/metadata endpoint): optionally add a protocol selector fed by
+  that surface (test: generic omission → backend default remains the fallback;
+  no hardcoded `physical_tf_detection_ap_v2`); otherwise keep the generic form
+  omitting `evaluationProtocol`
+- [ ] Step 5: run `npm test -- --run`; `npm run build`
+- [ ] Step 6: commit each implemented condition separately under its own
   descriptive `feat(frontend):` message; if a condition is false, record it in
   the task report and commit nothing for it
 
@@ -1229,7 +1373,7 @@ Explicit final source audit (acceptance evidence, NOT automated unit tests):
   inspect, never an automatic failure. Suggested checks:
   ```text
   git grep -n "executorPolicy" frontend/src
-  git grep -n "executor-availability" frontend/src/features/dataset-experiment frontend/src/pages/ExperimentsListPage.tsx
+  git grep -n "executor-availability" frontend/src/features/dataset-experiment frontend/src/pages/ExperimentsPage.tsx
   git grep -n "golden" frontend/src
   git grep -n "environment_ref" frontend/src
   ```
@@ -1386,6 +1530,30 @@ F7/F8 blocked until freeze.
     pure module `features/analysis-run/requestBuilder.ts`.
 11. Command convention: focused runs are `cd frontend; npm test -- --run <file>`;
     `npm run build` is the Type/build authority; no `npx`.
+
+### Execution-order corrections applied (third review)
+
+1. F1.3 lists and migrates the existing `SpectrumAnalysisPage.tsx` positional
+   `createAnalysisRun` caller; the `npm run build` gate proves no stale positional
+   caller remains. F1.4 (not F1.3) retires `executorPolicy`.
+2. F2.3 renders terminal `interrupted + ANALYSIS_LAUNCH_AMBIGUOUS` (not "failed");
+   any terminal run carrying `errorType` preserves the bounded code.
+3. F3.4 obtains `pluginId`/`pluginVersion` from the `/api/pipelines`
+   `PipelineDefinition` projection (no free-text/hardcoded/derived version).
+4. Generic F3 omits `evaluationProtocol`; `evaluationProtocol?` is optional in the
+   domain and private wire types; the resolved protocol is rendered as provenance;
+   a protocol choice surface is a conditional F7/YELLOW item.
+5. F3.5 enables Retry Failed ONLY from `completed_with_failures`; F3.9 owns a
+   distinct Retry Evaluation path (`failed` experiment + linked
+   `failed`/`interrupted` evaluation + all items completed).
+6. F3.9 has ONE exact deliverable (minimal `LinkedEvaluationSummary`); F4.1 later
+   replaces only its metrics area with `EvaluationMetricsView`.
+7. F5.3 really re-homes the existing `DatasetBenchmarksView` into the
+   `ExperimentsPage` `benchmarks` tab (with compatibility redirect for
+   `/algorithm-lab?tab=benchmarks…`), rather than removing it.
+8. F6.1 includes `importRecording`; multipart requests route through a shared
+   structured-error seam preserving status/code/message/details without forcing
+   `Content-Type` for `FormData`.
 
 ### Task count (updated)
 
