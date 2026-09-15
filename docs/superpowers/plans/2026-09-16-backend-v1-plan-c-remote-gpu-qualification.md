@@ -4,7 +4,7 @@
 
 **Goal:** Qualify the accepted Backend V1 `remote_gpu` execution path end-to-end on the real AutoDL GPU target while it is still rented — profile configuration, loopback transport mechanics, a bounded true two-host single `AnalysisRun`, a small true two-host ZoomSpec `DatasetExperiment`, deterministic recovery/reconciliation evidence, and a frozen Plan-C acceptance record — without changing remote-execution behavior, without weakening the exact per-installation certificate model, and without starting H5.5-S or turning the GPU off.
 
-**Architecture:** Plan C is primarily a **qualification/campaign** plan. The M9.1 remote-execution infrastructure is already implemented and unit/integration tested at the integration baseline. Plan C consumes it unchanged. The only possible production-seam change is a `remote_gpu` runtime-qualification type + install-eligibility (deferred by A3 to Plan C) — and whether that change is needed at all is decided by a new **C-pre-0** no-inference compatibility audit, not assumed. Two distinct control-plane installations (loopback and true two-host) each qualify/certify separately.
+**Architecture:** Plan C is primarily a **qualification/campaign** plan. The M9.1 remote-execution infrastructure is already implemented and unit/integration tested at the integration baseline. Plan C consumes it unchanged. C-pre-0 has already proved the existing certified remote runtime **incompatible** (P1–P4, hard, no adapter) and the operator ruling is **Ruling B** (`PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED`); therefore a `remote_gpu` runtime-qualification type + install-eligibility support is now a **required C-pre-1 production-seam change**, not a conditional one. Remote execution behavior itself remains unchanged. Two distinct control-plane installations (loopback and true two-host) each qualify/certify separately.
 
 **Tech Stack:** Python 3.12, FastAPI + Pydantic v2, SQLAlchemy 2 / SQLite, pytest (control plane ML-free), OpenSSH `ssh`/`scp`, AutoDL ML interpreter `/root/miniconda3/bin/python`, Plan-B control-plane venv `/root/autodl-tmp/WISA-backend-v1-plan-b-local-gpu/.venv/bin/python`.
 
@@ -16,7 +16,7 @@
 
 ## Global Constraints
 
-1. **C-pre-0 precedes any production change.** No `remote_gpu` qualification code is written until the certified-remote-runtime compatibility audit produces an operator-approved ruling. Do not pre-decide the ruling in this document.
+1. **C-pre-0 is complete and immutable for Plan C.** The ruling is fixed: `PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED` / Ruling B. No `remote_gpu` qualification code is written until C-pre-1, and C-pre-1 may implement **only** the approved `remote_gpu` qualification/install seam as named below. No compatibility shim for `5bb5be4` is permitted. Ruling A must not be reopened without a new operator architecture ruling.
 2. **No production-behavior change without explicit justification.** The remote-execution runtime, transport, coordinator, request/result identity, and Auto policy are consumed unchanged. Any change is confined to the qualification seam and named exactly in C-pre-1.
 3. **Plan-B evidence is immutable (read-only).** Read-only `stat`/`SHA256`/comparison is allowed for immutability checks. Forbidden: production application lifecycle open, migration, recovery, mutation, artifact rewrite, copying/reusing Plan-B qualification state as Plan-C state, deletion/normalization.
 4. **No Plan-C reuse of Plan-B state.** All Plan-C roots are fresh. Plan-B final actual 152 is never restated, reused, or mutated.
@@ -94,8 +94,8 @@ Classification: **A** implemented + unit/integration tested; **B** implemented b
 | Auto ranking incl. `remote_gpu` | A | `test_execution_selection_*`, `test_executor_selection_api` |
 | **Real remote_gpu run cross-host, same AnalysisRun** | **B** | never executed cross-host |
 | **Small real remote ZoomSpec DatasetExperiment + evaluation** | **B** | never executed |
-| **Certified-runtime compatibility ruling** | **C (C-pre-0)** | not yet performed |
-| **`remote_gpu` qualification type / install eligibility** | **D (conditional; Plan C)** | `INSTALL_ELIGIBLE_TYPES["remote_gpu"] == ()`; `cli._cmd_qualify` deferred for remote |
+| **Certified-runtime compatibility ruling** | **RESOLVED** | C-pre-0 executed: Ruling B; `PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED` |
+| **`remote_gpu` qualification type / install eligibility** | **D — REQUIRED by Ruling B** | `INSTALL_ELIGIBLE_TYPES["remote_gpu"] == ()`; `cli._cmd_qualify` still deferred for remote; C-pre-1 required |
 | **Per-installation remote certificate provisioning** | **C** | no operator remote certificate; existing cert binds only `5bb5be4` |
 | **Server-side foreign-GPU admission tooling** | **C** | not present |
 | **Operator bootstrap (profile/known_hosts/pin/assets)** | **E** | operator config only |
@@ -115,7 +115,7 @@ Classification: **A** implemented + unit/integration tested; **B** implemented b
 
 ## C-pre-0 — Certified Remote Runtime Compatibility Audit (NO INFERENCE)
 
-**Mandatory, before any production implementation.** Compare the current Host-A control plane against the existing certified Host-B remote runtime.
+**STATUS: COMPLETE (executed 2026-09-16) — this gate precedes C-pre-1 and its result is frozen.** Compare the current Host-A control plane against the existing certified Host-B remote runtime (recorded below).
 
 ```text
 CURRENT CONTROL PLANE   = 6716eae (or the later Plan-C candidate derived from it)
@@ -426,7 +426,7 @@ Plan C ends with the GPU still ON. No H5.5-S, cold switch, H5.5-C, Plan D, or `B
 ```text
 source/branch not at the exact approved SHA
 control plane not ML-free
-C-pre-0 unresolved (no explicit Ruling A/B)  [RESOLVED: Ruling B]
+C-pre-0 compatibility ruling absent or reopened (must remain Ruling B; Ruling A is REJECTED)
 remote HEAD != required_remote_runtime_commit
 host-key mismatch or `StrictHostKeyChecking=no` anywhere
 foreign GPU compute process present before a live gate
