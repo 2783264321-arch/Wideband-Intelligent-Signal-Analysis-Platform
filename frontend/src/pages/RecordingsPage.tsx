@@ -43,7 +43,7 @@ export function RecordingsPage() {
       setRecordings(page.items);
       setTotal(page.total);
     } catch (reason) {
-      setError(toErrorText(reason, "Unable to load recordings."));
+      setError(toErrorText(reason, t("recordings.loadError")));
     } finally {
       setLoading(false);
     }
@@ -59,7 +59,7 @@ export function RecordingsPage() {
       setRecordings((items) => [...items, ...page.items]);
       setTotal(page.total);
     } catch (reason) {
-      setError(toErrorText(reason, "Unable to load more recordings."));
+      setError(toErrorText(reason, t("recordings.loadMoreError")));
     } finally {
       setLoadingMore(false);
     }
@@ -68,7 +68,7 @@ export function RecordingsPage() {
   const submitImport = async () => {
     const values = await form.validateFields();
     if (!file) {
-      setError("Choose a complex64 IQ file before importing.");
+      setError(t("recordings.chooseFileError"));
       return;
     }
     setSubmitting(true);
@@ -88,7 +88,7 @@ export function RecordingsPage() {
       await refresh();
       navigate(`/spectrum/${recording.id}`);
     } catch (reason) {
-      setError(toErrorText(reason, "Unable to import recording."));
+      setError(toErrorText(reason, t("recordings.importError")));
     } finally {
       setSubmitting(false);
     }
@@ -103,7 +103,7 @@ export function RecordingsPage() {
       setRegistrationSummary(summary);
       await refresh();
     } catch (reason) {
-      setError(toErrorText(reason, "Unable to register dataset."));
+      setError(toErrorText(reason, t("recordings.registerError")));
     } finally {
       setRegistering(false);
     }
@@ -138,7 +138,7 @@ export function RecordingsPage() {
         <Card
           key={recording.id}
           title={recording.name}
-          extra={recording.datasetName ? <Tag color="geekblue">{recording.datasetName}</Tag> : <Tag>Custom IQ</Tag>}
+          extra={recording.datasetName ? <Tag color="geekblue">{recording.datasetName}</Tag> : <Tag>{t("recordings.customIq")}</Tag>}
           actions={[
             <Button key="open" type="link" onClick={() => navigate(`/spectrum/${recording.id}`)}>{t("spectrum.open")}</Button>,
           ]}
@@ -161,58 +161,62 @@ export function RecordingsPage() {
       ) : null}
 
       <Modal
-        title="Import complex64 IQ Recording"
+        title={t("recordings.importModalTitle")}
         open={modalOpen}
         confirmLoading={submitting}
         onOk={() => void submitImport()}
         onCancel={() => setModalOpen(false)}
-        okText="Import"
+        okText={t("recordings.importConfirm")}
       >
         <Form form={form} layout="vertical" initialValues={{ labelSpace: "spacenet_14" }}>
-          <Form.Item name="name" label="Recording name" rules={[{ required: true }]}>
+          <Form.Item name="name" label={t("recordings.fieldName")} rules={[{ required: true }]}>
             <Input placeholder="tiny-demo" />
           </Form.Item>
-          <Form.Item name="sampleRateHz" label="Sample rate (Hz)" rules={[{ required: true }]}>
+          <Form.Item name="sampleRateHz" label={t("recordings.fieldSampleRate")} rules={[{ required: true }]}>
             <InputNumber style={{ width: "100%" }} min={1} />
           </Form.Item>
-          <Form.Item name="centerFrequencyHz" label="Center frequency (Hz)" rules={[{ required: true }]}>
+          <Form.Item name="centerFrequencyHz" label={t("recordings.fieldCenterFrequency")} rules={[{ required: true }]}>
             <InputNumber style={{ width: "100%" }} />
           </Form.Item>
-          <Form.Item name="labelSpace" label="Label space">
+          <Form.Item name="labelSpace" label={t("form.labelSpace")}>
             <Input placeholder="spacenet_14" />
           </Form.Item>
-          <Form.Item label="IQ file (.bin)">
+          <Form.Item label={t("recordings.fieldIqFile")}>
             <input type="file" accept=".bin,.iq,.dat" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
           </Form.Item>
-          <Typography.Text type="secondary">V1 custom import expects little-endian complex64 interleaved I/Q.</Typography.Text>
+          <Typography.Text type="secondary">{t("recordings.importHint")}</Typography.Text>
         </Form>
       </Modal>
 
       <Modal
-        title="Register SpaceNet Dataset"
+        title={t("common.registerDataset")}
         open={registerOpen}
         confirmLoading={registering}
         onOk={() => void submitRegistration()}
         onCancel={closeRegistration}
-        okText="Register"
+        okText={t("recordings.registerConfirm")}
       >
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           {registrationSummary ? (
             <Alert
               type="success"
               showIcon
-              message="Registration complete"
-              description={`Created ${registrationSummary.created} · Skipped ${registrationSummary.skipped} · Invalid ${registrationSummary.invalid}`}
+              message={t("recordings.registerSuccess")}
+              description={t("recordings.registerSummary", {
+                created: registrationSummary.created,
+                skipped: registrationSummary.skipped,
+                invalid: registrationSummary.invalid,
+              })}
             />
           ) : null}
           <Input
             placeholder="D:\LGFiles\Wideband Signal Analysis Platform\SpaceNet\test"
             value={datasetPath}
             onChange={(event) => setDatasetPath(event.target.value)}
-            aria-label="SpaceNet dataset path"
+            aria-label={t("recordings.datasetPath")}
           />
           <Typography.Text type="secondary">
-            Registers metadata and Ground Truth from the server-local dataset. IQ files stay on disk and are never uploaded or copied.
+            {t("recordings.registerHint")}
           </Typography.Text>
         </Space>
       </Modal>

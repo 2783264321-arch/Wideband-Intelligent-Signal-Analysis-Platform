@@ -5,8 +5,10 @@ import { ExperimentComparePage } from "./ExperimentComparePage";
 import { ExperimentList } from "../features/dataset-experiment/ExperimentList";
 import { ExperimentCreateForm } from "../features/dataset-experiment/ExperimentCreateForm";
 import { DatasetBenchmarksView } from "../features/dataset-benchmarks/DatasetBenchmarksView";
+import { useLocalization } from "../localization/useLocalization";
 
 export function ExperimentsPage() {
+  const { t } = useLocalization();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [createOpen, setCreateOpen] = useState(false);
@@ -31,18 +33,18 @@ export function ExperimentsPage() {
         items={[
           {
             key: "experiments",
-            label: "Experiments",
+            label: t("nav.experiments"),
             children: (
               <Space direction="vertical" style={{ width: "100%" }}>
-                <Button type="primary" onClick={() => setCreateOpen(true)}>New Experiment</Button>
+                <Button type="primary" onClick={() => setCreateOpen(true)}>{t("common.newExperiment")}</Button>
                 <ExperimentList />
               </Space>
             ),
           },
-          { key: "compare", label: "Compare", children: <ExperimentComparePage /> },
+          { key: "compare", label: t("common.compare"), children: <ExperimentComparePage /> },
           {
             key: "benchmarks",
-            label: "Benchmarks",
+            label: t("benchmarks.tabLabel"),
             children: (
               <DatasetBenchmarksView
                 selectedBenchmarkId={benchmarkId}
@@ -55,7 +57,7 @@ export function ExperimentsPage() {
         ]}
       />
       <Modal
-        title="New Dataset Experiment"
+        title={t("experiment.modalTitle")}
         open={createOpen}
         onCancel={() => setCreateOpen(false)}
         footer={null}

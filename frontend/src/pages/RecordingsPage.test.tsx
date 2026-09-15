@@ -3,7 +3,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RecordingsPage } from "./RecordingsPage";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
-function setup() {
+function setup(locale: "zh-CN" | "en-US" = "en-US") {
   const requests: { url: string; method: string; body: unknown; contentType: string | null }[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
     const method = options?.method ?? "GET";
@@ -23,6 +23,7 @@ function setup() {
       <MemoryRouter initialEntries={["/"]}>
         <Routes><Route path="/" element={<RecordingsPage />} /></Routes>
       </MemoryRouter>,
+      { locale },
     ),
   );
   return requests;
@@ -47,4 +48,19 @@ test("registers a server-local dataset path as JSON, not a multipart upload", as
     dataset_path: "D:\\LGFiles\\Wideband Signal Analysis Platform\\SpaceNet\\test",
     split: "test",
   }));
+});
+test("localizes the recordings workspace and registration dialog in zh-CN while preserving raw identity", async () => {
+  const requests = setup("zh-CN");
+  expect(await screen.findByRole("button", { name: "导入信号记录" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "导入已有分析任务" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "注册 SpaceNet 数据集" }));
+  fireEvent.change(screen.getByLabelText("SpaceNet 数据集路径"), {
+    target: { value: "D:\\SpaceNet\\test" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /^注\s?册$/ }));
+  expect(await screen.findByText(/新建 2500 · 跳过 0 · 无效 0/)).toBeInTheDocument();
+
+  const registerCall = requests.find((item) => item.url.endsWith("/api/datasets/spacenet/register"));
+  expect(registerCall!.body).toEqual(JSON.stringify({ dataset_path: "D:\\SpaceNet\\test", split: "test" }));
 });

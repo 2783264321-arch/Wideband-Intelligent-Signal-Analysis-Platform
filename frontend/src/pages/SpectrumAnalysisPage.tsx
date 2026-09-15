@@ -9,6 +9,7 @@ import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
 import { RunStatusBadge } from "../features/analysis-run/RunStatusBadge";
 import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { useLocalization } from "../localization/useLocalization";
+import type { MessageKey } from "../localization/types";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
@@ -17,10 +18,10 @@ import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
 
 const activeStatuses = new Set(["pending", "running"]);
 
-function pipelineOptionLabel(item: PipelineDefinition): string {
+function pipelineOptionLabel(item: PipelineDefinition, t: (key: MessageKey) => string): string {
   const base = `${item.name} · ${item.recommendedDevice}`;
   if (item.taskCapability === "detection_localization") {
-    return `${base} · Detection & localization only`;
+    return `${base} · ${t("spectrum.capabilityDetectionLocalization")}`;
   }
   return base;
 }
@@ -76,7 +77,7 @@ export function SpectrumAnalysisPage() {
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setError(toErrorText(reason, "Unable to load recording."));
+        setError(toErrorText(reason, t("spectrum.loadRecordingError")));
       });
     return () => { active = false; };
   }, [recordingId, runId]);
@@ -104,7 +105,7 @@ export function SpectrumAnalysisPage() {
       })
       .catch((reason: unknown) => {
         if (!active) return;
-        setSelectionError(toErrorText(reason, "Unable to load execution environments."));
+        setSelectionError(toErrorText(reason, t("spectrum.loadExecutionEnvironmentsError")));
       })
       .finally(() => {
         if (!active) return;
@@ -118,7 +119,7 @@ export function SpectrumAnalysisPage() {
     runId: currentRun !== null && activeStatuses.has(currentRun.status) ? currentRun.id : undefined,
     onRun: setCurrentRun,
     onDetections: setDetections,
-    onError: (reason: unknown) => setError(toErrorText(reason, "Unable to poll analysis run.")),
+    onError: (reason: unknown) => setError(toErrorText(reason, t("spectrum.pollRunError"))),
   });
 
   const selected = useMemo(() => detections.find((d) => d.id === selectedId), [detections, selectedId]);
@@ -153,16 +154,16 @@ export function SpectrumAnalysisPage() {
       next.delete("selected");
       setSearchParams(next);
     } catch (reason) {
-      setError(toErrorText(reason, "Unable to start analysis."));
+      setError(toErrorText(reason, t("spectrum.startAnalysisError")));
     }
   };
 
-  if (error && !recording) return <Alert type="error" showIcon message="Unable to open spectrum workspace" description={error} />;
+  if (error && !recording) return <Alert type="error" showIcon message={t("spectrum.workspaceError")} description={error} />;
   if (!recording || !spectrogram) return <Spin tip={t("common.loadingRecording")} />;
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      {error ? <Alert type="error" showIcon message="Analysis warning" description={error} closable onClose={() => setError(null)} /> : null}
+      {error ? <Alert type="error" showIcon message={t("spectrum.warning")} description={error} closable onClose={() => setError(null)} /> : null}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
         <div>
           <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>
@@ -176,10 +177,10 @@ export function SpectrumAnalysisPage() {
             value={pipelineId}
             style={{ width: 360 }}
             onChange={setPipelineId}
-            options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item) }))}
+            options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
           />
           <Button type="primary" loading={runActive} disabled={!canRun} onClick={() => void runAnalysis()}>
-            {runActive ? "Analyzing..." : "Run Analysis"}
+            {runActive ? t("common.analyzing") : t("common.runAnalysis")}
           </Button>
         </Space>
       </div>
@@ -209,7 +210,7 @@ export function SpectrumAnalysisPage() {
               selectedDetectionId={selectedId}
               onSelectDetection={selectDetection}
             />
-            {selected ? <Typography.Text style={{ display: "block", marginTop: 12 }}>Selected: {selected.className}</Typography.Text> : null}
+            {selected ? <Typography.Text style={{ display: "block", marginTop: 12 }}>{t("spectrum.selected")}: {selected.className}</Typography.Text> : null}
           </Card>
         </Col>
         <Col xs={24} xl={6}>

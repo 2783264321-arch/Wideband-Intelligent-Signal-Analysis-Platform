@@ -154,6 +154,7 @@ interface SetupOptions {
   runFixture?: Record<string, unknown>;
   readbackFixture?: Record<string, unknown>;
   initialPath?: string;
+  locale?: "zh-CN" | "en-US";
 }
 
 function setup(options: SetupOptions = {}) {
@@ -168,6 +169,7 @@ function setup(options: SetupOptions = {}) {
     runFixture = runWire(),
     readbackFixture = runWire({ status: "completed" }),
     initialPath = "/spectrum/rec_1",
+    locale = "en-US",
   } = options;
 
   vi.stubGlobal("fetch", vi.fn(async (url: string, fetchOptions?: RequestInit) => {
@@ -201,6 +203,7 @@ function setup(options: SetupOptions = {}) {
           <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
         </Routes>
       </MemoryRouter>,
+      { locale },
     ),
   );
   return { posted, selectionCalls, resolveDeferred: () => resolveDeferred };
@@ -413,7 +416,7 @@ const deepLinkRun = {
   created_at: null,
 };
 
-function deepLinkSetup(initialPath: string) {
+function deepLinkSetup(initialPath: string, locale: "zh-CN" | "en-US" = "en-US") {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify([localPipeline]));
     if (url.endsWith("/api/recordings/rec_1")) return new Response(JSON.stringify(recording));
@@ -432,6 +435,7 @@ function deepLinkSetup(initialPath: string) {
           <Route path="/signals/:runId/:detectionId" element={<div>Signal Detail Page</div>} />
         </Routes>
       </MemoryRouter>,
+      { locale },
     ),
   );
 }
@@ -462,4 +466,74 @@ test("View Details navigates to /signals/:runId/:detectionId", async () => {
   await screen.findByText(/LoRa 250kHz/);
   fireEvent.click(screen.getByRole("button", { name: "View Details" }));
   await screen.findByText("Signal Detail Page");
+});
+
+// ---------------------------------------------------------------------------
+// L4 residual corrective — zh-CN coverage for the spectrum workspace
+// ---------------------------------------------------------------------------
+
+test("localizes the spectrum workspace shell and run controls in zh-CN while preserving technical identity", async () => {
+  setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable, locale: "zh-CN" });
+  await screen.findByText("Burst Demo");
+  expect(screen.getByRole("button", { name: "开始分析" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Run Analysis" })).toBeNull();
+  expect(screen.getByText("检测结果")).toBeInTheDocument();
+  expect(screen.getByText("真值标注（GT）")).toBeInTheDocument();
+  // Technical presentation is unchanged: Fs/Fc units and the STFT token.
+  expect(screen.getByText(/Fs 1\.000 MHz/)).toBeInTheDocument();
+  expect(screen.getByText(/Fc 2\.441000 GHz/)).toBeInTheDocument();
+  expect(screen.getByText("STFT")).toBeInTheDocument();
+});
+
+test("localizes the active run control in zh-CN", async () => {
+  const { posted } = setup({
+    pipelines: [localPipeline, detectorPipeline],
+    selection: selectionLocalAvailable,
+    locale: "zh-CN",
+    runFixture: runWire({ status: "running" }),
+  });
+  await screen.findByText("Burst Demo");
+  fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(await screen.findByRole("button", { name: "分析中…" })).toBeInTheDocument();
+});
+
+test("localizes the detection-only pipeline capability copy in zh-CN and preserves pipeline identity", async () => {
+  setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable, locale: "zh-CN" });
+  await screen.findByText("Burst Demo");
+  fireEvent.mouseDown(screen.getByText("Dummy Pipeline · CPU"));
+  const option = await screen.findByTitle("STFT Energy Detector · CPU · 仅检测与定位");
+  expect(option).toBeInTheDocument();
+  expect(screen.queryByTitle(/Detection & localization only/)).toBeNull();
+});
+
+test("localizes the selected-detection label in zh-CN while preserving raw class identity", async () => {
+  deepLinkSetup("/spectrum/rec_1?run=run_2&selected=det_1", "zh-CN");
+  await screen.findByText("Burst Demo");
+  await waitFor(() => expect(screen.getByText(/已选: LoRa 250kHz/)).toBeInTheDocument());
+});
+
+test("localizes the spectrum error shell in zh-CN and preserves the raw backend detail", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/api/recordings/")) {
+      return new Response(JSON.stringify({ error: { code: "BOOM", message: "transient" } }), { status: 503 });
+    }
+    if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify([localPipeline]));
+    if (url.includes("/spectrogram")) return new Response(JSON.stringify(spectrogram));
+    if (url.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionLocalAvailable));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/spectrum/rec_1"]}>
+        <Routes>
+          <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+        </Routes>
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  expect(await screen.findByText("无法打开频谱工作台")).toBeInTheDocument();
+  expect(screen.queryByText("Unable to open spectrum workspace")).toBeNull();
+  expect(screen.getByText(/BOOM: transient/)).toBeInTheDocument();
 });
