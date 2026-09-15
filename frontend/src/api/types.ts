@@ -462,3 +462,35 @@ export interface DatasetExperimentCreateRequest {
   evaluationProtocol?: string; // omit to let the backend apply its default
   maxConcurrency: number;
 }
+
+// ---------------------------------------------------------------------------
+// Batch Analysis Package import (BAPv1) — POST /api/imported-runs/batch
+// ---------------------------------------------------------------------------
+
+export interface BatchRunMapping {
+  recordingId: string;
+  recordingName: string;
+  analysisRunId: string;
+}
+
+export interface BatchImportSummary {
+  batchId: string;
+  importFingerprint: string;
+  archiveSha256: string;
+  datasetName: string;
+  datasetSplit: string;
+  pipelineId: string;
+  pipelineVersion: string;
+  labelSpace: string;
+  itemCount: number;
+  detectionCount: number;
+  alreadyImported: boolean;
+  createdRuns: number;
+  existingRuns: number;
+  createdDetections: number;
+  matchedRecordings: number;
+  missingRecordings: number;
+  ambiguousRecordings: number;
+  fingerprintMismatches: number;
+  recordingRunMapping: BatchRunMapping[];
+}

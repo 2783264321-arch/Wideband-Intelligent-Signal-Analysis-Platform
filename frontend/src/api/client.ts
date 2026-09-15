@@ -860,6 +860,75 @@ export async function importAnalysisPackage(recordingId: string, file: File): Pr
   return mapAnalysisRun(await response.json() as AnalysisRunWire);
 }
 
+interface BatchRunMappingWire {
+  recording_id: string;
+  recording_name: string;
+  analysis_run_id: string;
+}
+
+interface BatchImportSummaryWire {
+  batch_id: string;
+  import_fingerprint: string;
+  archive_sha256: string;
+  dataset_name: string;
+  dataset_split: string;
+  pipeline_id: string;
+  pipeline_version: string;
+  label_space: string;
+  item_count: number;
+  detection_count: number;
+  already_imported: boolean;
+  created_runs: number;
+  existing_runs: number;
+  created_detections: number;
+  matched_recordings: number;
+  missing_recordings: number;
+  ambiguous_recordings: number;
+  fingerprint_mismatches: number;
+  recording_run_mapping: BatchRunMappingWire[];
+}
+
+/** Snake_case wire -> camelCase domain mapping for the batch import summary. */
+function mapBatchImportSummary(item: BatchImportSummaryWire): import("./types").BatchImportSummary {
+  return {
+    batchId: item.batch_id,
+    importFingerprint: item.import_fingerprint,
+    archiveSha256: item.archive_sha256,
+    datasetName: item.dataset_name,
+    datasetSplit: item.dataset_split,
+    pipelineId: item.pipeline_id,
+    pipelineVersion: item.pipeline_version,
+    labelSpace: item.label_space,
+    itemCount: item.item_count,
+    detectionCount: item.detection_count,
+    alreadyImported: item.already_imported,
+    createdRuns: item.created_runs,
+    existingRuns: item.existing_runs,
+    createdDetections: item.created_detections,
+    matchedRecordings: item.matched_recordings,
+    missingRecordings: item.missing_recordings,
+    ambiguousRecordings: item.ambiguous_recordings,
+    fingerprintMismatches: item.fingerprint_mismatches,
+    recordingRunMapping: item.recording_run_mapping.map((row) => ({
+      recordingId: row.recording_id,
+      recordingName: row.recording_name,
+      analysisRunId: row.analysis_run_id,
+    })),
+  };
+}
+
+/**
+ * Import a Batch Analysis Package (BAPv1) ZIP via the existing production
+ * endpoint. Presentation-only seam: no SSH credentials, no server job controls.
+ */
+export async function importBatchRun(file: File): Promise<import("./types").BatchImportSummary> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch(apiUrl("/api/imported-runs/batch"), { method: "POST", body });
+  if (!response.ok) throw await structuredErrorFromResponse(response);
+  return mapBatchImportSummary(await response.json() as BatchImportSummaryWire);
+}
+
 // ---------------------------------------------------------------------------
 // Dataset Benchmark API boundary (typed snake_case wire -> camelCase domain)
 // ---------------------------------------------------------------------------
