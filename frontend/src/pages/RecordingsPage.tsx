@@ -1,4 +1,5 @@
 import { Alert, Button, Card, Empty, Form, Input, InputNumber, Modal, Space, Spin, Tag, Typography } from "antd";
+import { useLocalization } from "../localization/useLocalization";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { importRecording, listRecordings, registerSpaceNetDataset } from "../api/client";
@@ -18,6 +19,7 @@ const PAGE_SIZE = 50;
 
 export function RecordingsPage() {
   const navigate = useNavigate();
+  const { t } = useLocalization();
   const [recordings, setRecordings] = useState<RecordingDetail[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -117,28 +119,28 @@ export function RecordingsPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16 }}>
         <div>
-          <Typography.Title level={2} style={{ marginBottom: 4 }}>Recording Library</Typography.Title>
+          <Typography.Title level={2} style={{ marginBottom: 4 }}>{t("recordings.title")}</Typography.Title>
           <Typography.Text type="secondary">
-            {total > 0 ? `${total} recording${total === 1 ? "" : "s"} · ` : ""}Open an offline IQ recording or import your own data.
+            {total > 0 ? `${total} · ` : ""}{t("recordings.subtitle")}
           </Typography.Text>
         </div>
         <Space>
-          <Button onClick={() => setRegisterOpen(true)}>Register SpaceNet Dataset</Button>
-          <Button onClick={() => setImportRunOpen(true)}>Import Existing Run</Button>
-          <Button type="primary" onClick={() => setModalOpen(true)}>Import Recording</Button>
+          <Button onClick={() => setRegisterOpen(true)}>{t("common.registerDataset")}</Button>
+          <Button onClick={() => setImportRunOpen(true)}>{t("common.importRun")}</Button>
+          <Button type="primary" onClick={() => setModalOpen(true)}>{t("common.importRecording")}</Button>
         </Space>
       </div>
 
       {error ? <Alert type="error" showIcon message={error} /> : null}
-      {loading ? <Spin tip="Loading recordings..." /> : null}
-      {!loading && recordings.length === 0 ? <Empty description="No recordings imported yet" /> : null}
+      {loading ? <Spin tip={t("common.loading")} /> : null}
+      {!loading && recordings.length === 0 ? <Empty description={t("recordings.empty")} /> : null}
       {recordings.map((recording) => (
         <Card
           key={recording.id}
           title={recording.name}
           extra={recording.datasetName ? <Tag color="geekblue">{recording.datasetName}</Tag> : <Tag>Custom IQ</Tag>}
           actions={[
-            <Button key="open" type="link" onClick={() => navigate(`/spectrum/${recording.id}`)}>Open Spectrum</Button>,
+            <Button key="open" type="link" onClick={() => navigate(`/spectrum/${recording.id}`)}>{t("spectrum.open")}</Button>,
           ]}
         >
           <Space wrap>
@@ -146,14 +148,14 @@ export function RecordingsPage() {
             <Tag>Fc {(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz</Tag>
             <Tag>{recording.durationS.toFixed(6)} s</Tag>
             <Tag>{recording.dataFormat}</Tag>
-            {recording.hasGroundTruth ? <Tag>Ground Truth</Tag> : null}
+            {recording.hasGroundTruth ? <Tag>{t("common.groundTruth")}</Tag> : null}
           </Space>
         </Card>
       ))}
       {!loading && recordings.length < total ? (
         <div style={{ textAlign: "center" }}>
           <Button onClick={() => void loadMore()} loading={loadingMore}>
-            Load More ({total - recordings.length} remaining)
+            {t("common.loadMore")} ({total - recordings.length})
           </Button>
         </div>
       ) : null}

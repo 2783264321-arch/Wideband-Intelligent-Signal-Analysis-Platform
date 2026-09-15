@@ -8,6 +8,7 @@ import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder
 import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
 import { RunStatusBadge } from "../features/analysis-run/RunStatusBadge";
 import { useRunPolling } from "../features/analysis-run/useRunPolling";
+import { useLocalization } from "../localization/useLocalization";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
@@ -51,6 +52,7 @@ export function SpectrumAnalysisPage() {
   const effectiveSelection = effectiveSelectionForScope(boundSelection, selectionScopeKey);
   // User's explicit execution environment value. Auto stays Auto across the request boundary.
   const [environment, setEnvironment] = useState<ExecutionEnvironmentValue>({ mode: "auto", executor: null });
+  const { t } = useLocalization();
 
   useEffect(() => {
     let active = true;
@@ -156,7 +158,7 @@ export function SpectrumAnalysisPage() {
   };
 
   if (error && !recording) return <Alert type="error" showIcon message="Unable to open spectrum workspace" description={error} />;
-  if (!recording || !spectrogram) return <Spin tip="Loading recording and STFT spectrum..." />;
+  if (!recording || !spectrogram) return <Spin tip={t("common.loadingRecording")} />;
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -190,11 +192,11 @@ export function SpectrumAnalysisPage() {
         disabled={runActive}
       />
       <Space wrap>
-        <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>Prediction</Checkbox>
-        <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>Ground Truth</Checkbox>
+        <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>{t("common.prediction")}</Checkbox>
+        <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t(common.groundTruth)}</Checkbox>
         {currentRun ? (
           <RunStatusBadge status={currentRun.status} errorType={currentRun.errorType} errorMessage={currentRun.errorMessage} />
-        ) : <Typography.Text type="secondary">No AnalysisRun selected yet.</Typography.Text>}
+        ) : <Typography.Text type="secondary">{t(`common.noRunSelected`)}</Typography.Text>}
         {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
       </Space>
       <Row gutter={16} align="stretch">

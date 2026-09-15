@@ -40,10 +40,12 @@ export const enUS = {
   "common.stft": "STFT",
 
   "recordings.title": "Recording Library",
+  "recordings.subtitle": "Open an offline IQ recording or import your own data.",
   "recordings.empty": "No recordings yet.",
   "recordings.importSuccess": "Recording imported.",
 
   "spectrum.title": "Spectrum Analysis",
+  "spectrum.open": "Open Spectrum",
   "spectrum.subtitle": "Inspect the time-frequency representation of one recording.",
   "spectrum.detectedSignals": "Detected Signals",
   "spectrum.selected": "Selected",

@@ -1,4 +1,5 @@
 import { Tabs } from "antd";
+import { useLocalization } from "../localization/useLocalization";
 import { useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { CaseAnalysisView } from "../features/algorithm-lab/CaseAnalysisView";
@@ -10,6 +11,7 @@ import { CaseAnalysisView } from "../features/algorithm-lab/CaseAnalysisView";
  * `/experiments?tab=benchmarks&benchmark=<id>` for compatibility.
  */
 export function AlgorithmLabPage() {
+  const { t } = useLocalization();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const recordingId = params.get("recording") ?? undefined;
@@ -40,7 +42,7 @@ export function AlgorithmLabPage() {
       items={[
         {
           key: "case",
-          label: "Case Analysis",
+          label: t("algorithmLab.caseAnalysisTab"),
           children: (
             <CaseAnalysisView
               recordingId={recordingId}

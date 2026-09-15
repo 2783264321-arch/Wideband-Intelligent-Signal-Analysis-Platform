@@ -46,10 +46,12 @@ export const zhCN: Record<MessageKey, string> = {
   "common.stft": "STFT",
 
   "recordings.title": "信号记录库",
+  "recordings.subtitle": "打开离线 IQ 信号记录，或导入你自己的数据。",
   "recordings.empty": "暂无信号记录。",
   "recordings.importSuccess": "信号记录已导入。",
 
   "spectrum.title": "频谱分析",
+  "spectrum.open": "打开频谱",
   "spectrum.subtitle": "查看单条信号记录的时频表示。",
   "spectrum.detectedSignals": "信号检测结果",
   "spectrum.selected": "已选",
