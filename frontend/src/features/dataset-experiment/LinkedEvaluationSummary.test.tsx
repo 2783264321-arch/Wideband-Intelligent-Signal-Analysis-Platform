@@ -118,3 +118,38 @@ test("renders nothing when there is no linked evaluation", () => {
   );
   expect(screen.queryByTestId("linked-evaluation-summary")).toBeNull();
 });
+
+test("a successful retry notifies the parent with the backend-returned experiment", async () => {
+  const retryWire = {
+    ...(() => {
+      const base = experiment();
+      return {
+        id: base.id, name: base.name, dataset_name: base.datasetName, dataset_split: base.datasetSplit,
+        dataset_label_space: base.datasetLabelSpace, recording_manifest_hash: base.recordingManifestHash,
+        plugin_id: base.pluginId, plugin_version: base.pluginVersion, model_release_id: null, asset_manifest_sha256: null,
+        parameters_json: {}, executor: base.executor, evaluation_protocol: base.evaluationProtocol,
+        max_concurrency: base.maxConcurrency, status: "evaluating", dataset_evaluation_id: "eval_1",
+        error_type: null, error_message: null, created_at: null, started_at: null, completed_at: null,
+        requested_execution_mode: "auto", auto_reason_code: null, auto_reason: null, workload_class: null,
+        expected_items: 3, queued_items: 0, running_items: 0, completed_items: 3, failed_items: 0, attempt_count: 3,
+      };
+    })(),
+  };
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    urls.push(`${options?.method ?? "GET"} ${url}`);
+    if (url.includes("/retry-evaluation")) return new Response(JSON.stringify(retryWire));
+    return new Response(JSON.stringify(evaluationWire()));
+  }));
+  const onRetryAccepted = vi.fn();
+  render(
+    <MemoryRouter>
+      <LinkedEvaluationSummary experiment={experiment()} onRetryAccepted={onRetryAccepted} />
+    </MemoryRouter>,
+  );
+  await screen.findByTestId("linked-evaluation-summary");
+  fireEvent.click(screen.getByRole("button", { name: "Retry Evaluation" }));
+  await waitFor(() => expect(onRetryAccepted).toHaveBeenCalledTimes(1));
+  expect(onRetryAccepted.mock.calls[0][0].status).toBe("evaluating");
+  expect(urls.some((u) => u.includes("/api/dataset-experiments/exp_1/retry-evaluation"))).toBe(true);
+});

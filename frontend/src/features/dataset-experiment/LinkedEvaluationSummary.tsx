@@ -16,7 +16,13 @@ function toErrorText(reason: unknown): string {
  * experiment failed + linked evaluation failed/interrupted + all inference items
  * completed. The backend remains the final authority.
  */
-export function LinkedEvaluationSummary({ experiment }: { experiment: DatasetExperiment }) {
+export function LinkedEvaluationSummary({
+  experiment,
+  onRetryAccepted,
+}: {
+  experiment: DatasetExperiment;
+  onRetryAccepted?: (experiment: DatasetExperiment) => void;
+}) {
   const [evaluation, setEvaluation] = useState<DatasetEvaluation | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,7 +57,9 @@ export function LinkedEvaluationSummary({ experiment }: { experiment: DatasetExp
   const retry = async () => {
     setError(null);
     try {
-      await retryDatasetExperimentEvaluation(experiment.id);
+      const updated = await retryDatasetExperimentEvaluation(experiment.id);
+      // Backend-returned experiment is authoritative; let the parent restart from it.
+      if (onRetryAccepted) onRetryAccepted(updated);
     } catch (reason) {
       setError(toErrorText(reason));
     }

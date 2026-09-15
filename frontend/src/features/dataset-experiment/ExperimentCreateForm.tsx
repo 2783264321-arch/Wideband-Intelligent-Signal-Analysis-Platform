@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { createDatasetExperiment, getExecutorSelection, listPipelines, PlatformApiError } from "../../api/client";
 import type { PipelineDefinition } from "../../api/types";
 import { ExecutionEnvironmentSelector } from "../execution-environment/ExecutionEnvironmentSelector";
-import { effectiveSelectionForScope, type BoundExecutorSelection } from "../execution-environment/executionEnvironment";
+import { effectiveSelectionForScope, optionsFromSelection, type BoundExecutorSelection } from "../execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../execution-environment/types";
 import { toCreateRequest } from "./types";
 
@@ -36,6 +36,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
   const [boundSelection, setBoundSelection] = useState<BoundExecutorSelection | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const datasetScopeKey = JSON.stringify([datasetName, datasetSplit, datasetLabelSpace, pipelineId]);
   const effectiveSelection = effectiveSelectionForScope(boundSelection, datasetScopeKey);
@@ -50,6 +51,9 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
 
   useEffect(() => {
     setBoundSelection(null);
+    // A scope identity change resets the user execution value to Auto; a stale
+    // manual executor can never authorize a different dataset/pipeline scope.
+    setEnvironment({ mode: "auto", executor: null });
     if (pipelineId === null || datasetName === "" || datasetSplit === "" || datasetLabelSpace === "") return undefined;
     const scopeKey = JSON.stringify([datasetName, datasetSplit, datasetLabelSpace, pipelineId]);
     let active = true;
@@ -74,12 +78,27 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
     [pipelines, pipelineId],
   );
 
+  const environmentOptions = useMemo(() => optionsFromSelection(effectiveSelection), [effectiveSelection]);
+  const selectedEnvironmentOption = useMemo(
+    () => environmentOptions.find((option) => option.key === (environment.mode === "auto" ? "auto" : environment.executor)) ?? null,
+    [environmentOptions, environment.mode, environment.executor],
+  );
+  const identityValid =
+    selectedPipeline !== null &&
+    name.trim() !== "" &&
+    datasetName.trim() !== "" &&
+    datasetSplit.trim() !== "" &&
+    datasetLabelSpace.trim() !== "";
+  const canCreate = identityValid && selectedEnvironmentOption?.enabled === true && !submitting;
+
   const submit = async () => {
     setError(null);
+    if (!canCreate) return;
     if (selectedPipeline === null) {
       setError("Select a pipeline.");
       return;
     }
+    setSubmitting(true);
     try {
       const request = toCreateRequest({
         name,
@@ -96,6 +115,8 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
       navigate(`/experiments/${created.id}`);
     } catch (reason) {
       setError(toErrorText(reason));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -134,7 +155,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
         value={environment}
         onChange={setEnvironment}
       />
-      <Button type="primary" onClick={() => void submit()}>Create Experiment</Button>
+      <Button type="primary" disabled={!canCreate} loading={submitting} onClick={() => void submit()}>Create Experiment</Button>
     </Space>
   );
 }
