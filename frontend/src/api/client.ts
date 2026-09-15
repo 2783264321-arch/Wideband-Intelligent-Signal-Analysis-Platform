@@ -490,6 +490,197 @@ export async function listAnalysisRuns(recordingId: string): Promise<import("./t
   return items.map(mapAnalysisRun);
 }
 
+interface DatasetExperimentWire {
+  id: string;
+  name: string;
+  dataset_name: string;
+  dataset_split: string;
+  dataset_label_space: string;
+  recording_manifest_hash: string;
+  plugin_id: string;
+  plugin_version: string;
+  model_release_id: string | null;
+  asset_manifest_sha256: string | null;
+  parameters_json: Record<string, unknown>;
+  executor: string;
+  evaluation_protocol: string;
+  max_concurrency: number;
+  status: string;
+  dataset_evaluation_id: string | null;
+  error_type: string | null;
+  error_message: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  requested_execution_mode?: string | null;
+  auto_reason_code?: string | null;
+  auto_reason?: string | null;
+  workload_class?: string | null;
+  expected_items?: number;
+  queued_items?: number;
+  running_items?: number;
+  completed_items?: number;
+  failed_items?: number;
+  attempt_count?: number;
+}
+
+interface DatasetExperimentItemWire {
+  id: string;
+  experiment_id: string;
+  manifest_order: number;
+  recording_id: string;
+  recording_name: string;
+  status: string;
+  last_error_type: string | null;
+  last_error_message: string | null;
+  latest_analysis_run_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+interface DatasetExperimentAttemptWire {
+  id: string;
+  experiment_item_id: string;
+  attempt_number: number;
+  analysis_run_id: string;
+  launch_requested_at: string | null;
+  created_at: string | null;
+}
+
+interface DatasetExperimentCreateWire {
+  name: string;
+  dataset_name: string;
+  dataset_split: string;
+  dataset_label_space: string;
+  plugin_id: string;
+  plugin_version: string;
+  execution_mode: ExecutionMode;
+  executor?: string;
+  model_release_id?: string | null;
+  parameters: Record<string, unknown>;
+  evaluation_protocol?: string;
+  max_concurrency: number;
+}
+
+function mapDatasetExperiment(item: DatasetExperimentWire): import("./types").DatasetExperiment {
+  return {
+    id: item.id,
+    name: item.name,
+    datasetName: item.dataset_name,
+    datasetSplit: item.dataset_split,
+    datasetLabelSpace: item.dataset_label_space,
+    recordingManifestHash: item.recording_manifest_hash,
+    pluginId: item.plugin_id,
+    pluginVersion: item.plugin_version,
+    modelReleaseId: item.model_release_id,
+    assetManifestSha256: item.asset_manifest_sha256,
+    parameters: item.parameters_json,
+    executor: item.executor,
+    evaluationProtocol: item.evaluation_protocol,
+    maxConcurrency: item.max_concurrency,
+    status: item.status,
+    datasetEvaluationId: item.dataset_evaluation_id,
+    errorType: item.error_type,
+    errorMessage: item.error_message,
+    requestedExecutionMode: (item.requested_execution_mode ?? null) as ExecutionMode | null,
+    autoReasonCode: item.auto_reason_code ?? null,
+    autoReason: item.auto_reason ?? null,
+    workloadClass: item.workload_class ?? null,
+    expectedItems: item.expected_items ?? 0,
+    queuedItems: item.queued_items ?? 0,
+    runningItems: item.running_items ?? 0,
+    completedItems: item.completed_items ?? 0,
+    failedItems: item.failed_items ?? 0,
+    attemptCount: item.attempt_count ?? 0,
+    createdAt: item.created_at,
+    startedAt: item.started_at,
+    completedAt: item.completed_at,
+  };
+}
+
+function mapDatasetExperimentItem(item: DatasetExperimentItemWire): import("./types").DatasetExperimentItem {
+  return {
+    id: item.id,
+    experimentId: item.experiment_id,
+    manifestOrder: item.manifest_order,
+    recordingId: item.recording_id,
+    recordingName: item.recording_name,
+    status: item.status,
+    lastErrorType: item.last_error_type,
+    lastErrorMessage: item.last_error_message,
+    latestAnalysisRunId: item.latest_analysis_run_id,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+  };
+}
+
+function mapDatasetExperimentAttempt(item: DatasetExperimentAttemptWire): import("./types").DatasetExperimentAttempt {
+  return {
+    id: item.id,
+    experimentItemId: item.experiment_item_id,
+    attemptNumber: item.attempt_number,
+    analysisRunId: item.analysis_run_id,
+    launchRequestedAt: item.launch_requested_at,
+    createdAt: item.created_at,
+  };
+}
+
+export async function listDatasetExperiments(): Promise<import("./types").DatasetExperiment[]> {
+  const items = await apiGet<DatasetExperimentWire[]>("/api/dataset-experiments");
+  return items.map(mapDatasetExperiment);
+}
+
+export async function getDatasetExperiment(id: string): Promise<import("./types").DatasetExperiment> {
+  return mapDatasetExperiment(await apiGet<DatasetExperimentWire>(`/api/dataset-experiments/${id}`));
+}
+
+export async function createDatasetExperiment(
+  request: import("./types").DatasetExperimentCreateRequest,
+): Promise<import("./types").DatasetExperiment> {
+  const wire: DatasetExperimentCreateWire = {
+    name: request.name,
+    dataset_name: request.datasetName,
+    dataset_split: request.datasetSplit,
+    dataset_label_space: request.datasetLabelSpace,
+    plugin_id: request.pluginId,
+    plugin_version: request.pluginVersion,
+    execution_mode: request.executionMode,
+    parameters: request.parameters,
+    max_concurrency: request.maxConcurrency,
+  };
+  if (request.executor !== undefined) wire.executor = request.executor;
+  if (request.modelReleaseId !== undefined) wire.model_release_id = request.modelReleaseId;
+  if (request.evaluationProtocol !== undefined) wire.evaluation_protocol = request.evaluationProtocol;
+  return mapDatasetExperiment(await apiPostJson<DatasetExperimentWire>("/api/dataset-experiments", wire));
+}
+
+export async function runDatasetExperiment(id: string): Promise<import("./types").DatasetExperiment> {
+  return mapDatasetExperiment(await apiPostJson<DatasetExperimentWire>(`/api/dataset-experiments/${id}/run`, {}));
+}
+
+export async function retryFailedDatasetExperimentItems(id: string): Promise<import("./types").DatasetExperiment> {
+  return mapDatasetExperiment(await apiPostJson<DatasetExperimentWire>(`/api/dataset-experiments/${id}/retry-failed`, {}));
+}
+
+export async function retryDatasetExperimentEvaluation(id: string): Promise<import("./types").DatasetExperiment> {
+  return mapDatasetExperiment(await apiPostJson<DatasetExperimentWire>(`/api/dataset-experiments/${id}/retry-evaluation`, {}));
+}
+
+export async function listDatasetExperimentItems(id: string): Promise<import("./types").DatasetExperimentItem[]> {
+  const items = await apiGet<DatasetExperimentItemWire[]>(`/api/dataset-experiments/${id}/items`);
+  return items.map(mapDatasetExperimentItem);
+}
+
+export async function listDatasetExperimentItemAttempts(
+  experimentId: string,
+  itemId: string,
+): Promise<import("./types").DatasetExperimentAttempt[]> {
+  const items = await apiGet<DatasetExperimentAttemptWire[]>(
+    `/api/dataset-experiments/${experimentId}/items/${itemId}/attempts`,
+  );
+  return items.map(mapDatasetExperimentAttempt);
+}
+
 interface CompareWire {
   recording_id: string;
   iou_threshold: number;

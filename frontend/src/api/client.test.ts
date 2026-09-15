@@ -1,4 +1,4 @@
-import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, getExecutorAvailability, getExecutorSelection, listPipelines } from "./client";
+import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, createDatasetExperiment, getDatasetExperiment, getExecutorAvailability, getExecutorSelection, listDatasetExperimentItemAttempts, listDatasetExperimentItems, listDatasetExperiments, listPipelines, retryDatasetExperimentEvaluation, retryFailedDatasetExperimentItems, runDatasetExperiment } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -375,4 +375,158 @@ test("getExecutorSelection rejects a malformed scope before fetching", async () 
     }),
   ).rejects.toThrow();
   expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+// ---------------------------------------------------------------------------
+// F3.1 — DatasetExperiment client + mapping
+// ---------------------------------------------------------------------------
+
+const experimentWire = {
+  id: "exp_1",
+  name: "Exp",
+  dataset_name: "spacenet",
+  dataset_split: "test",
+  dataset_label_space: "spacenet_14",
+  recording_manifest_hash: "a".repeat(64),
+  plugin_id: "dummy",
+  plugin_version: "1.0",
+  model_release_id: null,
+  asset_manifest_sha256: null,
+  parameters_json: {},
+  executor: "local_cpu",
+  runtime_descriptor_json: {},
+  evaluation_protocol: "physical_tf_detection_ap_v2",
+  max_concurrency: 1,
+  status: "pending",
+  dataset_evaluation_id: null,
+  error_type: null,
+  error_message: null,
+  created_at: null,
+  started_at: null,
+  completed_at: null,
+  requested_execution_mode: "auto",
+  auto_reason_code: "AUTO_ONLY_RUNNABLE_EXECUTOR",
+  auto_reason: "Only local_cpu is runnable.",
+  workload_class: "SMALL",
+  expected_items: 3,
+  queued_items: 3,
+  running_items: 0,
+  completed_items: 0,
+  failed_items: 0,
+  attempt_count: 0,
+};
+
+test("getDatasetExperiment maps the backend read model to camelCase domain", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    expect(url).toContain("/api/dataset-experiments/exp_1");
+    return new Response(JSON.stringify(experimentWire));
+  }));
+  const experiment = await getDatasetExperiment("exp_1");
+  expect(experiment.executor).toBe("local_cpu");
+  expect(experiment.recordingManifestHash).toBe("a".repeat(64));
+  expect(experiment.requestedExecutionMode).toBe("auto");
+  expect(experiment.autoReasonCode).toBe("AUTO_ONLY_RUNNABLE_EXECUTOR");
+  expect(experiment.workloadClass).toBe("SMALL");
+  expect(experiment.evaluationProtocol).toBe("physical_tf_detection_ap_v2");
+  expect(experiment.expectedItems).toBe(3);
+  expect(experiment.queuedItems).toBe(3);
+  expect(experiment.attemptCount).toBe(0);
+  expect(experiment.modelReleaseId).toBeNull();
+  // runtime_descriptor_json must not leak into the domain model
+  expect(JSON.stringify(experiment)).not.toContain("runtime_descriptor");
+});
+
+test("listDatasetExperiments maps an array", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([experimentWire]))));
+  const experiments = await listDatasetExperiments();
+  expect(experiments).toHaveLength(1);
+  expect(experiments[0].id).toBe("exp_1");
+});
+
+test("createDatasetExperiment omits evaluation_protocol and executor for auto", async () => {
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    expect(url).toContain("/api/dataset-experiments");
+    posted = JSON.parse(String(options?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify(experimentWire), { status: 201 });
+  }));
+  await createDatasetExperiment({
+    name: "Exp",
+    datasetName: "spacenet",
+    datasetSplit: "test",
+    datasetLabelSpace: "spacenet_14",
+    pluginId: "dummy",
+    pluginVersion: "1.0",
+    executionMode: "auto",
+    parameters: {},
+    maxConcurrency: 1,
+  });
+  expect(posted).toMatchObject({
+    dataset_name: "spacenet",
+    dataset_split: "test",
+    dataset_label_space: "spacenet_14",
+    plugin_id: "dummy",
+    plugin_version: "1.0",
+    execution_mode: "auto",
+    parameters: {},
+    max_concurrency: 1,
+  });
+  expect(posted).not.toHaveProperty("executor");
+  expect(posted).not.toHaveProperty("evaluation_protocol");
+  expect(posted).not.toHaveProperty("recording_manifest_hash");
+});
+
+test("createDatasetExperiment sends the exact executor for manual and no auto mode", async () => {
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    posted = JSON.parse(String(options?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify(experimentWire), { status: 201 });
+  }));
+  await createDatasetExperiment({
+    name: "Exp",
+    datasetName: "spacenet",
+    datasetSplit: "test",
+    datasetLabelSpace: "spacenet_14",
+    pluginId: "dummy",
+    pluginVersion: "1.0",
+    executionMode: "manual",
+    executor: "local_gpu",
+    parameters: {},
+    maxConcurrency: 2,
+  });
+  expect(posted).toMatchObject({ executor: "local_gpu", execution_mode: "manual", max_concurrency: 2 });
+});
+
+test("dataset experiment lifecycle POSTs hit the exact endpoints", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    urls.push(url);
+    return new Response(JSON.stringify(experimentWire));
+  }));
+  await runDatasetExperiment("exp_1");
+  await retryFailedDatasetExperimentItems("exp_1");
+  await retryDatasetExperimentEvaluation("exp_1");
+  expect(urls[0]).toContain("/api/dataset-experiments/exp_1/run");
+  expect(urls[1]).toContain("/api/dataset-experiments/exp_1/retry-failed");
+  expect(urls[2]).toContain("/api/dataset-experiments/exp_1/retry-evaluation");
+});
+
+test("listDatasetExperimentItems and attempts map to camelCase", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/attempts")) {
+      return new Response(JSON.stringify([{
+        id: "att_1", experiment_item_id: "item_1", attempt_number: 1,
+        analysis_run_id: "run_1", launch_requested_at: null, created_at: null,
+      }]));
+    }
+    return new Response(JSON.stringify([{
+      id: "item_1", experiment_id: "exp_1", manifest_order: 0, recording_id: "rec_1",
+      recording_name: "0", status: "queued", last_error_type: null, last_error_message: null,
+      latest_analysis_run_id: null, created_at: null, updated_at: null,
+    }]));
+  }));
+  const items = await listDatasetExperimentItems("exp_1");
+  expect(items[0]).toMatchObject({ experimentId: "exp_1", manifestOrder: 0, latestAnalysisRunId: null });
+  const attempts = await listDatasetExperimentItemAttempts("exp_1", "item_1");
+  expect(attempts[0].analysisRunId).toBe("run_1");
 });
