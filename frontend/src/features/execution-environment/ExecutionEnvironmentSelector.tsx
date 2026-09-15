@@ -100,6 +100,7 @@ export function ExecutionEnvironmentSelector({
             {options.map((option) => (
               <li key={option.key} data-testid={`execution-option-${option.key}`}>
                 {option.label}: {t(stateLabelKey[option.state])}
+                {option.reasonMessage !== null ? ` \u2014 ${option.reasonMessage}` : ""}
               </li>
             ))}
           </ul>

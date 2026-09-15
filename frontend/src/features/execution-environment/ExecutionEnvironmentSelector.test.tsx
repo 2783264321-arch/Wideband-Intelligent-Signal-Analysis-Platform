@@ -126,8 +126,9 @@ test("an unavailable manual option is disabled and shows its bounded reason in d
   fireEvent.click(screen.getByText("Remote GPU"));
   expect(onChange).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: /details/i }));
-  expect(screen.getByText(/No executor provider is registered/)).toBeInTheDocument();
-  expect(screen.getByTestId("execution-option-remote_gpu")).toHaveTextContent(/Not configured|未配置/);
+  const remoteLi = screen.getByTestId("execution-option-remote_gpu");
+  expect(remoteLi).toHaveTextContent(/No executor provider is registered/);
+  expect(remoteLi).toHaveTextContent(/Not configured|未配置/);
 });
 
 test("Auto is unresolved when no executor is runnable and does NOT fall back", () => {
