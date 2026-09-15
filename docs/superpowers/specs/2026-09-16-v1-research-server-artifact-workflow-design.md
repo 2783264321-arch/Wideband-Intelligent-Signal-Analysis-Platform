@@ -143,11 +143,13 @@ Existing batch import already provides:
 - ground-truth identity verification;
 - `recording_manifest_hash` support;
 - result provenance and transport provenance;
-- archive SHA256;
+- archive ZIP SHA256 (declared externally; see §F archive hash semantics);
 - semantic import fingerprint;
 - atomic database commit;
-- fail-closed handling of partial/conflicting prior state (`REMOTE_REQUEST_CONFLICT`-style conflict semantics for imports);
+- fail-closed handling of partial/conflicting prior state, reported as `BATCH_IMPORT_STATE_INCONSISTENT` when partial/conflicting prior **semantic batch-import** state exists;
 - idempotent complete re-import.
+
+`BATCH_IMPORT_STATE_INCONSISTENT` is the Batch Import contract error for inconsistent prior import state. Remote-GPU request/conflict semantics (`REMOTE_REQUEST_CONFLICT`) are **not** part of the batch import contract and must not be conflated with it.
 
 A second package format MUST NOT be introduced unless a **proven** gap requires it; any such gap is a separate design task.
 
@@ -179,10 +181,18 @@ It **MUST preserve at minimum**:
 - code commit (research source revision);
 - configuration hash where available;
 - prediction/result hashes;
-- artifact hashes (archive and payload);
+- declared artifact hashes (result/model/config artifacts known before archive completion);
 - export timestamp and exporter version.
 
 The exporter is a producer of the same bytes that Windows already knows how to consume. It is deliberately out of the execution-certificate and `RemoteProfile` machinery.
+
+### Archive hash semantics (Batch Analysis Package v1)
+
+- `BatchManifest` v1 does **NOT** contain an `archive_sha256` field.
+- `artifact_sha256` refers to **declared result/model/config artifacts that are known before archive completion**.
+- The **archive ZIP SHA256** is computed only **after the final ZIP exists**, and is recorded **externally** as transport/import evidence.
+- Archive SHA256 is therefore **not self-embedded inside the archive manifest** and does **not** participate in the semantic `batch_import_fingerprint_v1`.
+- Semantic idempotency remains independent of ZIP timestamps, compression settings, and repackaging: the same semantic content re-zipped (even with different bytes) resolves to the same import identity.
 
 ---
 
