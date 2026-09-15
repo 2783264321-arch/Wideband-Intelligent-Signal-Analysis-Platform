@@ -2,7 +2,18 @@ import { Alert, Button, Empty, Table, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetExperiments, PlatformApiError, retryFailedDatasetExperimentItems, runDatasetExperiment } from "../../api/client";
+import { useLocalization } from "../../localization/useLocalization";
 import type { DatasetExperiment } from "../../api/types";
+
+const COLUMN_KEYS = {
+  name: "experiment.columnName",
+  dataset: "experiment.columnDataset",
+  plugin: "experiment.columnPlugin",
+  executor: "experiment.columnExecutor",
+  status: "experiment.columnStatus",
+  items: "experiment.columnItems",
+  actions: "experiment.columnActions",
+} as const;
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "default",
@@ -20,6 +31,7 @@ function toErrorText(reason: unknown): string {
 }
 
 export function ExperimentList() {
+  const { t } = useLocalization();
   const [experiments, setExperiments] = useState<DatasetExperiment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +58,7 @@ export function ExperimentList() {
   };
 
   if (error !== null) {
-    return <Alert type="error" showIcon message="Unable to load experiments" description={error} />;
+    return <Alert type="error" showIcon message={t("experiment.loadError")} description={error} />;
   }
 
   return (
@@ -54,46 +66,46 @@ export function ExperimentList() {
       rowKey="id"
       loading={loading}
       dataSource={experiments}
-      locale={{ emptyText: <Empty description="No dataset experiments yet." /> }}
+      locale={{ emptyText: <Empty description={t("experiment.empty")} /> }}
       columns={[
         {
-          title: "Name",
+          title: t(COLUMN_KEYS.name),
           dataIndex: "name",
           render: (_: unknown, record: DatasetExperiment) => <Link to={`/experiments/${record.id}`}>{record.name}</Link>,
         },
         {
-          title: "Dataset",
+          title: t(COLUMN_KEYS.dataset),
           key: "dataset",
           render: (_: unknown, record: DatasetExperiment) => (
             <Typography.Text>{record.datasetName} / {record.datasetSplit}</Typography.Text>
           ),
         },
         {
-          title: "Plugin",
+          title: t(COLUMN_KEYS.plugin),
           key: "plugin",
           render: (_: unknown, record: DatasetExperiment) => (
             <Typography.Text>{record.pluginId} {record.pluginVersion}</Typography.Text>
           ),
         },
         {
-          title: "Executor",
+          title: t(COLUMN_KEYS.executor),
           dataIndex: "executor",
           render: (executor: string) => <Typography.Text>{executor}</Typography.Text>,
         },
         {
-          title: "Status",
+          title: t(COLUMN_KEYS.status),
           dataIndex: "status",
           render: (status: string) => <Tag color={STATUS_COLORS[status] ?? "default"}>{status}</Tag>,
         },
         {
-          title: "Items",
+          title: t(COLUMN_KEYS.items),
           key: "items",
           render: (_: unknown, record: DatasetExperiment) => (
             <Typography.Text>{record.completedItems} / {record.expectedItems}</Typography.Text>
           ),
         },
         {
-          title: "Actions",
+          title: t(COLUMN_KEYS.actions),
           key: "actions",
           render: (_: unknown, record: DatasetExperiment) => {
             if (record.status === "pending") {

@@ -65,6 +65,7 @@ export const zhCN: Record<MessageKey, string> = {
   "experiment.attemptsTab": "执行尝试",
   "experiment.evaluationTab": "评测",
   "experiment.empty": "暂无数据集实验。",
+  "experiment.loadError": "无法加载数据集实验",
   "experiment.columnName": "名称",
   "experiment.columnDataset": "数据集",
   "experiment.columnPlugin": "算法插件",

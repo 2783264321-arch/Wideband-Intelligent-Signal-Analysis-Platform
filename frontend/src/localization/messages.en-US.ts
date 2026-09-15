@@ -59,6 +59,7 @@ export const enUS = {
   "experiment.attemptsTab": "Attempts",
   "experiment.evaluationTab": "Evaluation",
   "experiment.empty": "No dataset experiments yet.",
+  "experiment.loadError": "Unable to load experiments",
   "experiment.columnName": "Name",
   "experiment.columnDataset": "Dataset",
   "experiment.columnPlugin": "Plugin",

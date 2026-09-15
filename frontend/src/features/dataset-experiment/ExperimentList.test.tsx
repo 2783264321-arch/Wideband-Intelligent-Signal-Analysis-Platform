@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ExperimentList } from "./ExperimentList";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 function experimentWire(overrides: Record<string, unknown> = {}) {
   return {
@@ -44,9 +45,11 @@ afterEach(() => { vi.unstubAllGlobals(); });
 test("renders experiments from the backend", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([experimentWire()]))));
   render(
-    <MemoryRouter>
-      <ExperimentList />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentList />
+      </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText("Exp A")).toBeInTheDocument();
   expect(screen.getByText(/spacenet \/ test/)).toBeInTheDocument();
@@ -56,9 +59,11 @@ test("renders experiments from the backend", async () => {
 test("shows an empty state when there are no experiments", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([]))));
   render(
-    <MemoryRouter>
-      <ExperimentList />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentList />
+      </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText(/No dataset experiments/i)).toBeInTheDocument();
 });
@@ -69,9 +74,11 @@ test("surfaces a bounded platform error", async () => {
     { status: 404 },
   )));
   render(
-    <MemoryRouter>
-      <ExperimentList />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentList />
+      </MemoryRouter>,
+    ),
   );
   await waitFor(() => expect(screen.getByText(/DATASET_EXPERIMENT_NOT_FOUND/)).toBeInTheDocument());
 });
@@ -90,9 +97,11 @@ function actionSetup(experiment: Record<string, unknown>) {
     return new Response(JSON.stringify(experiment));
   }));
   render(
-    <MemoryRouter>
-      <ExperimentList />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentList />
+      </MemoryRouter>,
+    ),
   );
   return { urls };
 }
