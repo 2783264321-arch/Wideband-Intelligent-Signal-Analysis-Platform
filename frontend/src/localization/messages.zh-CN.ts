@@ -127,10 +127,11 @@ export const zhCN: Record<MessageKey, string> = {
   "executionEnv.checking": "正在检查执行环境…",
   "executionEnv.recommended": "推荐执行环境：{executor}",
   "executionEnv.unresolved": "自动选择没有可运行的执行环境。",
-  "executionEnv.unsupported": "不支持",
-  "executionEnv.notConfigured": "未配置",
-  "executionEnv.notCertified": "未通过认证",
   "executionEnv.temporarilyUnavailable": "暂时不可用",
+  "executionEnv.notCertified": "未通过认证",
+  "executionEnv.notConfigured": "未配置",
+  "executionEnv.unsupported": "不支持",
+
   "executionEnv.available": "可用",
 
   "provenance.executor": "执行环境",

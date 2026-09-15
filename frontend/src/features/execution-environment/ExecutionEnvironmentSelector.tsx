@@ -1,7 +1,25 @@
 import { Button, Radio, Space, Typography } from "antd";
 import { useMemo, useState } from "react";
-import { executorLabel, optionsFromSelection, type ExecutorOptionKey } from "./executionEnvironment";
+import { executorLabel, optionsFromSelection, type ExecutorOptionKey, type ExecutorOptionStateKind } from "./executionEnvironment";
+import { useLocalization } from "../../localization/useLocalization";
+import type { MessageKey } from "../../localization/types";
 import type { ExecutionEnvironmentSelectorProps } from "./types";
+
+const optionLabelKey: Record<ExecutorOptionKey, MessageKey> = {
+  auto: "executionEnv.auto",
+  local_cpu: "executionEnv.localCpu",
+  local_gpu: "executionEnv.localGpu",
+  remote_gpu: "executionEnv.remoteGpu",
+};
+
+const stateLabelKey: Record<ExecutorOptionStateKind, MessageKey> = {
+  available: "executionEnv.available",
+  not_configured: "executionEnv.notConfigured",
+  not_certified: "executionEnv.notCertified",
+  unsupported: "executionEnv.unsupported",
+  temporarily_unavailable: "executionEnv.temporarilyUnavailable",
+  unresolved: "executionEnv.unresolved",
+};
 
 /**
  * Reusable execution environment selector.
@@ -19,7 +37,11 @@ export function ExecutionEnvironmentSelector({
   onChange,
   disabled,
 }: ExecutionEnvironmentSelectorProps) {
-  const options = useMemo(() => optionsFromSelection(selection), [selection]);
+  const { t } = useLocalization();
+  const options = useMemo(() => optionsFromSelection(selection).map((option) => ({
+    ...option,
+    label: t(optionLabelKey[option.key]),
+  })), [selection, t]);
   const [showDetails, setShowDetails] = useState(false);
 
   const selectedKey: ExecutorOptionKey = value.mode === "auto" ? "auto" : (value.executor as ExecutorOptionKey);
@@ -28,15 +50,15 @@ export function ExecutionEnvironmentSelector({
 
   const summary = (() => {
     if (error !== null) return error;
-    if (loading) return "Checking execution environments\u2026";
+    if (loading) return t("executionEnv.checking");
     if (selectedKey === "auto") {
       if (selection !== null && selection.resolvedExecutor !== null) {
-        return `Recommended: ${executorLabel(selection.resolvedExecutor)}`;
+        return t("executionEnv.recommended", { executor: executorLabel(selection.resolvedExecutor) });
       }
-      return selected?.reasonMessage ?? "Auto has no runnable executor.";
+      return selected?.reasonMessage ?? null;
     }
     if (selected !== null && !selected.enabled) {
-      return selected.reasonMessage ?? "Unavailable for this input.";
+      return selected.reasonMessage ?? null;
     }
     return null;
   })();
@@ -66,7 +88,7 @@ export function ExecutionEnvironmentSelector({
       ) : null}
       <div>
         <Button type="link" size="small" onClick={() => setShowDetails((current) => !current)}>
-          Details
+          {t("executionEnv.details")}
         </Button>
       </div>
       {showDetails ? (
@@ -77,8 +99,7 @@ export function ExecutionEnvironmentSelector({
           <ul>
             {options.map((option) => (
               <li key={option.key} data-testid={`execution-option-${option.key}`}>
-                {option.label}: {option.state}
-                {option.reasonMessage !== null ? ` \u2014 ${option.reasonMessage}` : ""}
+                {option.label}: {t(stateLabelKey[option.state])}
               </li>
             ))}
           </ul>

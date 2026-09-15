@@ -121,10 +121,11 @@ export const enUS = {
   "executionEnv.checking": "Checking execution environments...",
   "executionEnv.recommended": "Recommended: {executor}",
   "executionEnv.unresolved": "Auto has no runnable executor.",
-  "executionEnv.unsupported": "Unsupported",
-  "executionEnv.notConfigured": "Not configured",
-  "executionEnv.notCertified": "Not certified",
   "executionEnv.temporarilyUnavailable": "Temporarily unavailable",
+  "executionEnv.notCertified": "Not certified",
+  "executionEnv.notConfigured": "Not configured",
+  "executionEnv.unsupported": "Unsupported",
+
   "executionEnv.available": "Available",
 
   "provenance.executor": "Executor",
