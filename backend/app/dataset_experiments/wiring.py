@@ -33,11 +33,8 @@ def build_control_plane_dependencies(settings: Settings) -> ControlPlaneDependen
         ModelReleaseStore,
         load_model_release_defaults,
     )
-    from app.remote_execution.runtime import (
-        ExecutionCertificateStore,
-        ExecutorRegistry,
-        load_execution_certificates,
-    )
+    from app.remote_execution.runtime import ExecutorRegistry
+    from app.runtime_qualification.install import build_certificate_store
 
     plugins_root = _plugins_root()
     registry = create_pipeline_registry()
@@ -77,8 +74,9 @@ def build_control_plane_dependencies(settings: Settings) -> ControlPlaneDependen
     providers = dict(build_local_providers(settings))
     if remote_provider is not None:
         providers[remote_provider.name] = remote_provider
-    certificates = ExecutionCertificateStore(
-        load_execution_certificates(plugins_root / "execution_certificates.json")
+    certificates = build_certificate_store(
+        repo_path=plugins_root / "execution_certificates.json",
+        data_root=settings.data_root,
     )
     executor_registry = ExecutorRegistry(providers, certificates)
     return ControlPlaneDependencies(
