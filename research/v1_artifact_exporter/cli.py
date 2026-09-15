@@ -69,6 +69,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--label-space", required=True)
     parser.add_argument("--predictions", required=True)
+    parser.add_argument(
+        "--sample-id",
+        action="append",
+        default=None,
+        dest="sample_ids",
+        help="Export exactly this sample id (repeatable). Omit to export the full split.",
+    )
     parser.add_argument("--pipeline-id", required=True)
     parser.add_argument("--pipeline-name", required=True)
     parser.add_argument("--pipeline-version", required=True)
@@ -112,7 +119,17 @@ def main(argv: list[str] | None = None) -> int:
             _gate(name, artifact_sha256[name], expected)
 
         _, split, _ = resolve_split_dir(dataset_dir, args.dataset_split)
-        sample_ids = list_split_sample_ids(dataset_dir, args.dataset_split)
+        discovered = list_split_sample_ids(dataset_dir, args.dataset_split)
+        requested = args.sample_ids
+        if requested:
+            if len(requested) != len(set(requested)):
+                raise CliError("--sample-id values must be unique")
+            unknown = sorted({value for value in requested if value not in set(discovered)})
+            if unknown:
+                raise CliError(f"--sample-id values not present in dataset split: {unknown}")
+            sample_ids = list(requested)
+        else:
+            sample_ids = discovered
         predictions_by_sample = load_predictions_jsonl(predictions_path)
         label_classes = load_label_space(label_space_path)
         samples = build_research_samples(

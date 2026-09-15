@@ -265,6 +265,95 @@ def test_expected_hash_mismatch_blocks_export(tmp_path: Path, capsys) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 8b. CLI bounded subset (--sample-id)
+# ---------------------------------------------------------------------------
+def _cli_base(split: Path, preds: Path, output: Path) -> list[str]:
+    return [
+        "--dataset-dir", str(split), "--label-space", str(LABEL_SPACE_PATH),
+        "--predictions", str(preds), "--pipeline-id", "pipeline_x",
+        "--pipeline-name", "Pipeline X", "--pipeline-version", "1.0",
+        "--executor", "research_gpu", "--output", str(output),
+    ]
+
+
+def _batch_names(output: Path) -> list[str]:
+    with zipfile.ZipFile(output) as archive:
+        manifest = json.loads(archive.read("batch_manifest.json").decode("utf-8"))
+    assert manifest["expected_items"] == len(manifest["items"])
+    return sorted(item["recording"]["name"] for item in manifest["items"])
+
+
+def test_cli_subset_exports_exactly_selected_items(tmp_path: Path) -> None:
+    from research.v1_artifact_exporter.cli import main
+
+    split = _dataset(tmp_path, names=("0", "1", "2"))
+    preds = _predictions(tmp_path, [_det_row("0"), _det_row("1")])
+    output = tmp_path / "subset.zip"
+    code = main(_cli_base(split, preds, output) + ["--sample-id", "0", "--sample-id", "1"])
+    assert code == 0
+    assert _batch_names(output) == ["0", "1"]
+    assert "2" not in _batch_names(output)
+
+
+def test_cli_subset_no_sample_id_exports_full_split(tmp_path: Path) -> None:
+    from research.v1_artifact_exporter.cli import main
+
+    split = _dataset(tmp_path, names=("0", "1", "2"))
+    preds = _predictions(tmp_path, [_det_row("0")])
+    output = tmp_path / "full.zip"
+    assert main(_cli_base(split, preds, output)) == 0
+    assert _batch_names(output) == ["0", "1", "2"]
+
+
+def test_cli_subset_prediction_outside_selection_fails(tmp_path: Path, capsys) -> None:
+    from research.v1_artifact_exporter.cli import main
+
+    split = _dataset(tmp_path, names=("0", "1", "2"))
+    preds = _predictions(tmp_path, [_det_row("2")])
+    output = tmp_path / "subset.zip"
+    code = main(_cli_base(split, preds, output) + ["--sample-id", "0", "--sample-id", "1"])
+    assert code == 1
+    assert not output.exists()
+    assert "UnexpectedSampleError" in capsys.readouterr().err
+
+
+def test_cli_subset_nonexistent_stem_fails(tmp_path: Path, capsys) -> None:
+    from research.v1_artifact_exporter.cli import main
+
+    split = _dataset(tmp_path, names=("0", "1", "2"))
+    preds = _predictions(tmp_path, [_det_row("0")])
+    output = tmp_path / "subset.zip"
+    code = main(_cli_base(split, preds, output) + ["--sample-id", "0", "--sample-id", "99"])
+    assert code == 1
+    assert not output.exists()
+    assert "not present in dataset split" in capsys.readouterr().err
+
+
+def test_cli_subset_duplicate_sample_id_fails(tmp_path: Path, capsys) -> None:
+    from research.v1_artifact_exporter.cli import main
+
+    split = _dataset(tmp_path, names=("0", "1", "2"))
+    preds = _predictions(tmp_path, [_det_row("0")])
+    output = tmp_path / "subset.zip"
+    code = main(_cli_base(split, preds, output) + ["--sample-id", "0", "--sample-id", "0"])
+    assert code == 1
+    assert not output.exists()
+    assert "must be unique" in capsys.readouterr().err
+
+
+def test_cli_subset_selected_sample_without_predictions_is_zero_detection(tmp_path: Path) -> None:
+    from research.v1_artifact_exporter.cli import main
+
+    split = _dataset(tmp_path, names=("0", "1", "2"))
+    preds = _predictions(tmp_path, [_det_row("0")])
+    output = tmp_path / "subset.zip"
+    assert main(_cli_base(split, preds, output) + ["--sample-id", "0", "--sample-id", "1"]) == 0
+    with zipfile.ZipFile(output) as archive:
+        empty = json.loads(archive.read("items/000001/detections.json").decode("utf-8"))
+    assert empty == {"detections": []}
+
+
+# ---------------------------------------------------------------------------
 # 9. No full raw-IQ content hashing
 # ---------------------------------------------------------------------------
 def test_no_full_iq_content_hashing(tmp_path: Path, monkeypatch) -> None:

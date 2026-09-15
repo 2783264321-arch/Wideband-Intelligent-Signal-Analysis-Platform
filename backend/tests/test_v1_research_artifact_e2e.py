@@ -283,29 +283,87 @@ def test_a7_inconsistent_prior_state_fails_closed(client, tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# A8
+# A8 — real CPU evaluation consumes the imported runs
 # ---------------------------------------------------------------------------
-def test_a8_imported_batch_is_evaluation_ready(client, tmp_path: Path) -> None:
+def _run_evaluation(client, summary) -> dict:
+    from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
+    from app.benchmarks.service import DatasetBenchmarkService
+    from app.benchmarks.worker import execute_benchmark
+
+    settings = client.app.state.settings
+    with client.app.state.database.session_factory() as session:
+        service = DatasetBenchmarkService(session)
+        preview = service.prepare_manifest("SpaceNet", "test", "spacenet_14")
+        evaluation = service.create_evaluation(
+            name="stage-a-eval",
+            dataset_name="SpaceNet",
+            dataset_split="test",
+            label_space="spacenet_14",
+            recording_manifest_hash=preview.recording_manifest_hash,
+            items=[
+                {
+                    "recording_id": entry["recording_id"],
+                    "analysis_run_id": entry["analysis_run_id"],
+                }
+                for entry in summary["recording_run_mapping"]
+            ],
+        )
+        evaluation_id = evaluation.id
+
+    # Existing synchronous CPU benchmark path: no model, no inference worker.
+    execute_benchmark(evaluation_id, settings)
+
+    with client.app.state.database.session_factory() as session:
+        evaluation = session.get(DatasetEvaluationModel, evaluation_id)
+        items = session.query(DatasetEvaluationItemModel).filter(
+            DatasetEvaluationItemModel.evaluation_id == evaluation_id
+        ).all()
+        return {
+            "status": evaluation.status,
+            "expected_recordings": evaluation.expected_recordings,
+            "evaluated_recordings": evaluation.evaluated_recordings,
+            "missing_recordings": evaluation.missing_recordings,
+            "coverage": evaluation.coverage,
+            "comparable": evaluation.comparable,
+            "prediction_count": sum(item.prediction_count for item in items),
+            "gt_count": sum(item.gt_count for item in items),
+            "aggregate_metrics": evaluation.aggregate_metrics_json,
+        }
+
+
+def test_a8_imported_batch_runs_real_cpu_evaluation(client, tmp_path: Path) -> None:
     result, samples = _build_batch(tmp_path)
     _seed_recordings(client, samples)
-    _post(client, result.output_path)
+    summary = _post(client, result.output_path).json()
 
+    # Preparatory evidence: catalog + resolver see the imported batch.
     catalog = client.get("/api/dataset-benchmarks/imported-batches")
     assert catalog.status_code == 200
     entry = next(item for item in catalog.json() if item["import_fingerprint"] == result.import_fingerprint)
     assert entry["run_count"] == 2
-    assert entry["detection_count"] == 2
     assert entry["ready"] is True
-
     resolved = client.post(
         "/api/dataset-benchmarks/resolve-imported-batch",
         json={"import_fingerprint": result.import_fingerprint},
     )
-    assert resolved.status_code == 200, resolved.text
-    body = resolved.json()
-    assert body["resolved_recordings"] == 2
-    assert body["missing_recordings"] == 0
-    assert body["conflict_count"] == 0
+    assert resolved.status_code == 200
+    assert resolved.json()["resolved_recordings"] == 2
+    assert resolved.json()["missing_recordings"] == 0
+
+    # Final proof: the real CPU evaluation consumes the imported DetectionResults.
+    evaluation = _run_evaluation(client, summary)
+    assert evaluation["status"] == "completed"
+    assert evaluation["expected_recordings"] == 2
+    assert evaluation["evaluated_recordings"] == 2
+    assert evaluation["missing_recordings"] == 0
+    assert evaluation["coverage"] == 1.0
+    assert evaluation["comparable"] is True
+    assert evaluation["prediction_count"] == 2
+    assert evaluation["gt_count"] == 2
+    operating = evaluation["aggregate_metrics"]["localization"]["operating"]
+    assert operating["tp"] == 2
+    assert operating["fn"] == 0
+    assert operating["fp"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -328,3 +386,41 @@ def test_a9_no_remote_gpu_no_db_sync(client, tmp_path: Path, monkeypatch) -> Non
     assert not [key for key in os.environ if key.startswith("WSP_REMOTE_")]
     assert importlib.util.find_spec("torch") is None
     assert importlib.util.find_spec("ultralytics") is None
+
+
+# ---------------------------------------------------------------------------
+# A10 — no outbound network during export/import/evaluation
+# ---------------------------------------------------------------------------
+def _install_outbound_network_guard(monkeypatch) -> None:
+    import ipaddress
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def guarded(self, address):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            host = address[0] if isinstance(address, tuple) else str(address)
+            try:
+                ip = ipaddress.ip_address(host)
+            except ValueError as exc:
+                raise AssertionError(
+                    f"outbound network connection attempted: {address!r}"
+                ) from exc
+            if not (ip.is_loopback or ip.is_unspecified):
+                raise AssertionError(f"outbound network connection attempted: {address!r}")
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded)
+
+
+def test_a10_no_outbound_network_during_artifact_flow(client, tmp_path: Path, monkeypatch) -> None:
+    _install_outbound_network_guard(monkeypatch)
+
+    result, samples = _build_batch(tmp_path)
+    _seed_recordings(client, samples)
+    summary = _post(client, result.output_path).json()
+    assert summary["created_runs"] == 2
+
+    evaluation = _run_evaluation(client, summary)
+    assert evaluation["status"] == "completed"
+    assert evaluation["prediction_count"] == 2
