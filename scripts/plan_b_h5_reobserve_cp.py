@@ -148,6 +148,101 @@ def parse_resource_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _is_usable_number(value, *, minimum: float | None = None,
+                      maximum: float | None = None) -> bool:
+    """True iff value is a real finite number within optional bounds.
+
+    Rejects None, booleans, non-numeric types, NaN/inf, and out-of-range values.
+    """
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    if value != value:  # NaN
+        return False
+    if value in (float("inf"), float("-inf")):
+        return False
+    if minimum is not None and value < minimum:
+        return False
+    if maximum is not None and value > maximum:
+        return False
+    return True
+
+
+# Required persisted resource fields with (minimum, maximum); None = unbounded.
+_REQUIRED_RESOURCE_NUMERIC = (
+    "timestamp",
+    "gpu_memory_used_mib",
+    "gpu_memory_free_mib",
+    "gpu_utilization_pct",
+    "cgroup_memory_current_bytes",
+    "cgroup_clean_file_cache_bytes",
+    "cgroup_committed_floor_bytes",
+    "cgroup_effective_headroom_bytes",
+    "cgroup_pressure_some_avg10",
+    "cgroup_pressure_full_avg10",
+    "cgroup_events_max",
+    "cgroup_events_oom",
+    "cgroup_events_oom_kill",
+    "disk_free_bytes",
+    "db_completed_items",
+    "db_failed_items",
+    "db_running_runs",
+    "db_pending_runs",
+    "db_attempt_count",
+    "db_run_count",
+)
+_REQUIRED_RESOURCE_BOUNDS = {
+    "timestamp": (0.0, None),
+    "gpu_utilization_pct": (0.0, 100.0),
+    "cgroup_pressure_some_avg10": (0.0, None),
+    "cgroup_pressure_full_avg10": (0.0, None),
+}
+
+
+def _validate_persisted_resource_rows(rows: list[dict]) -> dict:
+    """Fail closed unless every required field is a usable, in-range number."""
+    for index, row in enumerate(rows):
+        for field in _REQUIRED_RESOURCE_NUMERIC:
+            if field not in row:
+                raise SystemExit(
+                    f"REMEDIATION FAILED: persisted resource sample {index} missing field {field!r}"
+                )
+            minimum, maximum = _REQUIRED_RESOURCE_BOUNDS.get(field, (0.0, None))
+            if not _is_usable_number(row[field], minimum=minimum, maximum=maximum):
+                raise SystemExit(
+                    f"REMEDIATION FAILED: persisted resource sample {index} field "
+                    f"{field!r} is not usable ({row[field]!r})"
+                )
+    return {"validated_samples": len(rows)}
+
+
+def _collect_worker_memory_evidence(rows: list[dict]) -> tuple[int, list[dict]]:
+    """Return (usable_pair_sample_count, observed_pairs).
+
+    A usable pair requires a PID present in BOTH worker_rss_kb and worker_vmhwm_kb
+    with numeric VmHWM >= VmRSS > 0.
+    """
+    usable = 0
+    observed: list[dict] = []
+    for row in rows:
+        rss = row.get("worker_rss_kb") or {}
+        vmhwm = row.get("worker_vmhwm_kb") or {}
+        if not isinstance(rss, dict) or not isinstance(vmhwm, dict):
+            continue
+        common = set(rss) & set(vmhwm)
+        valid_pairs = []
+        for pid in common:
+            r = rss[pid]
+            h = vmhwm[pid]
+            if _is_usable_number(r, minimum=1) and _is_usable_number(h, minimum=1) and h >= r:
+                valid_pairs.append({"pid": pid, "rss_kb": r, "vmhwm_kb": h})
+        if valid_pairs:
+            usable += 1
+            observed.extend(valid_pairs)
+    return usable, observed
+
+
 def assert_monitors_healthy(after_stop: dict,
                             concurrency_monitor: monitor.ConcurrencyMonitor,
                             resource_monitor: monitor.ResourceMonitor) -> dict:
@@ -169,8 +264,7 @@ def assert_monitors_healthy(after_stop: dict,
 def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
                                 concurrency_monitor: monitor.ConcurrencyMonitor,
                                 resource_monitor: monitor.ResourceMonitor,
-                                cgroup_events_baseline: dict | None,
-                                cgroup_events_final: dict | None) -> dict:
+                                cgroup_events_baseline: dict | None) -> dict:
     """Accept ONLY genuine PERSISTED evidence (Findings E/F/G).
 
     The persisted JSONL artifacts are the authority for NC-02, not in-memory
@@ -229,36 +323,38 @@ def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
     if max_concurrency > h5.CONCURRENCY_BOUND:
         raise SystemExit(f"REMEDIATION FAILED: persisted max concurrency {max_concurrency} > {h5.CONCURRENCY_BOUND}")
 
-    # Resource: require usable persisted fields + at least one RSS/VmHWM sample.
-    required_resource_fields = (
-        "gpu_memory_used_mib", "gpu_memory_free_mib", "gpu_utilization_pct",
-        "cgroup_memory_current_bytes", "cgroup_clean_file_cache_bytes",
-        "cgroup_committed_floor_bytes", "cgroup_effective_headroom_bytes",
-        "cgroup_pressure_some_avg10", "cgroup_pressure_full_avg10",
-        "cgroup_events_max", "cgroup_events_oom", "cgroup_events_oom_kill",
-        "disk_free_bytes", "db_run_count",
-    )
-    for row in persisted_r:
-        missing = [f for f in required_resource_fields if f not in row]
-        if missing:
-            raise SystemExit(f"REMEDIATION FAILED: persisted resource sample missing fields: {missing}")
-    worker_evidence = sum(
-        1 for row in persisted_r
-        if row.get("worker_rss_kb") or row.get("worker_vmhwm_kb")
-    )
-    if worker_evidence == 0:
-        raise SystemExit("REMEDIATION FAILED: no persisted worker RSS/VmHWM evidence")
+    # Resource: every required field must be USABLE numeric evidence.
+    _validate_persisted_resource_rows(persisted_r)
+    worker_pairs, observed_pairs = _collect_worker_memory_evidence(persisted_r)
+    if worker_pairs == 0:
+        raise SystemExit(
+            "REMEDIATION FAILED: no persisted sample with usable common-PID "
+            "worker RSS+VmHWM evidence (need VmHWM >= VmRSS > 0)"
+        )
 
-    # Finding F: cgroup event deltas from the campaign baseline.
+    # Finding F: cgroup event deltas from the MANDATORY campaign baseline.
+    if not isinstance(cgroup_events_baseline, dict):
+        raise SystemExit("REMEDIATION FAILED: cgroup_events_baseline is missing/malformed")
+    for key in ("max", "oom", "oom_kill"):
+        if key not in cgroup_events_baseline or not _is_usable_number(
+            cgroup_events_baseline[key], minimum=0
+        ):
+            raise SystemExit(
+                f"REMEDIATION FAILED: cgroup_events_baseline missing/invalid key {key!r}"
+            )
+    baseline = {key: cgroup_events_baseline[key] for key in ("max", "oom", "oom_kill")}
     final_events = {
-        "cgroup_events_max": persisted_r[-1].get("cgroup_events_max", 0),
-        "cgroup_events_oom": persisted_r[-1].get("cgroup_events_oom", 0),
-        "cgroup_events_oom_kill": persisted_r[-1].get("cgroup_events_oom_kill", 0),
+        "cgroup_events_max": persisted_r[-1]["cgroup_events_max"],
+        "cgroup_events_oom": persisted_r[-1]["cgroup_events_oom"],
+        "cgroup_events_oom_kill": persisted_r[-1]["cgroup_events_oom_kill"],
     }
-    baseline = cgroup_events_baseline or {"max": 0, "oom": 0, "oom_kill": 0}
     deltas = h5.cgroup_event_deltas(baseline=baseline, current=final_events)
     if deltas["max"] != 0 or deltas["oom"] != 0 or deltas["oom_kill"] != 0:
         raise SystemExit(f"REMEDIATION FAILED: cgroup event delta nonzero: {deltas}")
+
+    def _span(field: str) -> dict:
+        values = [row[field] for row in persisted_r]
+        return {"min": min(values), "max": max(values)}
 
     resource_span_s = (
         float(persisted_r[-1]["timestamp"]) - float(persisted_r[0]["timestamp"])
@@ -274,11 +370,24 @@ def assert_raw_evidence_quality(*, samples_path: Path, resource_path: Path,
         "unique_owned_run_ids": len(unique_runs),
         "max_observed_concurrency": max_concurrency,
         "max_sample_gap_s": max_gap,
-        "worker_rss_or_vmhwm_samples": worker_evidence,
+        "worker_rss_vmhwm_samples": worker_pairs,
+        "worker_memory_observed_pairs": observed_pairs,
         "cgroup_events_baseline": baseline,
         "cgroup_events_final": final_events,
         "cgroup_event_deltas": deltas,
         "resource_sample_span_s": resource_span_s,
+        "observed_ranges": {
+            "gpu_memory_used_mib": _span("gpu_memory_used_mib"),
+            "gpu_memory_free_mib": _span("gpu_memory_free_mib"),
+            "gpu_utilization_pct": _span("gpu_utilization_pct"),
+            "cgroup_memory_current_bytes": _span("cgroup_memory_current_bytes"),
+            "cgroup_clean_file_cache_bytes": _span("cgroup_clean_file_cache_bytes"),
+            "cgroup_committed_floor_bytes": _span("cgroup_committed_floor_bytes"),
+            "cgroup_effective_headroom_bytes": _span("cgroup_effective_headroom_bytes"),
+            "cgroup_pressure_some_avg10": _span("cgroup_pressure_some_avg10"),
+            "cgroup_pressure_full_avg10": _span("cgroup_pressure_full_avg10"),
+            "disk_free_bytes": _span("disk_free_bytes"),
+        },
         "concurrency_monitor_failure": concurrency_monitor.thread_failure,
         "resource_monitor_failure": resource_monitor.thread_failure,
     }
@@ -384,7 +493,6 @@ def read_terminal_acceptance(app, *, experiment_id: str, final_summary: dict,
         concurrency_monitor=concurrency_monitor,
         resource_monitor=resource_monitor,
         cgroup_events_baseline=cgroup_events_baseline,
-        cgroup_events_final=None,
     )
     raw["monitor_health"] = monitor_health
     return build_acceptance(

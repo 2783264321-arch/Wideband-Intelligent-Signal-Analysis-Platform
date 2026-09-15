@@ -153,7 +153,9 @@ def _persisted_resource(tmp_path: Path):
          "cgroup_effective_headroom_bytes": 4, "cgroup_pressure_some_avg10": 0.0,
          "cgroup_pressure_full_avg10": 0.0, "cgroup_events_max": 0,
          "cgroup_events_oom": 0, "cgroup_events_oom_kill": 0, "disk_free_bytes": 10 ** 12,
-         "db_run_count": 1, "worker_rss_kb": {"11": 1000}, "worker_vmhwm_kb": {"11": 2000}},
+         "db_completed_items": 1, "db_failed_items": 0, "db_running_runs": 1,
+         "db_pending_runs": 0, "db_attempt_count": 1, "db_run_count": 1,
+         "worker_rss_kb": {"11": 1000}, "worker_vmhwm_kb": {"11": 2000}},
     ]
     path = tmp_path / "r.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
@@ -177,7 +179,6 @@ def _raw_call(tmp_path, *, cgroups=None, resource_rows=None):
         concurrency_monitor=_SampleMon(crows),
         resource_monitor=_SampleMon(rrows),
         cgroup_events_baseline=cgroups or _CGROUP_OK,
-        cgroup_events_final=None,
     )
 
 
@@ -193,7 +194,7 @@ def test_persisted_concurrency_parsed(tmp_path: Path) -> None:
 def test_persisted_resource_parsed(tmp_path: Path) -> None:
     result = _raw_call(tmp_path)
     assert result["persisted_resource_sample_count"] == 1
-    assert result["worker_rss_or_vmhwm_samples"] == 1
+    assert result["worker_rss_vmhwm_samples"] == 1
 
 
 def test_persisted_count_mismatch_fails(tmp_path: Path) -> None:
@@ -204,7 +205,7 @@ def test_persisted_count_mismatch_fails(tmp_path: Path) -> None:
             samples_path=cpath, resource_path=rpath,
             concurrency_monitor=_SampleMon([]),  # in-memory mismatch
             resource_monitor=_SampleMon(rrows),
-            cgroup_events_baseline=_CGROUP_OK, cgroup_events_final=None,
+            cgroup_events_baseline=_CGROUP_OK,
         )
 
 
@@ -243,7 +244,7 @@ def test_ownership_evidence_required(tmp_path: Path) -> None:
             samples_path=cpath, resource_path=rpath,
             concurrency_monitor=_SampleMon(empty_rows),
             resource_monitor=_SampleMon(rrows),
-            cgroup_events_baseline=_CGROUP_OK, cgroup_events_final=None,
+            cgroup_events_baseline=_CGROUP_OK,
         )
 
 
@@ -351,3 +352,100 @@ def test_wrong_workload_identity_fails(tmp_path: Path) -> None:
     kwargs["terminal_summary"] = bad
     with pytest.raises(SystemExit):
         reobserve.build_acceptance(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Finding I — usable resource evidence (numeric, non-null, in range)
+# ---------------------------------------------------------------------------
+
+def _raw_quality_with(tmp_path, *, resource_mutator=None, baseline=_CGROUP_OK):
+    cpath, crows = _persisted_concurrency(tmp_path)
+    rpath, rrows = _persisted_resource(tmp_path)
+    if resource_mutator is not None:
+        resource_mutator(rrows[0])
+        rpath.write_text(json.dumps(rrows[0]) + "\n", encoding="utf-8")
+    return reobserve.assert_raw_evidence_quality(
+        samples_path=cpath, resource_path=rpath,
+        concurrency_monitor=reobserve_mons(crows),
+        resource_monitor=reobserve_mons(rrows),
+        cgroup_events_baseline=baseline,
+    )
+
+
+def reobserve_mons(rows):
+    return _SampleMon(rows)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.pop("disk_free_bytes"),
+    lambda r: r.update({"disk_free_bytes": None}),
+    lambda r: r.update({"disk_free_bytes": float("nan")}),
+    lambda r: r.update({"cgroup_pressure_some_avg10": None}),
+    lambda r: r.update({"db_run_count": None}),
+    lambda r: r.update({"gpu_utilization_pct": 101}),
+    lambda r: r.update({"gpu_utilization_pct": -1}),
+    lambda r: r.update({"gpu_memory_used_mib": None}),
+    lambda r: r.update({"cgroup_memory_current_bytes": None}),
+    lambda r: r.update({"cgroup_clean_file_cache_bytes": None}),
+    lambda r: r.update({"cgroup_committed_floor_bytes": None}),
+    lambda r: r.update({"cgroup_effective_headroom_bytes": None}),
+    lambda r: r.update({"cgroup_events_oom_kill": None}),
+    lambda r: r.update({"timestamp": None}),
+    lambda r: r.update({"db_completed_items": None}),
+    lambda r: r.update({"db_failed_items": None}),
+    lambda r: r.update({"db_running_runs": None}),
+    lambda r: r.update({"db_pending_runs": None}),
+    lambda r: r.update({"db_attempt_count": None}),
+    lambda r: r.update({"gpu_memory_free_mib": "12"}),  # non-numeric
+])
+def test_resource_field_usability_fail_closed(tmp_path: Path, mutate) -> None:
+    with pytest.raises(SystemExit):
+        _raw_quality_with(tmp_path, resource_mutator=mutate)
+
+
+def test_resource_valid_passes(tmp_path: Path) -> None:
+    result = _raw_quality_with(tmp_path)
+    assert result["persisted_resource_sample_count"] == 1
+    assert result["worker_rss_vmhwm_samples"] == 1
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda r: r.update({"worker_rss_kb": {"11": 1000}, "worker_vmhwm_kb": {}}),  # VmHWM absent
+    lambda r: r.update({"worker_rss_kb": {}, "worker_vmhwm_kb": {"11": 2000}}),  # RSS absent
+    lambda r: r.update({"worker_rss_kb": {"11": 1000}, "worker_vmhwm_kb": {"22": 2000}}),  # no common PID
+    lambda r: r.update({"worker_rss_kb": {"11": 2000}, "worker_vmhwm_kb": {"11": 1000}}),  # VmHWM < RSS
+    lambda r: r.update({"worker_rss_kb": {"11": 0}, "worker_vmhwm_kb": {"11": 0}}),        # not > 0
+    lambda r: r.update({"worker_rss_kb": {}, "worker_vmhwm_kb": {}}),                       # empty
+])
+def test_worker_memory_evidence_fail_closed(tmp_path: Path, mutate) -> None:
+    with pytest.raises(SystemExit):
+        _raw_quality_with(tmp_path, resource_mutator=mutate)
+
+
+def test_worker_memory_valid_passes(tmp_path: Path) -> None:
+    result = _raw_quality_with(tmp_path)
+    assert result["worker_rss_vmhwm_samples"] == 1
+    assert result["worker_memory_observed_pairs"][0]["pid"] == "11"
+    assert result["worker_memory_observed_pairs"][0]["vmhwm_kb"] >= result["worker_memory_observed_pairs"][0]["rss_kb"]
+
+
+@pytest.mark.parametrize("baseline", [
+    None,
+    {},
+    {"max": 0, "oom": 0},
+    {"max": 0, "oom": 0, "oom_kill": None},
+    {"max": 0, "oom": 0, "oom_kill": "x"},
+])
+def test_cgroup_baseline_fail_closed(tmp_path: Path, baseline) -> None:
+    with pytest.raises(SystemExit):
+        _raw_quality_with(tmp_path, baseline=baseline)
+
+
+def test_observed_ranges_present(tmp_path: Path) -> None:
+    result = _raw_quality_with(tmp_path)
+    assert set(result["observed_ranges"]) >= {
+        "gpu_memory_used_mib", "gpu_memory_free_mib", "gpu_utilization_pct",
+        "cgroup_memory_current_bytes", "cgroup_clean_file_cache_bytes",
+        "cgroup_committed_floor_bytes", "cgroup_effective_headroom_bytes",
+        "cgroup_pressure_some_avg10", "cgroup_pressure_full_avg10", "disk_free_bytes",
+    }
