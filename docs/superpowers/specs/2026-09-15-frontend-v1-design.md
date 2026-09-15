@@ -387,12 +387,45 @@ Experiment create form composition:
 
 ```text
 name
-dataset selection (dataset_name / split / label_space)
-plugin + version (from /api/pipelines projection)
-ModelRelease            → read-only resolved provenance by default (see ModelRelease Policy)
-Execution Environment   → ExecutionEnvironmentSelector (default Auto)
-parameters              → from pipeline parameter schema (additive; tolerate absence)
+dataset identity        → exact triple (see Dataset Identity, current contract)
+plugin + version        → from /api/pipelines projection
+ModelRelease            → backend-projected on the experiment; no selector (see ModelRelease Policy)
+Execution Environment   → ExecutionEnvironmentSelector (default Auto; dataset-scoped selection)
+parameters              → opaque request object; generic V1 sends {} (see Parameter Contract)
 max_concurrency         → bounded numeric input (backend validates)
+```
+
+Dataset identity (current contract):
+
+```text
+dataset_name
+dataset_split
+dataset_label_space
+```
+
+No generic dataset catalog/list endpoint exists at the reference commit
+(`/api/datasets` exposes SpaceNet **registration** only; there is no
+`GET /api/datasets` or `GET /api/datasets/catalog`). These three fields are
+supplied explicitly or prefilled from an already-known backend object/context that
+exposes them. The frontend MUST NOT hardcode `SpaceNet` / `test` / `spacenet_14`
+as universal product choices. An authoritative dataset catalog is a future YELLOW
+dependency reconciled at F7.
+
+Parameter contract (current):
+
+```text
+`parameters` is an opaque request dictionary supported by the API.
+
+Until the backend exposes an authoritative parameter schema, generic Frontend V1
+MUST NOT invent plugin-specific parameter forms or schemas.
+
+F1–F6 generic AnalysisRun / DatasetExperiment creation sends the
+backend/default-compatible empty object {} (or preserves an already-existing
+control that is backed by an explicit current backend contract).
+
+Do NOT hardcode per-plugin parameter controls from plugin ids.
+A future authoritative pipeline parameter schema is a YELLOW dependency
+reconciled at F7.
 ```
 
 ---
@@ -477,23 +510,32 @@ One reusable component: **`ExecutionEnvironmentSelector`** (feature
 `features/execution-environment/`), used by both Single AnalysisRun and
 DatasetExperiment.
 
-Inputs (all backend-projected facts):
+### Stable product vocabulary (option enumeration)
 
-```text
-pipeline.technicalExecutionCapabilities
-pipeline.executorsSupported
-pipeline.recommendedExecution
-GET /api/executor-selection   (Auto explanation + candidate matrix)
-GET /api/executor-availability (per exact executor probe)
-```
-
-Options (driven by `executors_supported`, never hardcoded):
+The four options are a fixed product vocabulary, NOT a frontend capability matrix:
 
 ```text
 Auto
 Local CPU     (local_cpu)
 Local GPU     (local_gpu)
 Remote GPU    (remote_gpu)
+```
+
+`executors_supported` is a deployment-qualified **backend projection** and is a
+useful hint, but it is **NOT the complete option universe**: it may omit executors
+that are technically unsupported, not configured, or not certified. The selector
+therefore MUST NOT hide a Manual option solely because it is absent from
+`executors_supported`. All four options are always enumerable; each option's
+usability comes exclusively from backend facts.
+
+### Backend facts (source of option state)
+
+```text
+pipeline.technicalExecutionCapabilities
+pipeline.executorsSupported         (hint only; never the sole enumeration source)
+pipeline.recommendedExecution
+GET /api/executor-selection         (Auto explanation + candidate matrix)
+GET /api/executor-availability      (per exact executor; RECORDING-scoped only)
 ```
 
 Per-option facts come from the backend booleans; the UI does not invent a matrix:
@@ -503,21 +545,45 @@ technical    plugin declares the capability
 configured   provider is registered in this deployment
 certified    exact certificate exists for this release/runtime
 available    live probe succeeded for this input
+reason_code / reason_message   bounded, human-readable, no secrets
 ```
 
-Derived UI states (mapping backend facts, not client authority):
+### Scope-specific contracts (do not mix)
+
+`GET /api/executor-availability` is **recording-scoped** and requires
+`recording_id` + `pipeline_id` + `executor`; it has no dataset scope. Never call it
+for a DatasetExperiment.
 
 ```text
-available            technical && configured && certified && available
-not configured       technical && !configured
-not certified        technical && configured && !certified
-unsupported          !technical
-temporarily unavailable  configured/certified but probe failed
-recommended          backend recommended flag / resolved executor
-selected             user choice or Auto resolution
+Single Recording
+  /executor-selection      { recording_id, pipeline_id, model_release_id? }
+  /executor-availability   { recording_id, pipeline_id, executor }   (optional exact probe)
+
+DatasetExperiment
+  /executor-selection      { dataset_name, dataset_split, dataset_label_space,
+                             pipeline_id, model_release_id? }
+  NO /executor-availability call for dataset scope
 ```
 
-Rules:
+For DatasetExperiment, the `/executor-selection` candidate matrix supplies the
+`technical / configured / certified / available / reason` facts used both for the
+Auto explanation and for Manual option enable/disable preview. The authoritative
+final validation remains `POST /api/dataset-experiments` (Auto request or exact
+Manual executor).
+
+### Derived UI states (mapping backend facts, not client authority)
+
+```text
+available                technical && configured && certified && available
+not configured           technical && !configured
+not certified            technical && configured && !certified
+unsupported              !technical
+temporarily unavailable  configured/certified but probe failed
+recommended              backend recommended flag / resolved executor
+selected                 user choice or Auto resolution
+```
+
+### Rules
 
 - Default selection is **Auto** when the backend returns a valid Auto resolution.
 - If Auto is unresolved (`AUTO_NO_RUNNABLE_EXECUTOR`), Auto is rendered
@@ -588,18 +654,35 @@ the expanded panel preserves the bounded codes for diagnostics.
 Approved V1 policy:
 
 - The frontend does **not** require a ModelRelease picker in V1.
-- Default behavior: the backend resolves/defaults the ModelRelease; the frontend
-  displays the **resolved** ModelRelease as read-only provenance.
-- The API layer MUST support the optional `model_release_id` request field for
-  `POST /api/analysis-runs` and `POST /api/dataset-experiments` (pass-through),
-  but ordinary V1 UI MUST NOT present a hardcoded list of release ids.
+- The backend resolves/defaults the ModelRelease. The API layer MUST support the
+  optional `model_release_id` request field for `POST /api/analysis-runs` and
+  `POST /api/dataset-experiments` (pass-through), but ordinary V1 UI MUST NOT
+  present a hardcoded list of release ids and MUST NOT infer the resolved release
+  from request values, plugin knowledge, defaults, or `golden`.
+- **Resolved-release provenance is displayed only where the backend read model
+  actually projects it.** The contract differs by resource at the reference commit:
+
+  ```text
+  DatasetExperimentRead   projects model_release_id + asset_manifest_sha256
+                          → experiment provenance renders the backend-projected
+                            release identity NOW
+
+  AnalysisRunRead         does NOT currently project model_release_id
+                          → single-run resolved-release provenance is a YELLOW
+                            backend-contract gap; do NOT invent it
+  ```
+- Single AnalysisRun V1 contract:
+  ```text
+  - API client supports optional model_release_id request pass-through.
+  - Ordinary UI has no hardcoded release selector.
+  - If no authoritative release choice surface exists, send no explicit release.
+  - Do NOT display resolved ModelRelease provenance unless the read model exposes
+    the resolved identity.
+  ```
 - A user-facing selector is allowed **only** when the backend exposes a stable,
   authoritative list of selectable releases for a plugin/version (a future
   additive contract). Until then, no selector and no free-text entry.
 - Never hardcode values such as `golden` into the UI as choices.
-- After a run/experiment exists, render the resolved `model_release_id` (and
-  `asset_manifest_sha256` if already exposed as a safe opaque identity) as
-  provenance.
 
 ---
 
@@ -713,8 +796,8 @@ Endpoint families consumed by Frontend V1 (from backend `d4b22ee`):
   /api/recordings/{id}/waveform, /api/recordings/{id}/ground-truth
 /api/datasets/spacenet/register
 /api/pipelines
-/api/executor-availability
-/api/executor-selection
+/api/executor-availability   (recording-scoped: recording_id + pipeline_id + executor)
+/api/executor-selection      (recording_id OR dataset_name+dataset_split+dataset_label_space)
 /api/analysis-runs, /api/analysis-runs/{id}, /api/analysis-runs/{id}/detections
 /api/detections/{id}, /api/detections/{id}/fft
 /api/imported-runs  (+ /api/imported-runs/batch)
@@ -782,7 +865,7 @@ Retirement:
 | `AnalysisRunForm` | Create a single run | pipeline projection, selector result, optional `model_release_id` | choosing executor itself; sending `auto`+executor together |
 | `RunStatusBadge` | Render lifecycle + bounded error code | AnalysisRun `status`, `error_type`, `error_message` | collapsing codes into generic text |
 | `RunProvenanceCard` | Show resolved executor + mode/reason | execution metadata (`requested_execution_mode`, `auto_reason_code`, `auto_reason`, `workload_class`) | rendering private paths/environment_ref |
-| `ExperimentCreateForm` | Create a DatasetExperiment | pipelines, dataset selection, selector result, `max_concurrency`, protocol | sending frozen identity fields; release picker hardcoding |
+| `ExperimentCreateForm` | Create a DatasetExperiment | pipelines, dataset identity (exact triple), selector result, `max_concurrency`, protocol | sending frozen identity fields; release picker hardcoding; inventing parameter schemas |
 | `ExperimentList` / `ExperimentDetail` | List/detail/monitor experiments | experiment read model + counters + items | recomputing counters as authority |
 | `ExperimentItemTable` | Items + statuses | `DatasetExperimentItemRead` | inventing statuses |
 | `AttemptTimeline` | Attempts per item | `DatasetExperimentAttemptRead` | exposing launch internals beyond given fields |
@@ -871,6 +954,12 @@ some provenance metadata (execution metadata optional fields)
 DatasetExperiment derived counters (queued/running/completed/failed/attempt_count)
 dataset-benchmark compare optional/null metrics and deltas keys
 aggregate_metrics_json sub-shape (localization/classification_on_matched/class_aware/ground_truth)
+AnalysisRun resolved model_release_id provenance projection
+  (AnalysisRunRead does NOT currently expose it; do not infer)
+optional future authoritative dataset catalog / list surface
+  (no GET /api/datasets or /api/datasets/catalog at the reference commit)
+optional future pipeline parameter_schema / authoritative parameter UI metadata
+  (PipelineDefinitionRead does NOT currently expose parameter_schema)
 ```
 
 Isolation requirement: only the API client/types may name these fields; UI code
@@ -951,8 +1040,8 @@ backend API freeze.
   `pages/SpectrumAnalysisPage.tsx`, tests.
 - **User-visible:** choose Auto / Local CPU / Local GPU / Remote GPU with
   availability/certification status and reasons; Auto explanation.
-- **Backend deps:** `/api/executor-selection`, `/api/executor-availability`,
-  `/api/pipelines` (YELLOW fields isolated).
+- **Backend deps:** `/api/executor-selection`, `/api/executor-availability`
+  (recording-scoped), `/api/pipelines` (YELLOW fields isolated).
 - **Can start now?** YES.
 - **Reason:** removes the authority violation immediately; YELLOW fields are
   isolated behind the client/types.
@@ -961,30 +1050,39 @@ backend API freeze.
 
 - **Goal:** complete Workflow A.
 - **Deliverable:** Recording → Pipeline → Environment → AnalysisRun → status →
-  detections → provenance, with backend-resolved ModelRelease provenance and
-  optional `model_release_id` pass-through.
+  detections → provenance, with optional `model_release_id` request pass-through.
+  Single-run **resolved-release provenance is NOT rendered** while
+  `AnalysisRunRead` does not project `model_release_id` (YELLOW; see ModelRelease
+  Policy); do not infer the resolved release.
 - **Main areas:** `pages/SpectrumAnalysisPage.tsx`, `features/analysis-run/*`,
   `api/client.ts`, `features/signals/*`.
 - **User-visible:** run a single recording via Auto or Manual; see resolved
-  executor and provenance; inspect detections/signals.
+  executor and provenance; inspect detections/signals. Generic creation sends an
+  empty `parameters` object.
 - **Backend deps:** `POST /api/analysis-runs` (`executor` or `execution_mode`),
   `GET /api/analysis-runs/{id}`, `.../detections`.
 - **Can start now?** YES.
-- **Reason:** backend accepts both modes; model release optional field exists.
+- **Reason:** backend accepts both modes; optional `model_release_id` request field
+  exists; no read-model release projection is required for this milestone.
 
 ### F3 — Dataset Experiments
 
 - **Goal:** deliver Workflow B.
 - **Deliverable:** experiments list/create/run/detail; items; attempts; progress
-  and status lifecycle; linked evaluation reference.
+  and status lifecycle; linked evaluation reference; backend-projected
+  `model_release_id` + `asset_manifest_sha256` provenance (available on
+  `DatasetExperimentRead` now). Dataset identity is the exact triple; generic
+  creation sends an empty `parameters` object.
 - **Main areas:** `features/dataset-experiment/*`, `pages/Experiments*`,
   `api/client.ts`, `api/types.ts`.
 - **User-visible:** create an experiment over a frozen dataset with a model and an
-  environment; monitor items/attempts; see failure reasons.
-- **Backend deps:** `/api/dataset-experiments*`.
+  environment; monitor items/attempts; see failure reasons and the
+  backend-projected release identity.
+- **Backend deps:** `/api/dataset-experiments*`; dataset identity is an exact
+  triple (no catalog endpoint exists yet).
 - **Can start now?** YES.
 - **Reason:** endpoints exist at `d4b22ee`; derived counters are YELLOW and
-  isolated.
+  isolated; no dataset catalog or parameter schema is required.
 
 ### F4 — Evaluation + Multi-model Compare
 
@@ -1029,12 +1127,28 @@ backend API freeze.
 
 - **Goal:** reconcile frontend client/types with the frozen Backend V1 API.
 - **Deliverable:** resolved YELLOW drift; contract-accurate types; no broad
-  redesign.
+  redesign. Specifically reconcile:
+  ```text
+  executor-selection shape + candidate matrix + reason fields
+  DatasetExperiment derived counters
+  benchmark compare deltas / aggregate_metrics_json sub-shape
+  AnalysisRun resolved model_release_id projection
+    → if final AnalysisRunRead exposes model_release_id: add read-only resolved
+      ModelRelease provenance; otherwise do NOT invent it
+  optional authoritative dataset catalog / list surface
+    → if the backend exposes a catalog: upgrade exact dataset identity input into
+      an authoritative selector; otherwise retain explicit exact identity fields
+  optional pipeline parameter_schema / parameter UI metadata
+    → if the backend exposes an authoritative schema: optionally introduce
+      schema-driven controls; otherwise keep generic default/opaque parameters
+  ```
 - **Main areas:** `api/client.ts`, `api/types.ts`, tests.
-- **User-visible:** none directly.
+- **User-visible:** none directly (may enable release provenance, dataset selector,
+  or schema-driven parameters if the final backend provides them).
 - **Backend deps:** final backend API freeze / seal.
 - **Can start now?** **NO.**
-- **Reason:** must not begin before the backend contract freeze.
+- **Reason:** must not begin before the backend contract freeze; no backend
+  endpoint is invented in this design.
 
 ### F8 — Frontend V1 Acceptance
 
@@ -1183,9 +1297,10 @@ Performed before commit:
    from primary navigation.
 6. **Settings not an operator console** — removed from primary nav; operator
    configuration explicitly non-goal; future indicator is read-only only.
-7. **ModelRelease not hardcoded** — backend-resolved default + read-only
-   provenance; optional field pass-through; selector only if backend exposes an
-   authoritative choice list.
+7. **ModelRelease not hardcoded** — backend-resolved default; optional field
+   pass-through; resolved-release provenance rendered ONLY where the backend read
+   model projects it (DatasetExperiment now; AnalysisRun is a YELLOW gap that is
+   never inferred); selector only if backend exposes an authoritative choice list.
 8. **Null/N/A not converted to zero** — explicit rule in Evaluation/N/A Semantics
    and in component responsibilities.
 9. **No qualification internals** — Product/Operator Boundary lists and forbids
@@ -1198,4 +1313,23 @@ Performed before commit:
 13. **Backend-change tolerance present** — GREEN/YELLOW/RED with isolation rule
     and additive-field tolerance principle.
 
-No issues found; no fixes required before commit.
+Contract-accuracy corrective (second review):
+
+14. **`executors_supported` is NOT the executor option universe** — the four
+    options are a fixed product vocabulary; `executors_supported` is a hint only;
+    options are not hidden by absence, and state comes from backend candidate facts.
+15. **No DatasetExperiment call to recording-scoped `/executor-availability`** —
+    the scope-specific contracts specify dataset scope uses `/executor-selection`
+    with the dataset triple.
+16. **No generic dataset catalog assumed** — dataset identity is the exact triple;
+    no `GET /api/datasets` / `/catalog` is claimed; no SpaceNet hardcoding; a
+    catalog is a YELLOW F7 item.
+17. **No AnalysisRun resolved `model_release_id` claim** — `AnalysisRunRead` does
+    not expose it; provenance is never inferred; the DatasetExperiment distinction
+    is explicit.
+18. **No `parameter_schema` claim** — `PipelineDefinitionRead` does not expose it;
+    generic V1 sends `{}`; no invented parameter editor; a schema is a YELLOW F7
+    item.
+
+No contradictions introduced elsewhere in the document; no unresolved issue
+remains before commit.
