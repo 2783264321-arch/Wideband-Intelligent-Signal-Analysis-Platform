@@ -22,6 +22,8 @@ test("primary navigation is exactly Recordings | Experiments | Algorithm Lab", (
   expect(screen.getByRole("menuitem", { name: /Experiments/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /Algorithm Lab/ })).toBeInTheDocument();
   expect(screen.queryByText("Settings")).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: /Compare/ })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: /Benchmarks/ })).toBeNull();
   expect(screen.queryByText("Spectrum Analysis")).toBeNull();
 });
 
