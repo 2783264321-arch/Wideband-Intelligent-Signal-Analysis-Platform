@@ -328,3 +328,11 @@ test("clears stale comparison state when switching to another Recording", async 
   expect(screen.queryByText(/ZoomSpec/)).not.toBeInTheDocument();
   expect(screen.queryByText("Case Comparison")).not.toBeInTheDocument();
 });
+test("locks query-driven A/B comparison drilldown contract", async () => {
+  const { requests, postBodies } = setupCaseFetch();
+  renderView({ recordingId: "rec1", runAId: "run_a", runBId: "run_b" });
+  expect(await screen.findByText("both_detected", {}, { timeout: 3000 })).toBeInTheDocument();
+  expect(requests.some((url) => url.endsWith("/api/algorithm-lab/compare"))).toBe(true);
+  const body = JSON.parse(postBodies.at(-1) ?? "{}") as Record<string, unknown>;
+  expect(body).toMatchObject({ recording_id: "rec1", run_a_id: "run_a", run_b_id: "run_b", iou_threshold: 0.5 });
+});
