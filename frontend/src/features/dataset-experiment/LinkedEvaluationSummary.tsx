@@ -2,6 +2,7 @@ import { Alert, Button, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { getDatasetBenchmark, PlatformApiError, retryDatasetExperimentEvaluation } from "../../api/client";
 import type { DatasetEvaluation, DatasetExperiment } from "../../api/types";
+import { EvaluationMetricsView } from "../evaluation/EvaluationMetricsView";
 
 function toErrorText(reason: unknown): string {
   if (reason instanceof PlatformApiError) return reason.display;
@@ -78,6 +79,7 @@ export function LinkedEvaluationSummary({
       {evaluation.errorMessage !== null ? <Typography.Text type="danger">{evaluation.errorMessage}</Typography.Text> : null}
       {eligible ? <Button onClick={() => void retry()}>Retry Evaluation</Button> : null}
       {error !== null ? <Typography.Text type="danger">{error}</Typography.Text> : null}
+      <EvaluationMetricsView evaluation={evaluation} />
     </Space>
   );
 }
