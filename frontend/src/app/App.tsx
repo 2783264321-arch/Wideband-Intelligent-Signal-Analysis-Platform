@@ -5,6 +5,8 @@ import { SpectrumAnalysisPage } from "../pages/SpectrumAnalysisPage";
 import { SignalsPage } from "../pages/SignalsPage";
 import { SignalDetailPage } from "../pages/SignalDetailPage";
 import { AlgorithmLabPage } from "../pages/AlgorithmLabPage";
+import { ExperimentsPage } from "../pages/ExperimentsPage";
+import { ExperimentDetailPage } from "../pages/ExperimentDetailPage";
 
 function SettingsPage() {
   return <div><h2>Settings</h2><p>V1 keeps runtime configuration intentionally minimal.</p></div>;
@@ -19,6 +21,8 @@ export function App() {
         <Route path="spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
         <Route path="signals/:runId" element={<SignalsPage />} />
         <Route path="signals/:runId/:detectionId" element={<SignalDetailPage />} />
+        <Route path="experiments" element={<ExperimentsPage />} />
+        <Route path="experiments/:experimentId" element={<ExperimentDetailPage />} />
         <Route path="algorithm-lab" element={<AlgorithmLabPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/recordings" replace />} />

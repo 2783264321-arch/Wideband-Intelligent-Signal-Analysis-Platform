@@ -1,4 +1,4 @@
-import { ExperimentOutlined, FolderOpenOutlined, RadarChartOutlined, SettingOutlined, UnorderedListOutlined } from "@ant-design/icons";
+import { ExperimentOutlined, FolderOpenOutlined, RadarChartOutlined } from "@ant-design/icons";
 import { Layout, Menu, Typography } from "antd";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 
@@ -7,7 +7,11 @@ const { Header, Sider, Content } = Layout;
 export function MainLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const selected = location.pathname.startsWith("/spectrum") ? "spectrum" : location.pathname.startsWith("/signals") ? "signals" : location.pathname.startsWith("/algorithm-lab") ? "algorithm" : location.pathname.startsWith("/settings") ? "settings" : "recordings";
+  const selected = location.pathname.startsWith("/experiments")
+    ? "experiments"
+    : location.pathname.startsWith("/algorithm-lab")
+      ? "algorithm"
+      : "recordings";
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -19,15 +23,13 @@ export function MainLayout() {
           mode="inline"
           selectedKeys={[selected]}
           onClick={({ key }) => {
-            const paths: Record<string, string> = { recordings: "/recordings", spectrum: "/recordings", signals: "/recordings", algorithm: "/algorithm-lab", settings: "/settings" };
+            const paths: Record<string, string> = { recordings: "/recordings", experiments: "/experiments", algorithm: "/algorithm-lab" };
             navigate(paths[key]);
           }}
           items={[
             { key: "recordings", icon: <FolderOpenOutlined />, label: "Recordings" },
-            { key: "spectrum", icon: <RadarChartOutlined />, label: "Spectrum Analysis" },
-            { key: "signals", icon: <UnorderedListOutlined />, label: "Signals" },
-            { key: "algorithm", icon: <ExperimentOutlined />, label: "Algorithm Lab" },
-            { key: "settings", icon: <SettingOutlined />, label: "Settings" },
+            { key: "experiments", icon: <ExperimentOutlined />, label: "Experiments" },
+            { key: "algorithm", icon: <RadarChartOutlined />, label: "Algorithm Lab" },
           ]}
         />
       </Sider>
