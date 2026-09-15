@@ -52,6 +52,9 @@ export function ExperimentComparePanel() {
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error !== null ? <Alert type="error" showIcon description={error} /> : null}
+      {eligible.length === 0 ? (
+        <Alert type="info" showIcon message="No completed experiments with linked evaluations to compare." />
+      ) : null}
       <Space wrap>
         <Select aria-label="Experiment A" style={{ width: 240 }} value={aId ?? undefined} onChange={setAId} options={options} />
         <Select aria-label="Experiment B" style={{ width: 240 }} value={bId ?? undefined} onChange={setBId} options={options} />

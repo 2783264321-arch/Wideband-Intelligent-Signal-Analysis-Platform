@@ -124,3 +124,16 @@ test("changing a selected experiment clears the previous comparison result", asy
   fireEvent.click(cOpts[cOpts.length - 1]);
   expect(screen.queryByTestId("compare-delta-table")).toBeNull();
 });
+
+// ---------------------------------------------------------------------------
+// F6.3 — explicit empty state
+// ---------------------------------------------------------------------------
+
+test("shows an explicit empty state when no comparison is possible", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify([]));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  expect(await screen.findByText(/No completed experiments with linked evaluations to compare/i)).toBeInTheDocument();
+});
