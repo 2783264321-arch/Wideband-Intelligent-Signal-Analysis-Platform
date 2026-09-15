@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 import { SpectrogramViewer } from "./SpectrogramViewer";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { DetectionResult, SpectrogramMeta } from "../../api/types";
 
 const meta: SpectrogramMeta = {
@@ -30,11 +31,13 @@ const detections: DetectionResult[] = [
 test("selects a detection from its physical-coordinate overlay", () => {
   const onSelectDetection = vi.fn();
   render(
-    <SpectrogramViewer
-      meta={meta}
-      detections={detections}
-      onSelectDetection={onSelectDetection}
-    />,
+    renderWithLocalization(
+      <SpectrogramViewer
+        meta={meta}
+        detections={detections}
+        onSelectDetection={onSelectDetection}
+      />,
+    ),
   );
 
   fireEvent.click(screen.getByLabelText("Select det_002"));
@@ -42,7 +45,7 @@ test("selects a detection from its physical-coordinate overlay", () => {
 });
 
 test("reports physical time and frequency under the pointer", () => {
-  render(<SpectrogramViewer meta={meta} detections={[]} />);
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} />));
   const viewer = screen.getByTestId("spectrogram-viewer");
   vi.spyOn(viewer, "getBoundingClientRect").mockReturnValue({
     x: 0,
@@ -62,7 +65,7 @@ test("reports physical time and frequency under the pointer", () => {
 });
 
 test("supports zoom and reset without changing physical overlays", () => {
-  render(<SpectrogramViewer meta={meta} detections={detections} />);
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={detections} />));
   const viewer = screen.getByTestId("spectrogram-viewer");
 
   fireEvent.wheel(viewer, { deltaY: -100 });
@@ -71,4 +74,18 @@ test("supports zoom and reset without changing physical overlays", () => {
   fireEvent.click(screen.getByRole("button", { name: "Reset View" }));
   expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
   expect(screen.getByLabelText("Select det_002")).toBeInTheDocument();
+});
+
+test("localizes ordinary controls and hints in zh-CN without changing physical values", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer meta={meta} detections={detections} />,
+      { locale: "zh-CN" },
+    ),
+  );
+  expect(screen.getByRole("button", { name: "重置视图" })).toBeInTheDocument();
+  expect(screen.getByText("移动指针查看时间 / 频率")).toBeInTheDocument();
+  expect(screen.getByLabelText("选择 det_002")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Reset View" })).toBeNull();
+  expect(screen.getByText("0.000000 s")).toBeInTheDocument();
 });

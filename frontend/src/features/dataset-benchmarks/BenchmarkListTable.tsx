@@ -1,11 +1,17 @@
 import { Button, Table } from "antd";
 import type { DatasetEvaluation, DatasetEvaluationStatus } from "../../api/types";
+import type { MessageKey } from "../../localization/types";
+import { useLocalization } from "../../localization/useLocalization";
+import { evaluationStatusKey } from "../analysis-run/statusModel";
 
-function actionLabel(status: DatasetEvaluationStatus): string {
-  if (status === "pending") return "Run";
-  if (status === "running") return "View Progress";
-  if (status === "completed") return "Open";
-  return "Retry";
+const ACTION_KEYS: Record<string, MessageKey> = {
+  pending: "benchmarks.actionRun",
+  running: "benchmarks.actionViewProgress",
+  completed: "benchmarks.actionOpen",
+};
+
+function actionLabel(status: DatasetEvaluationStatus): MessageKey {
+  return ACTION_KEYS[status] ?? "benchmarks.actionRetry";
 }
 
 export interface BenchmarkListTableProps {
@@ -18,6 +24,7 @@ export interface BenchmarkListTableProps {
 }
 
 export function BenchmarkListTable(props: BenchmarkListTableProps) {
+  const { t } = useLocalization();
   return (
     <Table
       rowKey="id"
@@ -29,29 +36,36 @@ export function BenchmarkListTable(props: BenchmarkListTableProps) {
         getCheckboxProps: (row) => ({ disabled: row.status !== "completed" }),
       }}
       columns={[
-        { title: "Name", dataIndex: "name" },
-        { title: "Pipeline", render: (_, row) => `${row.pipelineId} · ${row.pipelineVersion}` },
-        { title: "Dataset", render: (_, row) => `${row.datasetName} / ${row.datasetSplit}` },
-        { title: "Protocol", dataIndex: "evaluationProtocol" },
-        { title: "Coverage", render: (_, row) => `${row.evaluatedRecordings}/${row.expectedRecordings}` },
-        { title: "Status", dataIndex: "status" },
+        { title: t("experiment.columnName"), dataIndex: "name" },
+        { title: t("form.pipeline"), render: (_, row) => `${row.pipelineId} · ${row.pipelineVersion}` },
+        { title: t("experiment.columnDataset"), render: (_, row) => `${row.datasetName} / ${row.datasetSplit}` },
+        { title: t("benchmarks.columnProtocol"), dataIndex: "evaluationProtocol" },
+        { title: t("benchmarks.columnCoverage"), render: (_, row) => `${row.evaluatedRecordings}/${row.expectedRecordings}` },
+        {
+          title: t("experiment.columnStatus"),
+          dataIndex: "status",
+          render: (status: string) => {
+            const key = evaluationStatusKey(status);
+            return key !== null ? t(key) : status;
+          },
+        },
         {
           title: "mAP50:95",
           render: (_, row) => {
             if (row.status !== "completed") return "—";
-            if (!row.aggregateMetrics?.classAware) return "N/A";
-            return row.aggregateMetrics.classAware.map50_95?.toFixed(4) ?? "N/A";
+            if (!row.aggregateMetrics?.classAware) return t("metrics.notAvailable");
+            return row.aggregateMetrics.classAware.map50_95?.toFixed(4) ?? t("metrics.notAvailable");
           },
         },
         {
-          title: "Action",
+          title: t("benchmarks.columnAction"),
           render: (_, row) => (
             <Button onClick={() => {
               if (row.status === "pending") props.onRun(row.id);
               else if (row.status === "failed" || row.status === "interrupted") props.onRetry(row.id);
               else props.onOpen(row.id);
             }}>
-              {actionLabel(row.status)}
+              {t(actionLabel(row.status))}
             </Button>
           ),
         },

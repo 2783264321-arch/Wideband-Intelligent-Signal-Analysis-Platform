@@ -7,8 +7,10 @@ import { toErrorText } from "../api/errors";
 import type { DetectionResult } from "../api/types";
 import { bandwidthHz, centerFrequencyHz, durationS } from "../features/signals/derived";
 import { spectrumPathForRun } from "../features/signals/spectrumNavigation";
+import { useLocalization } from "../localization/useLocalization";
 
 export function SignalsPage() {
+  const { t } = useLocalization();
   const navigate = useNavigate();
   const { runId = "" } = useParams();
   const [detections, setDetections] = useState<DetectionResult[]>([]);
@@ -20,7 +22,7 @@ export function SignalsPage() {
     setLoading(true);
     getDetections(runId)
       .then((items) => { if (active) setDetections(items); })
-      .catch((reason) => { if (active) setError(toErrorText(reason, "Unable to load detections.")); })
+      .catch((reason) => { if (active) setError(toErrorText(reason, t("signals.loadErrorDetail"))); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [runId]);
@@ -29,26 +31,26 @@ export function SignalsPage() {
   const recordingId = detections[0]?.recordingId;
   const columns: ColumnsType<DetectionResult> = [
     { title: "ID", dataIndex: "id" },
-    { title: "Signal Type", dataIndex: "className", filters, onFilter: (value, row) => row.className === value },
-    { title: "Confidence", dataIndex: "confidence", sorter: (a, b) => a.confidence - b.confidence, render: (value: number) => `${(value * 100).toFixed(1)}%` },
-    { title: "Center Freq", render: (_, d) => `${(centerFrequencyHz(d) / 1e6).toFixed(3)} MHz` },
-    { title: "Bandwidth", render: (_, d) => `${(bandwidthHz(d) / 1e6).toFixed(3)} MHz` },
-    { title: "Time", render: (_, d) => `${d.tStartS.toFixed(6)}–${d.tEndS.toFixed(6)} s` },
-    { title: "Duration", render: (_, d) => `${(durationS(d) * 1e3).toFixed(3)} ms` },
-    { title: "", render: (_, d) => <Button type="link" onClick={() => navigate(`/signals/${runId}/${d.id}`)}>View Details</Button> },
+    { title: t("signals.columnType"), dataIndex: "className", filters, onFilter: (value, row) => row.className === value },
+    { title: t("signals.columnConfidence"), dataIndex: "confidence", sorter: (a, b) => a.confidence - b.confidence, render: (value: number) => `${(value * 100).toFixed(1)}%` },
+    { title: t("signals.columnCenterFrequency"), render: (_, d) => `${(centerFrequencyHz(d) / 1e6).toFixed(3)} MHz` },
+    { title: t("signals.columnBandwidth"), render: (_, d) => `${(bandwidthHz(d) / 1e6).toFixed(3)} MHz` },
+    { title: t("signals.columnTime"), render: (_, d) => `${d.tStartS.toFixed(6)}–${d.tEndS.toFixed(6)} s` },
+    { title: t("signals.columnDuration"), render: (_, d) => `${(durationS(d) * 1e3).toFixed(3)} ms` },
+    { title: "", render: (_, d) => <Button type="link" onClick={() => navigate(`/signals/${runId}/${d.id}`)}>{t("common.viewDetails")}</Button> },
   ];
 
-  if (error) return <Alert type="error" showIcon message="Unable to load signals" description={error} />;
-  if (loading) return <Spin tip="Loading detected signals..." />;
+  if (error) return <Alert type="error" showIcon message={t("signals.loadError")} description={error} />;
+  if (loading) return <Spin tip={t("signals.loading")} />;
 
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div>
-          <Typography.Title level={2} style={{ marginBottom: 0 }}>Signals</Typography.Title>
-          <Typography.Text type="secondary">Persisted DetectionResults for {runId}</Typography.Text>
+          <Typography.Title level={2} style={{ marginBottom: 0 }}>{t("signals.title")}</Typography.Title>
+          <Typography.Text type="secondary">{t("signals.subtitle", { id: runId })}</Typography.Text>
         </div>
-        <Button disabled={!recordingId} onClick={() => recordingId && navigate(spectrumPathForRun(recordingId, runId))}>Show in Spectrum</Button>
+        <Button disabled={!recordingId} onClick={() => recordingId && navigate(spectrumPathForRun(recordingId, runId))}>{t("signals.showInSpectrum")}</Button>
       </div>
       <Table rowKey="id" dataSource={detections} columns={columns} pagination={false} />
     </>

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { compareDatasetBenchmarks, listDatasetExperiments, PlatformApiError } from "../../api/client";
 import type { DatasetBenchmarkCompareResult, DatasetExperiment } from "../../api/types";
 import { CompareDeltaTable } from "./CompareDeltaTable";
+import { useLocalization } from "../../localization/useLocalization";
 
 function toErrorText(reason: unknown): string {
   if (reason instanceof PlatformApiError) return reason.display;
@@ -11,6 +12,7 @@ function toErrorText(reason: unknown): string {
 }
 
 export function ExperimentComparePanel() {
+  const { t } = useLocalization();
   const [experiments, setExperiments] = useState<DatasetExperiment[]>([]);
   const [aId, setAId] = useState<string | null>(null);
   const [bId, setBId] = useState<string | null>(null);
@@ -71,24 +73,24 @@ export function ExperimentComparePanel() {
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error !== null ? <Alert type="error" showIcon description={error} /> : null}
       {eligible.length === 0 ? (
-        <Alert type="info" showIcon message="No completed experiments with linked evaluations to compare." />
+        <Alert type="info" showIcon message={t("compare.empty")} />
       ) : null}
       <Space wrap>
-        <Select aria-label="Experiment A" style={{ width: 240 }} value={aId ?? undefined} onChange={changeA} options={options} />
-        <Select aria-label="Experiment B" style={{ width: 240 }} value={bId ?? undefined} onChange={changeB} options={options} />
+        <Select aria-label={t("compare.selectA")} style={{ width: 240 }} value={aId ?? undefined} onChange={changeA} options={options} />
+        <Select aria-label={t("compare.selectB")} style={{ width: 240 }} value={bId ?? undefined} onChange={changeB} options={options} />
         <Button
           type="primary"
           disabled={aId === null || bId === null || aId === bId}
           onClick={() => void run()}
         >
-          Compare
+          {t("common.compare")}
         </Button>
       </Space>
       {result !== null && !result.comparable ? (
         <Alert
           type="warning"
           showIcon
-          message="Not comparable"
+          message={t("compare.notComparable")}
           description={
             <ul>
               {result.reasons.map((reason) => <li key={reason}>{reason}</li>)}

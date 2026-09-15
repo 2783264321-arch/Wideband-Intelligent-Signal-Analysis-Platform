@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { CompareDeltaTable } from "./CompareDeltaTable";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { DatasetBenchmarkCompareResult } from "../../api/types";
 
 const result: DatasetBenchmarkCompareResult = {
@@ -41,9 +42,11 @@ test("renders deltas with N/A for null and a shared-recording drilldown link", a
   }));
 
   render(
-    <MemoryRouter>
-      <CompareDeltaTable result={result} />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <CompareDeltaTable result={result} />
+      </MemoryRouter>,
+    ),
   );
 
   const table = await screen.findByTestId("compare-delta-table");
@@ -73,11 +76,11 @@ test("a new result clears the stale shared-recording drilldown immediately", asy
     throw new Error(`Unexpected request: ${url}`);
   }));
 
-  const { rerender } = render(<MemoryRouter><CompareDeltaTable result={r1} /></MemoryRouter>);
+  const { rerender } = render(renderWithLocalization(<MemoryRouter><CompareDeltaTable result={r1} /></MemoryRouter>));
   expect(await screen.findByRole("link", { name: /Algorithm Lab/i })).toBeInTheDocument();
 
   deferred = true;
-  rerender(<MemoryRouter><CompareDeltaTable result={r2} /></MemoryRouter>);
+  rerender(renderWithLocalization(<MemoryRouter><CompareDeltaTable result={r2} /></MemoryRouter>));
   expect(screen.queryByRole("link", { name: /Algorithm Lab/i })).toBeNull();
 
   // Later authoritative R2 items resolve -> link may reappear.
@@ -85,4 +88,29 @@ test("a new result clears the stale shared-recording drilldown immediately", asy
     resolveDeferred?.(new Response(JSON.stringify([])));
     await Promise.resolve();
   });
+});
+
+test("localizes delta metric labels in zh-CN without changing delta numbers", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/eval_a/items")) return new Response(JSON.stringify([itemWire("i1", "eval_a", "rec_1", "run_a")]));
+    if (url.includes("/eval_b/items")) return new Response(JSON.stringify([itemWire("i2", "eval_b", "rec_1", "run_b")]));
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <CompareDeltaTable result={result} />
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  const table = await screen.findByTestId("compare-delta-table");
+  expect(table).toHaveTextContent("类别感知 mAP50");
+  expect(table).toHaveTextContent("类别感知 mAP50:95");
+  expect(table).toHaveTextContent("已匹配目标分类准确率");
+  expect(table).toHaveTextContent("定位 AP50");
+  // Delta numbers and N/A semantics are unchanged.
+  expect(table).toHaveTextContent("0.07");
+  expect(table).toHaveTextContent("N/A");
+  expect(table).not.toHaveTextContent("0 ");
 });

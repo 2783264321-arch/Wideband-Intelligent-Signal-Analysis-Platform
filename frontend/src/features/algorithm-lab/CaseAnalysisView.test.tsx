@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { CaseAnalysisView } from "./CaseAnalysisView";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -209,8 +210,8 @@ function Harness({ initial = {} }: { initial?: { recordingId?: string; runAId?: 
   );
 }
 
-function renderView(initial?: { recordingId?: string; runAId?: string; runBId?: string }) {
-  return render(<Harness initial={initial} />);
+function renderView(initial?: { recordingId?: string; runAId?: string; runBId?: string }, locale: "zh-CN" | "en-US" = "en-US") {
+  return render(renderWithLocalization(<Harness initial={initial} />, { locale }));
 }
 
 async function chooseRecording() {
@@ -237,7 +238,7 @@ test("selects a recording, exposes only completed runs, and compares", async () 
   await chooseRun("Run B", "zoomspec · run_b");
 
   // Selecting both runs triggers the A/B comparison automatically.
-  expect(await screen.findByText("both_detected", {}, { timeout: 3000 })).toBeInTheDocument();
+  expect(await screen.findByText("Both detected", {}, { timeout: 3000 })).toBeInTheDocument();
   expect(screen.getAllByText(/STFT Energy Detector/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/ZoomSpec/).length).toBeGreaterThan(0);
   expect(screen.getAllByText("Precision").length).toBeGreaterThan(0);
@@ -245,11 +246,11 @@ test("selects a recording, exposes only completed runs, and compares", async () 
   expect(screen.getAllByText("F1").length).toBeGreaterThan(0);
   expect(screen.getAllByText(/Not applicable/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/detection_only_pipeline/).length).toBeGreaterThan(0);
-  expect(screen.getByText("Matched Accuracy")).toBeInTheDocument();
+  expect(screen.getByText("Matched accuracy")).toBeInTheDocument();
   expect(screen.getByText("Class-aware F1")).toBeInTheDocument();
-  expect(screen.getByText("a_only")).toBeInTheDocument();
-  expect(screen.getByText("b_only")).toBeInTheDocument();
-  expect(screen.getByText("both_missed")).toBeInTheDocument();
+  expect(screen.getByText("A only")).toBeInTheDocument();
+  expect(screen.getByText("B only")).toBeInTheDocument();
+  expect(screen.getByText("Both missed")).toBeInTheDocument();
 
   const compareBody = postBodies.find((body) => {
     try { return JSON.parse(body).run_a_id === "run_a" && JSON.parse(body).run_b_id === "run_b"; }
@@ -319,19 +320,19 @@ test("clears stale comparison state when switching to another Recording", async 
   await chooseRecording();
   await chooseRun("Run A", "stft_energy_detector · run_a");
   await chooseRun("Run B", "zoomspec · run_b");
-  expect(await screen.findByText("both_detected", {}, { timeout: 3000 })).toBeInTheDocument();
+  expect(await screen.findByText("Both detected", {}, { timeout: 3000 })).toBeInTheDocument();
 
   // Switch to Recording B -> onRecordingChange clears runA/runB; old comparison must disappear.
   fireEvent.mouseDown(screen.getByLabelText("Recording"));
   fireEvent.click(await screen.findByTitle("Sample B"));
-  await waitFor(() => expect(screen.queryByText("both_detected")).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText("Both detected")).not.toBeInTheDocument());
   expect(screen.queryByText(/ZoomSpec/)).not.toBeInTheDocument();
   expect(screen.queryByText("Case Comparison")).not.toBeInTheDocument();
 });
 test("locks query-driven A/B comparison drilldown contract", async () => {
   const { requests, postBodies } = setupCaseFetch();
   renderView({ recordingId: "rec1", runAId: "run_a", runBId: "run_b" });
-  expect(await screen.findByText("both_detected", {}, { timeout: 3000 })).toBeInTheDocument();
+  expect(await screen.findByText("Both detected", {}, { timeout: 3000 })).toBeInTheDocument();
   expect(requests.some((url) => url.endsWith("/api/algorithm-lab/compare"))).toBe(true);
   const body = JSON.parse(postBodies.at(-1) ?? "{}") as Record<string, unknown>;
   expect(body).toMatchObject({ recording_id: "rec1", run_a_id: "run_a", run_b_id: "run_b", iou_threshold: 0.5 });

@@ -8,8 +8,10 @@ import { LineSeriesChart } from "../features/signal-detail/LineSeriesChart";
 import { SignalSummary } from "../features/signals/SignalSummary";
 import { spectrumPathForRun } from "../features/signals/spectrumNavigation";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
+import { useLocalization } from "../localization/useLocalization";
 
 export function SignalDetailPage() {
+  const { t } = useLocalization();
   const navigate = useNavigate();
   const { runId = "", detectionId = "" } = useParams();
   const [detection, setDetection] = useState<DetectionResult | null>(null);
@@ -37,42 +39,42 @@ export function SignalDetailPage() {
         setFFT(nextFFT);
         setGroundTruth(nextGroundTruth);
       })
-      .catch((reason) => { if (active) setError(toErrorText(reason, "Unable to load signal detail.")); });
+      .catch((reason) => { if (active) setError(toErrorText(reason, t("signalDetail.loadErrorDetail"))); });
     return () => { active = false; };
   }, [detectionId]);
 
-  if (error) return <Alert type="error" showIcon message="Unable to load signal detail" description={error} />;
-  if (!detection || !spectrogram || !waveform || !fft) return <Spin tip="Loading signal detail..." />;
+  if (error) return <Alert type="error" showIcon message={t("signalDetail.loadError")} description={error} />;
+  if (!detection || !spectrogram || !waveform || !fft) return <Spin tip={t("signalDetail.loading")} />;
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <Typography.Title level={2} style={{ margin: 0 }}>Signal Detail · {detection.id}</Typography.Title>
-        <Button onClick={() => navigate(spectrumPathForRun(detection.recordingId, runId, detection.id))}>Show in Spectrum</Button>
+        <Typography.Title level={2} style={{ margin: 0 }}>{t("signalDetail.title")} · {detection.id}</Typography.Title>
+        <Button onClick={() => navigate(spectrumPathForRun(detection.recordingId, runId, detection.id))}>{t("signals.showInSpectrum")}</Button>
       </div>
       <SignalSummary detection={detection} />
       <Row gutter={16}>
         <Col xs={24} lg={12}>
-          <Card title="Local Spectrogram Context">
+          <Card title={t("signalDetail.localSpectrogramContext")}>
             <SpectrogramViewer meta={spectrogram} detections={[detection]} groundTruth={groundTruth} selectedDetectionId={detection.id} />
           </Card>
         </Col>
         <Col xs={24} lg={12}>
-          <Card title="FFT / Spectrum">
-            <LineSeriesChart x={fft.frequencyHz} series={[{ name: "Magnitude (dB)", values: fft.magnitudeDb }]} xFormatter={(value) => `${(value / 1e6).toFixed(3)} MHz`} />
+          <Card title={t("signalDetail.fftSpectrum")}>
+            <LineSeriesChart x={fft.frequencyHz} series={[{ name: t("signalDetail.magnitudeDb"), values: fft.magnitudeDb }]} xFormatter={(value) => `${(value / 1e6).toFixed(3)} MHz`} />
           </Card>
         </Col>
       </Row>
       <Row gutter={16}>
         <Col xs={24} lg={12}>
-          <Card title="I/Q Waveform">
+          <Card title={t("signalDetail.iqWaveform")}>
             <LineSeriesChart x={waveform.timeS} series={[{ name: "I", values: waveform.i }, { name: "Q", values: waveform.q, dashed: true }]} xFormatter={(value) => `${(value * 1e3).toFixed(3)} ms`} />
           </Card>
         </Col>
         <Col xs={24} lg={12}>
-          <Card title="Processing Inspector">
+          <Card title={t("signalDetail.processingInspector")}>
             <div style={{ minHeight: 220, display: "grid", placeItems: "center", textAlign: "center" }}>
-              Intermediate artifacts are optional and will appear here when the selected Pipeline exports them.
+              {t("signalDetail.inspectPlaceholder")}
             </div>
           </Card>
         </Col>

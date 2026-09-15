@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, WheelEvent } from "react";
 import type { DetectionResult, GroundTruthResult, SpectrogramMeta } from "../../api/types";
 import { frequencyToPercentFromTop, timeToPercent } from "./coordinates";
+import { useLocalization } from "../../localization/useLocalization";
 
 interface SpectrogramViewerProps {
   meta: SpectrogramMeta;
@@ -40,6 +41,7 @@ export function SpectrogramViewer({
   selectedDetectionId,
   onSelectDetection,
 }: SpectrogramViewerProps) {
+  const { t } = useLocalization();
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number; panX: number; panY: number } | null>(null);
@@ -107,7 +109,7 @@ export function SpectrogramViewer({
           {meta.imageUrl ? (
             <img
               src={meta.imageUrl}
-              alt={`${meta.representation.toUpperCase()} spectrogram`}
+              alt={t("spectrum.spectrogramAlt", { representation: meta.representation.toUpperCase() })}
               draggable={false}
               style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "fill", userSelect: "none" }}
             />
@@ -115,7 +117,7 @@ export function SpectrogramViewer({
           <svg
             viewBox="0 0 100 100"
             preserveAspectRatio="none"
-            aria-label="Detection overlays"
+            aria-label={t("spectrum.detectionOverlays")}
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
           >
             {groundTruth.map((item) => {
@@ -130,7 +132,7 @@ export function SpectrogramViewer({
                   strokeDasharray="1.4 1"
                   opacity={0.8}
                   vectorEffect="non-scaling-stroke"
-                  aria-label={`Ground truth ${item.id}`}
+                  aria-label={t("spectrum.groundTruthBox", { id: item.id })}
                 />
               );
             })}
@@ -140,7 +142,7 @@ export function SpectrogramViewer({
               return (
                 <g
                   key={detection.id}
-                  aria-label={`Select ${detection.id}`}
+                  aria-label={t("spectrum.selectDetection", { id: detection.id })}
                   role="button"
                   tabIndex={0}
                   onClick={(event) => {
@@ -168,11 +170,11 @@ export function SpectrogramViewer({
       <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>
         <span>{meta.tStartS.toFixed(6)} s</span>
         <span data-testid="cursor-readout">
-          {cursor ? `${cursor.timeS.toFixed(6)} s · ${(cursor.frequencyHz / 1e6).toFixed(3)} MHz` : "Move pointer to inspect time / frequency"}
+          {cursor ? `${cursor.timeS.toFixed(6)} s · ${(cursor.frequencyHz / 1e6).toFixed(3)} MHz` : t("spectrum.cursorHint")}
         </span>
         <Space size="small">
           <span data-testid="zoom-readout">{zoom.toFixed(2)}×</span>
-          <Button size="small" onClick={resetView}>Reset View</Button>
+          <Button size="small" onClick={resetView}>{t("spectrum.resetView")}</Button>
         </Space>
       </Space>
     </div>

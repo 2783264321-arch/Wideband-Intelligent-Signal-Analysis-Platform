@@ -1,51 +1,13 @@
 import { Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { AlgorithmLabCase, RunMatchState } from "../../api/types";
+import type { MessageKey } from "../../localization/types";
+import { useLocalization } from "../../localization/useLocalization";
+import { comparisonStateKey } from "../analysis-run/statusModel";
 
-const comparisonTag = (state: string) => {
-  const color = state === "both_detected" ? "green" : state === "both_missed" ? "red" : "orange";
-  return <Tag color={color}>{state}</Tag>;
-};
-
-const matchCell = (state: RunMatchState) => {
-  if (!state.matched) return <Tag color="red">Missed</Tag>;
-  const iouText = state.iou === null ? "—" : state.iou.toFixed(3);
-  return (
-    <span>
-      {iouText}<br />
-      <span>{state.className ?? "?"}</span>{" "}
-      {state.classCorrect === null ? <Tag>Class N/A</Tag> : state.classCorrect ? <Tag color="green">✓</Tag> : <Tag color="red">✗</Tag>}
-    </span>
-  );
-};
-
-const columns: ColumnsType<AlgorithmLabCase> = [
-  {
-    title: "GT / Signal Type",
-    key: "gt",
-    render: (_, record) => (
-      <span>{record.groundTruthId} · {record.className}</span>
-    ),
-  },
-  {
-    title: "Run A (IoU / class)",
-    dataIndex: "runA",
-    key: "runA",
-    render: (_, record) => matchCell(record.runA),
-  },
-  {
-    title: "Run B (IoU / class)",
-    dataIndex: "runB",
-    key: "runB",
-    render: (_, record) => matchCell(record.runB),
-  },
-  {
-    title: "Comparison",
-    dataIndex: "comparison",
-    key: "comparison",
-    render: (value: string) => comparisonTag(value),
-  },
-];
+function comparisonColor(state: string): string {
+  return state === "both_detected" ? "green" : state === "both_missed" ? "red" : "orange";
+}
 
 interface Props {
   cases: AlgorithmLabCase[];
@@ -53,6 +15,53 @@ interface Props {
 }
 
 export function CaseComparisonTable({ cases, onSelectCase }: Props) {
+  const { t } = useLocalization();
+
+  const comparisonTag = (state: string) => {
+    const key: MessageKey | null = comparisonStateKey(state);
+    return <Tag color={comparisonColor(state)}>{key !== null ? t(key) : state}</Tag>;
+  };
+
+  const matchCell = (state: RunMatchState) => {
+    if (!state.matched) return <Tag color="red">{t("caseAnalysis.missed")}</Tag>;
+    const iouText = state.iou === null ? "—" : state.iou.toFixed(3);
+    return (
+      <span>
+        {iouText}<br />
+        <span>{state.className ?? "?"}</span>{" "}
+        {state.classCorrect === null ? <Tag>{t("caseAnalysis.classNa")}</Tag> : state.classCorrect ? <Tag color="green">✓</Tag> : <Tag color="red">✗</Tag>}
+      </span>
+    );
+  };
+
+  const columns: ColumnsType<AlgorithmLabCase> = [
+    {
+      title: t("caseAnalysis.columnGtType"),
+      key: "gt",
+      render: (_, record) => (
+        <span>{record.groundTruthId} · {record.className}</span>
+      ),
+    },
+    {
+      title: t("caseAnalysis.columnRunA"),
+      dataIndex: "runA",
+      key: "runA",
+      render: (_, record) => matchCell(record.runA),
+    },
+    {
+      title: t("caseAnalysis.columnRunB"),
+      dataIndex: "runB",
+      key: "runB",
+      render: (_, record) => matchCell(record.runB),
+    },
+    {
+      title: t("caseAnalysis.columnComparison"),
+      dataIndex: "comparison",
+      key: "comparison",
+      render: (value: string) => comparisonTag(value),
+    },
+  ];
+
   return (
     <Table<AlgorithmLabCase>
       size="small"

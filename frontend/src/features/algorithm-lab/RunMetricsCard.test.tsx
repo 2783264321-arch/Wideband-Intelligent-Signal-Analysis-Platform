@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { RunMetricsCard } from "./RunMetricsCard";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { RunComparison } from "../../api/types";
 
 function makeRun(overrides: Partial<RunComparison>): RunComparison {
@@ -23,7 +24,7 @@ function makeRun(overrides: Partial<RunComparison>): RunComparison {
 }
 
 test("renders localization, classification, and end-to-end sections when available", () => {
-  render(<RunMetricsCard run={makeRun({})} side="B" />);
+  render(renderWithLocalization(<RunMetricsCard run={makeRun({})} side="B" />));
   expect(screen.getByText(/Run B:/)).toBeInTheDocument();
   // Localization
   expect(screen.getByText("Precision")).toBeInTheDocument();
@@ -33,7 +34,7 @@ test("renders localization, classification, and end-to-end sections when availab
   expect(screen.getByText("Matched")).toBeInTheDocument();
   expect(screen.getByText("Correct")).toBeInTheDocument();
   expect(screen.getByText("Wrong")).toBeInTheDocument();
-  expect(screen.getByText("Matched Accuracy")).toBeInTheDocument();
+  expect(screen.getByText("Matched accuracy")).toBeInTheDocument();
   // Confusions empty
   expect(screen.getByText("None")).toBeInTheDocument();
   // End-to-End
@@ -54,7 +55,7 @@ test("renders confusions when present", () => {
       ],
     },
   });
-  render(<RunMetricsCard run={run} side="A" />);
+  render(renderWithLocalization(<RunMetricsCard run={run} side="A" />));
   expect(screen.getByText(/LoRa 250kHz/)).toBeInTheDocument();
   expect(screen.getByText(/FM/)).toBeInTheDocument();
 });
@@ -66,7 +67,7 @@ test("renders Not applicable when classification unavailable", () => {
     classification: null,
     classAware: null,
   });
-  render(<RunMetricsCard run={run} side="A" />);
+  render(renderWithLocalization(<RunMetricsCard run={run} side="A" />));
   expect(screen.getAllByText(/Not applicable/).length).toBeGreaterThan(0);
   expect(screen.getByText(/detection_only_pipeline/)).toBeInTheDocument();
   // localization still shown
@@ -83,6 +84,20 @@ test("renders zero-match accuracy as em dash not zero", () => {
       confusions: [],
     },
   });
-  render(<RunMetricsCard run={run} side="A" />);
+  render(renderWithLocalization(<RunMetricsCard run={run} side="A" />));
   expect(screen.getByText("—")).toBeInTheDocument();
+});
+test("localizes run metrics labels in zh-CN without changing numbers or raw pipeline identity", () => {
+  render(renderWithLocalization(<RunMetricsCard run={makeRun({})} side="B" />, { locale: "zh-CN" }));
+  expect(screen.getByText("任务 B：ZoomSpec")).toBeInTheDocument();
+  expect(screen.getByText("定位指标")).toBeInTheDocument();
+  expect(screen.getByText("平均 IoU")).toBeInTheDocument();
+  expect(screen.getByText("信号分类（已匹配目标）")).toBeInTheDocument();
+  expect(screen.getByText("已匹配目标分类准确率")).toBeInTheDocument();
+  expect(screen.getByText("端到端（类别感知）")).toBeInTheDocument();
+  expect(screen.getByText("类别感知精确率")).toBeInTheDocument();
+  // Raw pipeline identity and numeric output are unchanged.
+  expect(screen.getByText("zoomspec")).toBeInTheDocument();
+  expect(screen.getAllByText("0.4615").length).toBeGreaterThan(0);
+  expect(screen.getByText("0.8921")).toBeInTheDocument();
 });

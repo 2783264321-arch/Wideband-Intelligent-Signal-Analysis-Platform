@@ -1,3 +1,5 @@
+import { useLocalization } from "../../localization/useLocalization";
+
 interface Series {
   name: string;
   values: number[];
@@ -17,7 +19,8 @@ function normalize(value: number, min: number, max: number): number {
 }
 
 export function LineSeriesChart({ x, series, xFormatter = (value) => value.toFixed(3), height = 220 }: LineSeriesChartProps) {
-  if (!x.length || !series.length) return <div style={{ minHeight: height, display: "grid", placeItems: "center" }}>No data</div>;
+  const { t } = useLocalization();
+  if (!x.length || !series.length) return <div style={{ minHeight: height, display: "grid", placeItems: "center" }}>{t("common.noData")}</div>;
   const allY = series.flatMap((item) => item.values);
   const xMin = Math.min(...x);
   const xMax = Math.max(...x);
@@ -26,7 +29,7 @@ export function LineSeriesChart({ x, series, xFormatter = (value) => value.toFix
 
   return (
     <div>
-      <svg viewBox="0 0 1000 300" width="100%" height={height} role="img" aria-label="Signal chart" style={{ border: "1px solid #f0f0f0" }}>
+      <svg viewBox="0 0 1000 300" width="100%" height={height} role="img" aria-label={t("signalDetail.chartAria")} style={{ border: "1px solid #f0f0f0" }}>
         {series.map((item) => {
           const points = item.values
             .slice(0, x.length)

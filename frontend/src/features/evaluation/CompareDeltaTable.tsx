@@ -3,18 +3,16 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetBenchmarkItems } from "../../api/client";
 import type { DatasetBenchmarkCompareResult } from "../../api/types";
+import type { MessageKey } from "../../localization/types";
+import { useLocalization } from "../../localization/useLocalization";
 
-const DELTA_ROWS: Array<[string, string]> = [
-  ["localization_ap50", "Localization AP50"],
-  ["localization_ap50_95", "Localization AP50:95"],
-  ["class_aware_map50", "Class-aware mAP50"],
-  ["class_aware_map50_95", "Class-aware mAP50:95"],
-  ["matched_accuracy", "Matched accuracy"],
+const DELTA_ROWS: Array<[string, MessageKey]> = [
+  ["localization_ap50", "compare.metricLocalizationAp50"],
+  ["localization_ap50_95", "compare.metricLocalizationAp50_95"],
+  ["class_aware_map50", "compare.metricClassAwareMap50"],
+  ["class_aware_map50_95", "compare.metricClassAwareMap50_95"],
+  ["matched_accuracy", "compare.metricMatchedAccuracy"],
 ];
-
-function formatDelta(value: number | null | undefined): string {
-  return typeof value === "number" ? String(value) : "N/A";
-}
 
 interface SharedRecording {
   recordingId: string;
@@ -28,7 +26,11 @@ interface SharedRecording {
  * items (never invented).
  */
 export function CompareDeltaTable({ result }: { result: DatasetBenchmarkCompareResult }) {
+  const { t } = useLocalization();
   const [shared, setShared] = useState<SharedRecording | null>(null);
+
+  const formatDelta = (value: number | null | undefined): string =>
+    typeof value === "number" ? String(value) : t("metrics.notAvailable");
 
   useEffect(() => {
     if (!result.comparable) return undefined;
@@ -59,15 +61,15 @@ export function CompareDeltaTable({ result }: { result: DatasetBenchmarkCompareR
       <Table
         rowKey="metric"
         pagination={false}
-        dataSource={DELTA_ROWS.map(([key, label]) => ({ metric: label, delta: formatDelta(result.deltas[key]) }))}
+        dataSource={DELTA_ROWS.map(([key, labelKey]) => ({ metric: t(labelKey), delta: formatDelta(result.deltas[key]) }))}
         columns={[
-          { title: "Metric", dataIndex: "metric" },
-          { title: "Delta", dataIndex: "delta" },
+          { title: t("compare.columnMetric"), dataIndex: "metric" },
+          { title: t("compare.columnDelta"), dataIndex: "delta" },
         ]}
       />
       {shared !== null ? (
         <Link to={`/algorithm-lab?recording=${shared.recordingId}&runA=${shared.runAId}&runB=${shared.runBId}`}>
-          Open recording in Algorithm Lab
+          {t("compare.openRecordingInAlgorithmLab")}
         </Link>
       ) : null}
     </Space>

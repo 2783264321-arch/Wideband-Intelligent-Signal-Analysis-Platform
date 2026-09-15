@@ -41,6 +41,13 @@ const EVALUATION_STATUS_KEYS: Record<string, MessageKey> = {
   interrupted: "status.interrupted",
 };
 
+const COMPARISON_STATE_KEYS: Record<string, MessageKey> = {
+  both_detected: "caseAnalysis.stateBothDetected",
+  a_only: "caseAnalysis.stateAOnly",
+  b_only: "caseAnalysis.stateBOnly",
+  both_missed: "caseAnalysis.stateBothMissed",
+};
+
 const REASON_KEYS: Record<string, MessageKey> = {
   EXECUTION_CAPABILITY_UNAVAILABLE: "reason.EXECUTION_CAPABILITY_UNAVAILABLE",
   EXECUTION_NOT_CERTIFIED: "reason.EXECUTION_NOT_CERTIFIED",
@@ -69,6 +76,10 @@ export function itemStatusKey(status: string): MessageKey | null {
 
 export function evaluationStatusKey(status: string): MessageKey | null {
   return EVALUATION_STATUS_KEYS[status] ?? null;
+}
+
+export function comparisonStateKey(state: string): MessageKey | null {
+  return COMPARISON_STATE_KEYS[state] ?? null;
 }
 
 export function reasonKey(code: string | null | undefined): MessageKey | null {

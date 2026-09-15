@@ -21,6 +21,7 @@ import type {
 import { CaseComparisonTable } from "./CaseComparisonTable";
 import { RunComparisonPanel } from "./RunComparisonPanel";
 import { RunMetricsCard } from "./RunMetricsCard";
+import { useLocalization } from "../../localization/useLocalization";
 
 const runLabel = (run: AnalysisRun) => `${run.pipelineId} · ${run.id}`;
 
@@ -41,6 +42,7 @@ export function CaseAnalysisView({
   onRunAChange,
   onRunBChange,
 }: CaseAnalysisViewProps) {
+  const { t } = useLocalization();
   const [recordings, setRecordings] = useState<RecordingDetail[]>([]);
   const [selectedRecording, setSelectedRecording] = useState<RecordingDetail | null>(null);
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
@@ -57,7 +59,7 @@ export function CaseAnalysisView({
   useEffect(() => {
     listRecordings(500, 0)
       .then((page) => setRecordings(page.items))
-      .catch((reason: unknown) => setError(toErrorText(reason, "Unable to load recordings.")));
+      .catch((reason: unknown) => setError(toErrorText(reason, t("algorithmLab.loadRecordingsError"))));
   }, []);
 
   // Resolve the selected Recording: from the paged list when present, otherwise
@@ -94,7 +96,7 @@ export function CaseAnalysisView({
       setRuns(nextRuns);
     };
     void load().catch((reason: unknown) => {
-      if (!cancelled) setError(toErrorText(reason, "Unable to load analysis runs."));
+      if (!cancelled) setError(toErrorText(reason, t("algorithmLab.loadRunsError")));
     });
     return () => {
       cancelled = true;
@@ -138,7 +140,7 @@ export function CaseAnalysisView({
       applyCompare(result, nextMeta, nextGroundTruth, nextA, nextB);
     } catch (reason) {
       setCompare(null);
-      setError(toErrorText(reason, "Unable to compare runs."));
+      setError(toErrorText(reason, t("algorithmLab.compareError")));
     } finally {
       setLoading(false);
     }
@@ -160,7 +162,7 @@ export function CaseAnalysisView({
         .catch((reason: unknown) => {
           if (!cancelled) {
             setCompare(null);
-            setError(toErrorText(reason, "Unable to compare runs."));
+            setError(toErrorText(reason, t("algorithmLab.compareError")));
           }
         })
         .finally(() => {
@@ -182,7 +184,7 @@ export function CaseAnalysisView({
           setSelectedCaseId(undefined);
         })
         .catch((reason: unknown) => {
-          if (!cancelled) setError(toErrorText(reason, "Unable to load case inspection."));
+          if (!cancelled) setError(toErrorText(reason, t("algorithmLab.loadCaseError")));
         });
     }
     return () => {
@@ -195,15 +197,15 @@ export function CaseAnalysisView({
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div>
-        <Typography.Title level={2} style={{ marginBottom: 4 }}>Algorithm Lab</Typography.Title>
-        <Typography.Text type="secondary">Inspect one completed run or compare two completed runs on one Recording (localization matching IoU = 0.5).</Typography.Text>
+        <Typography.Title level={2} style={{ marginBottom: 4 }}>{t("algorithmLab.title")}</Typography.Title>
+        <Typography.Text type="secondary">{t("algorithmLab.subtitle")}</Typography.Text>
       </div>
 
-      <Card title="Experiment Setup">
+      <Card title={t("algorithmLab.experimentSetup")}>
         <Space wrap>
           <Select
-            aria-label="Recording"
-            placeholder="Select a Recording"
+            aria-label={t("algorithmLab.selectionRecording")}
+            placeholder={t("import.selectRecording")}
             style={{ width: 240 }}
             showSearch
             optionFilterProp="label"
@@ -212,8 +214,8 @@ export function CaseAnalysisView({
             options={recordings.map((item) => ({ value: item.id, label: item.name }))}
           />
           <Select
-            aria-label="Run A"
-            placeholder="Run A"
+            aria-label={t("algorithmLab.runA")}
+            placeholder={t("algorithmLab.runA")}
             style={{ width: 260 }}
             value={runAId}
             onChange={onRunAChange}
@@ -221,20 +223,20 @@ export function CaseAnalysisView({
           />
           <Typography.Text type="secondary">VS</Typography.Text>
           <Select
-            aria-label="Run B"
-            placeholder="Run B"
+            aria-label={t("algorithmLab.runB")}
+            placeholder={t("algorithmLab.runB")}
             style={{ width: 260 }}
             value={runBId}
             onChange={onRunBChange}
             options={runs.map((item) => ({ value: item.id, label: runLabel(item) }))}
           />
           <Button type="primary" disabled={!canCompare} loading={loading} onClick={() => void runCompare()}>
-            Compare
+            {t("common.compare")}
           </Button>
         </Space>
         {selectedRecording ? (
           <div style={{ marginTop: 8 }}>
-            <Typography.Text type="secondary">Recording:</Typography.Text>{" "}
+            <Typography.Text type="secondary">{t("algorithmLab.recordingLabel")}</Typography.Text>{" "}
             <Typography.Text>{selectedRecording.name}</Typography.Text>
           </div>
         ) : null}
@@ -246,24 +248,24 @@ export function CaseAnalysisView({
         <Alert
           type="info"
           showIcon
-          message="This recording has fewer than two completed AnalysisRuns to compare."
+          message={t("algorithmLab.fewerThanTwo")}
         />
       ) : null}
 
-      {loading ? <Spin tip="Comparing runs..." /> : null}
+      {loading ? <Spin tip={t("algorithmLab.comparing")} /> : null}
 
       {singleRun && !compare ? (
         <Space direction="vertical" size="large" style={{ width: "100%" }}>
           <Alert
             type="info"
             showIcon
-            message="Select Run B to compare this result with another run."
+            message={t("algorithmLab.selectRunB")}
           />
           {meta ? (
             <Row gutter={16}>
               <Col xs={24} lg={12}>
                 <RunComparisonPanel
-                  title={`Run A: ${runAId}`}
+                  title={t("algorithmLab.runATitle", { label: runAId ?? "" })}
                   color="blue"
                   meta={meta}
                   groundTruth={groundTruth}
@@ -284,7 +286,7 @@ export function CaseAnalysisView({
           <Row gutter={16}>
             <Col xs={24} lg={12}>
               <RunComparisonPanel
-                title={`Run A: ${compare.runA.pipelineName}`}
+                title={t("algorithmLab.runATitle", { label: compare.runA.pipelineName })}
                 color="blue"
                 meta={meta}
                 groundTruth={groundTruth}
@@ -294,7 +296,7 @@ export function CaseAnalysisView({
             </Col>
             <Col xs={24} lg={12}>
               <RunComparisonPanel
-                title={`Run B: ${compare.runB.pipelineName}`}
+                title={t("algorithmLab.runBTitle", { label: compare.runB.pipelineName })}
                 color="green"
                 meta={meta}
                 groundTruth={groundTruth}
@@ -303,14 +305,14 @@ export function CaseAnalysisView({
               />
             </Col>
           </Row>
-          <Card title="Case Comparison" size="small">
+          <Card title={t("algorithmLab.caseComparison")} size="small">
             <CaseComparisonTable cases={compare.cases} onSelectCase={setSelectedCaseId} />
           </Card>
         </Space>
       ) : null}
 
       {!singleRun && !compare && recordingId && !selectedRecording ? (
-        <Spin tip="Loading recording..." />
+        <Spin tip={t("algorithmLab.loadingRecording")} />
       ) : null}
     </Space>
   );

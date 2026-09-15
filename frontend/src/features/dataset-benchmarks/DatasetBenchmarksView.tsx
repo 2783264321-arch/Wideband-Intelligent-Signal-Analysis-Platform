@@ -6,6 +6,7 @@ import { BenchmarkComparePanel } from "./BenchmarkComparePanel";
 import { BenchmarkCreatePanel } from "./BenchmarkCreatePanel";
 import { BenchmarkDetailView } from "./BenchmarkDetailView";
 import { BenchmarkListTable } from "./BenchmarkListTable";
+import { useLocalization } from "../../localization/useLocalization";
 
 export interface DatasetBenchmarksViewProps {
   selectedBenchmarkId?: string;
@@ -20,6 +21,7 @@ function toErrorText(error: unknown): string {
 }
 
 export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, onOpenCase }: DatasetBenchmarksViewProps) {
+  const { t } = useLocalization();
   const [items, setItems] = useState<DatasetEvaluation[]>([]);
   const [creating, setCreating] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -73,12 +75,12 @@ export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, on
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
       <Space>
-        <Typography.Title level={3} style={{ margin: 0 }}>Dataset Benchmarks</Typography.Title>
-        <Button onClick={() => setCreating(true)}>New Benchmark</Button>
+        <Typography.Title level={3} style={{ margin: 0 }}>{t("benchmarks.title")}</Typography.Title>
+        <Button onClick={() => setCreating(true)}>{t("common.newBenchmark")}</Button>
       </Space>
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError(null)} /> : null}
       {creating ? <BenchmarkCreatePanel onCreated={(id) => { setCreating(false); void refresh(); onBenchmarkOpen(id); }} /> : null}
-      {selectedIds.length === 2 ? <Button onClick={() => setShowCompare(true)}>Compare Selected</Button> : null}
+      {selectedIds.length === 2 ? <Button onClick={() => setShowCompare(true)}>{t("benchmarks.compareSelected")}</Button> : null}
       {showCompare && selectedIds.length === 2 ? (
         <BenchmarkComparePanel
           evaluationAId={selectedIds[0]}

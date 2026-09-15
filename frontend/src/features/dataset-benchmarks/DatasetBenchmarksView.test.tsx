@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { DatasetBenchmarksView } from "./DatasetBenchmarksView";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -59,12 +60,14 @@ test("resolves a ready imported batch and creates then runs a v2 benchmark", asy
   }));
 
   render(
-    <MemoryRouter>
-      <DatasetBenchmarksView
-        onBenchmarkOpen={onBenchmarkOpen}
-        onOpenCase={onOpenCase}
-      />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <DatasetBenchmarksView
+          onBenchmarkOpen={onBenchmarkOpen}
+          onOpenCase={onOpenCase}
+        />
+      </MemoryRouter>,
+    ),
   );
 
   fireEvent.click(await screen.findByRole("button", { name: "New Benchmark" }));
@@ -75,7 +78,7 @@ test("resolves a ready imported batch and creates then runs a v2 benchmark", asy
   fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
   expect(await screen.findByText("2500 / 2500")).toBeInTheDocument();
   expect(screen.getByText(manifest)).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("Benchmark Name"), { target: { value: "Real benchmark" } });
+  fireEvent.change(screen.getByLabelText("Benchmark name"), { target: { value: "Real benchmark" } });
   const createRunButton = await screen.findByRole("button", { name: /Create & Run/ });
   await waitFor(() => expect(createRunButton).toBeEnabled());
   fireEvent.click(createRunButton);
@@ -136,7 +139,7 @@ test("polls only while pending/running and stops after completed", async () => {
       throw new Error(`Unexpected request: ${urlStr}`);
     }));
 
-    render(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />);
+    render(renderWithLocalization(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />));
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByText("class_aware_ap")).toBeInTheDocument();
     expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
@@ -191,7 +194,7 @@ function stubCompletedDetail(payload: object) {
 
 test("renders completed v2 GT provenance, metrics, per-class rows, confusions and protocol", async () => {
   stubCompletedDetail(completedBenchmarkWire());
-  render(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />);
+  render(renderWithLocalization(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />));
   expect(await screen.findByText("End-to-End Class-aware mAP50:95")).toBeInTheDocument();
   expect(screen.getByText("20018")).toBeInTheDocument();
   expect(screen.getByText("19962")).toBeInTheDocument();
@@ -204,14 +207,14 @@ test("renders completed v2 GT provenance, metrics, per-class rows, confusions an
 
 test("renders old v1 as raw-GT protocol without inventing dedup provenance", async () => {
   stubCompletedDetail(completedBenchmarkWire({ v1: true }));
-  render(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />);
+  render(renderWithLocalization(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />));
   expect(await screen.findByText("Raw GT protocol")).toBeInTheDocument();
   expect(screen.queryByText("Exact duplicates removed")).not.toBeInTheDocument();
 });
 
 test("renders classification metrics as N/A for detection-only evaluations", async () => {
   stubCompletedDetail(completedBenchmarkWire({ detectionOnly: true }));
-  render(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />);
+  render(renderWithLocalization(<BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />));
   await screen.findByText("Localization");
   expect(screen.getAllByText("N/A").length).toBeGreaterThanOrEqual(2);
 });
@@ -232,11 +235,13 @@ test("shows backend incompatibility reasons and no metric table", async () => {
   }));
 
   render(
-    <BenchmarkComparePanel
-      evaluationAId="eval_a"
-      evaluationBId="eval_b"
-      onOpenCase={() => undefined}
-    />,
+    renderWithLocalization(
+      <BenchmarkComparePanel
+        evaluationAId="eval_a"
+        evaluationBId="eval_b"
+        onOpenCase={() => undefined}
+      />,
+    ),
   );
   expect(await screen.findByText("Not comparable")).toBeInTheDocument();
   expect(screen.getByText(/evaluation_protocol_mismatch/)).toBeInTheDocument();
@@ -269,7 +274,7 @@ test("shows lightweight comparable metrics and drills into the two frozen runs",
     throw new Error(`Unexpected request: ${urlStr}`);
   }));
 
-  render(<BenchmarkComparePanel evaluationAId="eval_a" evaluationBId="eval_b" onOpenCase={onOpenCase} />);
+  render(renderWithLocalization(<BenchmarkComparePanel evaluationAId="eval_a" evaluationBId="eval_b" onOpenCase={onOpenCase} />));
   expect(await screen.findByText("Class-aware mAP50:95")).toBeInTheDocument();
   fireEvent.mouseDown(screen.getByLabelText("Compare Recording"));
   fireEvent.click(await screen.findByTitle("0"));
@@ -296,9 +301,11 @@ function wireError(code: string, message: string) {
 test("shows backend error when the benchmark list load fails and keeps the page structure", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => wireError("IMPORTED_BATCH_DATASET_INCOMPLETE", "Imported batch does not cover the current frozen Recording manifest exactly.")));
   render(
-    <MemoryRouter>
-      <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
+      </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText(/IMPORTED_BATCH_DATASET_INCOMPLETE: Imported batch does not cover the current frozen Recording manifest exactly\./)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "New Benchmark" })).toBeInTheDocument();
@@ -317,9 +324,11 @@ test("shows backend error when Run is rejected and keeps the current list", asyn
   vi.stubGlobal("fetch", fetchMock);
 
   render(
-    <MemoryRouter>
-      <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
+      </MemoryRouter>,
+    ),
   );
   fireEvent.click(await screen.findByRole("button", { name: "Run" }));
   expect(await screen.findByText(/INVALID_BENCHMARK_TRANSITION: Only pending evaluations can be started\./)).toBeInTheDocument();
@@ -343,9 +352,11 @@ test("shows backend error when Retry fails and does not auto-switch benchmark", 
   vi.stubGlobal("fetch", fetchMock);
 
   render(
-    <MemoryRouter>
-      <DatasetBenchmarksView onBenchmarkOpen={onBenchmarkOpen} onOpenCase={() => undefined} />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <DatasetBenchmarksView onBenchmarkOpen={onBenchmarkOpen} onOpenCase={() => undefined} />
+      </MemoryRouter>,
+    ),
   );
   fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
   expect(await screen.findByText(/INVALID_BENCHMARK_TRANSITION: Only failed\/interrupted evaluations can be retried\./)).toBeInTheDocument();
@@ -360,7 +371,7 @@ test("BenchmarkDetailView keeps Back to list when detail load fails", async () =
     JSON.stringify({ error: { code: "BENCHMARK_NOT_FOUND", message: "DatasetEvaluation was not found.", details: {} } }),
     { status: 404 },
   )));
-  render(<BenchmarkDetailView evaluationId="eval_missing" onBack={onBack} onOpenCase={() => undefined} />);
+  render(renderWithLocalization(<BenchmarkDetailView evaluationId="eval_missing" onBack={onBack} onOpenCase={() => undefined} />));
   expect(await screen.findByText(/BENCHMARK_NOT_FOUND: DatasetEvaluation was not found\./)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Back to list" }));
   expect(onBack).toHaveBeenCalled();
@@ -371,7 +382,7 @@ test("BenchmarkComparePanel surfaces backend error without auto-retry", async ()
     JSON.stringify({ error: { code: "INVALID_BENCHMARK_TRANSITION", message: "Only pending evaluations can be started.", details: {} } }),
     { status: 409 },
   )));
-  render(<BenchmarkComparePanel evaluationAId="eval_a" evaluationBId="eval_b" onOpenCase={() => undefined} />);
+  render(renderWithLocalization(<BenchmarkComparePanel evaluationAId="eval_a" evaluationBId="eval_b" onOpenCase={() => undefined} />));
   expect(await screen.findByText(/INVALID_BENCHMARK_TRANSITION: Only pending evaluations can be started\./)).toBeInTheDocument();
 });
 
@@ -398,11 +409,42 @@ test("detection-only completed benchmark shows N/A for class-aware mAP50:95 in t
     throw new Error(`Unexpected request: ${urlStr}`);
   }));
   render(
-    <MemoryRouter>
-      <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <DatasetBenchmarksView onBenchmarkOpen={() => undefined} onOpenCase={() => undefined} />
+      </MemoryRouter>,
+    ),
   );
   expect(await screen.findByText("Detection only")).toBeInTheDocument();
   expect(screen.getByText("N/A")).toBeInTheDocument();
   expect(screen.queryByText("—")).not.toBeInTheDocument();
+});
+
+test("localizes the benchmark detail metrics in zh-CN without changing numbers, N/A or raw identity", async () => {
+  stubCompletedDetail(completedBenchmarkWire());
+  render(renderWithLocalization(
+    <BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />,
+    { locale: "zh-CN" },
+  ));
+  expect(await screen.findByText("端到端 类别感知 mAP50:95")).toBeInTheDocument();
+  expect(screen.getAllByText("类别感知 mAP50").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("已匹配目标分类准确率").length).toBeGreaterThan(0);
+  expect(screen.getByText("分类别指标")).toBeInTheDocument();
+  expect(screen.getByText("主要分类混淆")).toBeInTheDocument();
+  // Raw protocol identity, GT provenance numbers and metric numbers are unchanged.
+  expect(screen.getByText("physical_tf_detection_ap_v2")).toBeInTheDocument();
+  expect(screen.getByText("20018")).toBeInTheDocument();
+  expect(screen.getByText("19962")).toBeInTheDocument();
+  expect(screen.getAllByText("0.8000").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("0.4971").length).toBeGreaterThan(0);
+});
+
+test("localizes a detection-only benchmark as N/A in zh-CN, never 0", async () => {
+  stubCompletedDetail(completedBenchmarkWire({ detectionOnly: true }));
+  render(renderWithLocalization(
+    <BenchmarkDetailView evaluationId="eval_real" onBack={() => undefined} onOpenCase={() => undefined} />,
+    { locale: "zh-CN" },
+  ));
+  expect(await screen.findByText("端到端 类别感知 mAP50:95")).toBeInTheDocument();
+  expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
 });

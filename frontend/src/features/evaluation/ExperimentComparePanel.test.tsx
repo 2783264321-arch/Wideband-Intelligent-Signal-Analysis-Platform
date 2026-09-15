@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { ExperimentComparePanel } from "./ExperimentComparePanel";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 function experimentWire(id: string, name: string, evaluationId: string | null) {
   return {
@@ -62,9 +63,11 @@ test("compares the linked evaluations and renders all reasons when not comparabl
   }));
 
   render(
-    <MemoryRouter>
-      <ExperimentComparePanel />
-    </MemoryRouter>,
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentComparePanel />
+      </MemoryRouter>,
+    ),
   );
 
   await screen.findByLabelText("Experiment A");
@@ -107,7 +110,7 @@ test("changing a selected experiment clears the previous comparison result", asy
     throw new Error(`Unexpected request: ${url}`);
   }));
 
-  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   await screen.findByLabelText("Experiment A");
   fireEvent.mouseDown(screen.getByLabelText("Experiment A"));
   const aOpts = await screen.findAllByTitle("Exp A");
@@ -134,7 +137,7 @@ test("shows an explicit empty state when no comparison is possible", async () =>
     if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify([]));
     throw new Error(`Unexpected request: ${url}`);
   }));
-  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   expect(await screen.findByText(/No completed experiments with linked evaluations to compare/i)).toBeInTheDocument();
 });
 
@@ -181,7 +184,7 @@ test("a stale compare success cannot render against a changed A/B identity", asy
     throw new Error(`Unexpected request: ${url}`);
   }));
 
-  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   await screen.findByLabelText("Experiment A");
   await choose("Exp A1");
   await choose("Exp B1");
@@ -212,7 +215,7 @@ test("a stale compare error cannot render against a changed A/B identity", async
     throw new Error(`Unexpected request: ${url}`);
   }));
 
-  render(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>);
+  render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   await screen.findByLabelText("Experiment A");
   await choose("Exp A1");
   await choose("Exp B1");

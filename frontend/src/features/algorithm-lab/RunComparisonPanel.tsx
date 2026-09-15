@@ -1,6 +1,7 @@
 import { Card, Tag } from "antd";
 import type { DetectionResult, GroundTruthResult, SpectrogramMeta } from "../../api/types";
 import { SpectrogramViewer } from "../spectrum/SpectrogramViewer";
+import { useLocalization } from "../../localization/useLocalization";
 
 interface Props {
   title: string;
@@ -21,11 +22,12 @@ export function RunComparisonPanel({
   selectedDetectionId,
   onSelectDetection,
 }: Props) {
+  const { t } = useLocalization();
   return (
     <Card
       size="small"
       title={<span>{title}</span>}
-      extra={<Tag color={color}>{detections.length} predictions</Tag>}
+      extra={<Tag color={color}>{t("runMetrics.predictionsCount", { count: detections.length })}</Tag>}
     >
       <SpectrogramViewer
         meta={meta}

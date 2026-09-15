@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { EvaluationMetricsView } from "./EvaluationMetricsView";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { DatasetEvaluation } from "../../api/types";
 
 function evaluation(aggregate: unknown): DatasetEvaluation {
@@ -13,13 +14,13 @@ const localization = {
 };
 
 test("renders localization metrics", () => {
-  render(<EvaluationMetricsView evaluation={evaluation({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluation({
     classificationApplicable: false,
     classificationReason: "detection_only_pipeline",
     localization,
     classificationOnMatched: null,
     classAware: null,
-  })} />);
+  })} />));
   const view = screen.getByTestId("evaluation-metrics-view");
   expect(view).toHaveTextContent("Localization");
   expect(view).toHaveTextContent("0.61");
@@ -27,19 +28,19 @@ test("renders localization metrics", () => {
 });
 
 test("classification inapplicable renders N/A plus the bounded reason", () => {
-  render(<EvaluationMetricsView evaluation={evaluation({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluation({
     classificationApplicable: false,
     classificationReason: "label_space_mismatch",
     localization,
     classificationOnMatched: null,
     classAware: null,
-  })} />);
+  })} />));
   expect(screen.getAllByText(/N\/A/).length).toBeGreaterThan(0);
   expect(screen.getAllByText(/label_space_mismatch/).length).toBeGreaterThan(0);
 });
 
 test("null metrics render N/A and never 0", () => {
-  render(<EvaluationMetricsView evaluation={evaluation({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluation({
     classificationApplicable: true,
     classificationReason: null,
     localization: {
@@ -49,13 +50,13 @@ test("null metrics render N/A and never 0", () => {
     },
     classificationOnMatched: null,
     classAware: null,
-  })} />);
+  })} />));
   expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
   expect(screen.queryByText("0")).toBeNull();
 });
 
 test("a null aggregateMetrics shows an explicit unavailable state", () => {
-  render(<EvaluationMetricsView evaluation={evaluation(null)} />);
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluation(null)} />));
   expect(screen.getByTestId("evaluation-metrics-view")).toHaveTextContent(/not available|unavailable/i);
 });
 
@@ -76,13 +77,13 @@ function evaluationWith(fields: Record<string, unknown>): DatasetEvaluation {
 }
 
 test("renders per-class rows including counts and metrics", () => {
-  render(<EvaluationMetricsView evaluation={evaluationWith({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluationWith({
     aggregateMetrics: applicableAggregate,
     perClassMetrics: [
       { classId: 9, className: "LoRa", gtCount: 5, predictionCount: 6, ap50: 0.8, ap50_95: 0.6, operating: { tp: 4, fp: 2, fn: 1, precision: 0.66, recall: 0.8, f1: 0.72 } },
     ],
     confusion: null,
-  })} />);
+  })} />));
   const view = screen.getByTestId("evaluation-metrics-view");
   expect(view).toHaveTextContent("LoRa");
   expect(view).toHaveTextContent("0.8");
@@ -90,11 +91,11 @@ test("renders per-class rows including counts and metrics", () => {
 });
 
 test("renders confusion rows", () => {
-  render(<EvaluationMetricsView evaluation={evaluationWith({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluationWith({
     aggregateMetrics: applicableAggregate,
     perClassMetrics: [],
     confusion: [{ gtClassId: 9, gtClassName: "LoRa", predClassId: 4, predClassName: "WiFi", count: 3 }],
-  })} />);
+  })} />));
   const view = screen.getByTestId("evaluation-metrics-view");
   expect(view).toHaveTextContent("LoRa");
   expect(view).toHaveTextContent("WiFi");
@@ -102,36 +103,58 @@ test("renders confusion rows", () => {
 });
 
 test("null per-class metric renders N/A, never 0", () => {
-  render(<EvaluationMetricsView evaluation={evaluationWith({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluationWith({
     aggregateMetrics: applicableAggregate,
     perClassMetrics: [
       { classId: 9, className: "LoRa", gtCount: 0, predictionCount: 0, ap50: null, ap50_95: null, operating: { tp: 0, fp: 0, fn: 0, precision: null, recall: null, f1: null } },
     ],
     confusion: [],
-  })} />);
+  })} />));
   const view = screen.getByTestId("evaluation-metrics-view");
   expect(view).toHaveTextContent("N/A");
   expect(view).not.toHaveTextContent("AP50: 0");
 });
 
 test("empty per-class/confusion arrays show explicit empty states", () => {
-  render(<EvaluationMetricsView evaluation={evaluationWith({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluationWith({
     aggregateMetrics: applicableAggregate,
     perClassMetrics: [],
     confusion: [],
-  })} />);
+  })} />));
   const view = screen.getByTestId("evaluation-metrics-view");
   expect(view).toHaveTextContent(/No per-class metrics available/i);
   expect(view).toHaveTextContent(/No confusion data available/i);
 });
 
 test("classification inapplicable shows N/A + reason for the classification-oriented sections", () => {
-  render(<EvaluationMetricsView evaluation={evaluationWith({
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluationWith({
     aggregateMetrics: { ...applicableAggregate, classificationApplicable: false, classificationReason: "label_space_mismatch" },
     perClassMetrics: [],
     confusion: [],
-  })} />);
+  })} />));
   const view = screen.getByTestId("evaluation-metrics-view");
   expect(view).toHaveTextContent(/label_space_mismatch/);
   expect(view).toHaveTextContent(/N\/A/);
+});
+
+test("localizes evaluation metric labels in zh-CN without changing numbers or N/A semantics", () => {
+  render(renderWithLocalization(<EvaluationMetricsView evaluation={evaluationWith({
+    aggregateMetrics: {
+      ...applicableAggregate,
+      classificationOnMatched: { matchedCount: 3, classCorrect: 2, classWrong: 1, matchedAccuracy: 0.735 },
+    },
+    perClassMetrics: [{ classId: 1, className: "WiFi", gtCount: 4, predictionCount: 3, ap50: 0.5, ap50_95: null, operating: { precision: 0.9, recall: 0.8, f1: 0.85 } }],
+    confusion: [],
+  })} />, { locale: "zh-CN" }));
+
+  const view = screen.getByTestId("evaluation-metrics-view");
+  expect(view).toHaveTextContent("定位指标");
+  expect(view).toHaveTextContent("分类别指标");
+  expect(view).toHaveTextContent("已匹配目标分类准确率");
+  // Technical tokens stay verbatim and numeric output is unchanged.
+  expect(view).toHaveTextContent("AP50");
+  expect(view).toHaveTextContent("AP50:95");
+  expect(view).toHaveTextContent("0.735");
+  // A null per-class AP50:95 is still N/A, never 0.
+  expect(view).toHaveTextContent("N/A");
 });
