@@ -1,4 +1,4 @@
-import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, getExecutorAvailability, listPipelines } from "./client";
+import { apiGet, apiPostJson, PlatformApiError, createAnalysisRun, getExecutorAvailability, getExecutorSelection, listPipelines } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -182,4 +182,150 @@ test("createAnalysisRun forwards the requested executor", async () => {
   const run = await createAnalysisRun("rec_1", "zoomspec_yolo26n_aug_combined_frn_v3", "remote_gpu");
   expect(posted).toMatchObject({ executor: "remote_gpu", parameters: {} });
   expect(run.executor).toBe("remote_gpu");
+});
+test("getExecutorSelection builds a recording-scoped query and maps candidates", async () => {
+  let requestedUrl = "";
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    requestedUrl = url;
+    return new Response(JSON.stringify({
+      requested_mode: "auto",
+      resolved_executor: "local_cpu",
+      reason_code: "AUTO_ONLY_RUNNABLE_EXECUTOR",
+      reason: "Only local_cpu is runnable.",
+      workload_class: "SMALL",
+      candidates: [
+        {
+          executor: "local_cpu",
+          technical: true,
+          configured: true,
+          certified: true,
+          available: true,
+          reason_code: null,
+          reason_message: null,
+        },
+        {
+          executor: "remote_gpu",
+          technical: true,
+          configured: false,
+          certified: false,
+          available: false,
+          reason_code: "EXECUTION_CAPABILITY_UNAVAILABLE",
+          reason_message: "No executor provider is registered for 'remote_gpu'.",
+        },
+      ],
+    }));
+  }));
+
+  const selection = await getExecutorSelection({
+    scope: { kind: "recording", recordingId: "rec_1" },
+    pipelineId: "dummy",
+  });
+
+  expect(requestedUrl).toContain("/api/executor-selection");
+  expect(requestedUrl).toContain("recording_id=rec_1");
+  expect(requestedUrl).toContain("pipeline_id=dummy");
+  expect(selection.requestedMode).toBe("auto");
+  expect(selection.resolvedExecutor).toBe("local_cpu");
+  expect(selection.reasonCode).toBe("AUTO_ONLY_RUNNABLE_EXECUTOR");
+  expect(selection.reason).toBe("Only local_cpu is runnable.");
+  expect(selection.workloadClass).toBe("SMALL");
+  expect(selection.candidates[0]).toEqual({
+    executor: "local_cpu",
+    technical: true,
+    configured: true,
+    certified: true,
+    available: true,
+    reasonCode: null,
+    reasonMessage: null,
+  });
+  expect(selection.candidates[1].configured).toBe(false);
+  expect(selection.candidates[1].reasonCode).toBe("EXECUTION_CAPABILITY_UNAVAILABLE");
+  expect(selection.candidates[1].reasonMessage).toBe(
+    "No executor provider is registered for 'remote_gpu'.",
+  );
+});
+
+test("getExecutorSelection builds a dataset-scoped query and never calls executor-availability", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    urls.push(url);
+    return new Response(JSON.stringify({
+      requested_mode: "manual",
+      resolved_executor: null,
+      reason_code: "AUTO_NO_RUNNABLE_EXECUTOR",
+      reason: "No runnable executor.",
+      workload_class: "UNKNOWN",
+      candidates: [],
+    }));
+  }));
+
+  const selection = await getExecutorSelection({
+    scope: {
+      kind: "dataset",
+      datasetName: "spacenet",
+      datasetSplit: "test",
+      datasetLabelSpace: "spacenet_14",
+    },
+    pipelineId: "dummy",
+  });
+
+  expect(urls).toHaveLength(1);
+  expect(urls[0]).toContain("/api/executor-selection");
+  expect(urls[0]).toContain("dataset_name=spacenet");
+  expect(urls[0]).toContain("dataset_split=test");
+  expect(urls[0]).toContain("dataset_label_space=spacenet_14");
+  expect(urls[0]).toContain("pipeline_id=dummy");
+  expect(urls[0]).not.toContain("executor-availability");
+  expect(selection.resolvedExecutor).toBeNull();
+});
+
+test("getExecutorSelection includes model_release_id only when provided", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    urls.push(url);
+    return new Response(JSON.stringify({
+      requested_mode: "manual",
+      resolved_executor: null,
+      reason_code: "AUTO_NO_RUNNABLE_EXECUTOR",
+      reason: "none",
+      workload_class: "UNKNOWN",
+      candidates: [],
+    }));
+  }));
+
+  await getExecutorSelection({
+    scope: { kind: "recording", recordingId: "rec_1" },
+    pipelineId: "dummy",
+  });
+  await getExecutorSelection({
+    scope: { kind: "recording", recordingId: "rec_1" },
+    pipelineId: "dummy",
+    modelReleaseId: "golden",
+  });
+
+  expect(urls[0]).not.toContain("model_release_id");
+  expect(urls[1]).toContain("model_release_id=golden");
+});
+
+test("getExecutorSelection rejects a malformed scope before fetching", async () => {
+  const fetchSpy = vi.fn(async () => new Response("{}", { status: 200 }));
+  vi.stubGlobal("fetch", fetchSpy);
+
+  const mixed = {
+    kind: "recording",
+    recordingId: "rec_1",
+    datasetName: "spacenet",
+    datasetSplit: "test",
+    datasetLabelSpace: "spacenet_14",
+  } as unknown as import("./types").ExecutionSelectionScope;
+  await expect(
+    getExecutorSelection({ scope: mixed, pipelineId: "dummy" }),
+  ).rejects.toThrow();
+  await expect(
+    getExecutorSelection({
+      scope: { kind: "dataset", datasetName: "", datasetSplit: "test", datasetLabelSpace: "spacenet_14" },
+      pipelineId: "dummy",
+    }),
+  ).rejects.toThrow();
+  expect(fetchSpy).not.toHaveBeenCalled();
 });

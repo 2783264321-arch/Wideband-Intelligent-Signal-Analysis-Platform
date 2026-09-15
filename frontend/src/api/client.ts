@@ -11,6 +11,7 @@ import type {
   ImportedBenchmarkBatch,
   OperatingMetrics,
 } from "./types";
+import type { ExecutionMode, ExecutionSelectionScope, ExecutorSelection } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -361,6 +362,97 @@ export async function getExecutorAvailability(
     reasonMessage: item.reason_message,
     remoteProfile: item.remote_profile,
     recommended: item.recommended,
+  };
+}
+
+interface ExecutionCandidateWire {
+  executor: string;
+  technical: boolean;
+  configured: boolean;
+  certified: boolean;
+  available: boolean;
+  reason_code: string | null;
+  reason_message: string | null;
+}
+
+interface ExecutorSelectionWire {
+  requested_mode: string;
+  resolved_executor: string | null;
+  reason_code: string;
+  reason: string;
+  workload_class: string;
+  candidates: ExecutionCandidateWire[];
+}
+
+/**
+ * Compile-time scope safety comes from the ExecutionSelectionScope discriminated
+ * union. This runtime guard covers malformed JS/casts before any request is built.
+ */
+function assertSelectionScope(scope: ExecutionSelectionScope): void {
+  if (scope === null || typeof scope !== "object") {
+    throw new Error("Execution selection scope is required.");
+  }
+  if (scope.kind === "recording") {
+    if ("datasetName" in scope || "datasetSplit" in scope || "datasetLabelSpace" in scope) {
+      throw new Error("Execution selection scope is invalid (mixed recording/dataset scope).");
+    }
+    if (typeof scope.recordingId !== "string" || scope.recordingId.length === 0) {
+      throw new Error("Recording scope requires a non-empty recordingId.");
+    }
+    return;
+  }
+  if (scope.kind === "dataset") {
+    if ("recordingId" in scope) {
+      throw new Error("Execution selection scope is invalid (mixed recording/dataset scope).");
+    }
+    if (
+      typeof scope.datasetName !== "string" || scope.datasetName.length === 0 ||
+      typeof scope.datasetSplit !== "string" || scope.datasetSplit.length === 0 ||
+      typeof scope.datasetLabelSpace !== "string" || scope.datasetLabelSpace.length === 0
+    ) {
+      throw new Error(
+        "Dataset scope requires non-empty datasetName, datasetSplit and datasetLabelSpace.",
+      );
+    }
+    return;
+  }
+  throw new Error("Execution selection scope is invalid (mixed or unknown scope).");
+}
+
+export async function getExecutorSelection(params: {
+  scope: ExecutionSelectionScope;
+  pipelineId: string;
+  modelReleaseId?: string | null;
+}): Promise<ExecutorSelection> {
+  assertSelectionScope(params.scope);
+  const query = new URLSearchParams();
+  if (params.scope.kind === "recording") {
+    query.set("recording_id", params.scope.recordingId);
+  } else {
+    query.set("dataset_name", params.scope.datasetName);
+    query.set("dataset_split", params.scope.datasetSplit);
+    query.set("dataset_label_space", params.scope.datasetLabelSpace);
+  }
+  query.set("pipeline_id", params.pipelineId);
+  if (params.modelReleaseId != null) {
+    query.set("model_release_id", params.modelReleaseId);
+  }
+  const item = await apiGet<ExecutorSelectionWire>(`/api/executor-selection?${query.toString()}`);
+  return {
+    requestedMode: item.requested_mode as ExecutionMode,
+    resolvedExecutor: item.resolved_executor,
+    reasonCode: item.reason_code,
+    reason: item.reason,
+    workloadClass: item.workload_class,
+    candidates: item.candidates.map((candidate) => ({
+      executor: candidate.executor,
+      technical: candidate.technical,
+      configured: candidate.configured,
+      certified: candidate.certified,
+      available: candidate.available,
+      reasonCode: candidate.reason_code,
+      reasonMessage: candidate.reason_message,
+    })),
   };
 }
 
