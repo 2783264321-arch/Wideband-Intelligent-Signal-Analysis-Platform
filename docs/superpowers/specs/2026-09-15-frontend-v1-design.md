@@ -3,7 +3,8 @@
 Backend/product reference commit: `d4b22ee4f01914974aaf47c1a88e4f8afa461913`
 Backend branch: `feature/backend-v1-plan-b-local-gpu`
 Design branch: `feature/frontend-v1-design`
-Status: **DRAFT — pending human/independent review** (no implementation in this round)
+Status: **FINAL APPROVED — 2026-09-15**
+Independent review checkpoint: `3f02c29`
 
 ---
 
