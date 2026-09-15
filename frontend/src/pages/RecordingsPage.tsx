@@ -7,6 +7,7 @@ import { toErrorText } from "../api/errors";
 import type { SpaceNetRegistrationSummary } from "../api/client";
 import type { RecordingDetail } from "../api/types";
 import { ImportRunModal } from "../features/imports/ImportRunModal";
+import { BatchImportModal } from "../features/imports/BatchImportModal";
 
 interface ImportFormValues {
   name: string;
@@ -27,6 +28,7 @@ export function RecordingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [importRunOpen, setImportRunOpen] = useState(false);
+  const [batchImportOpen, setBatchImportOpen] = useState(false);
   const [registerOpen, setRegisterOpen] = useState(false);
   const [datasetPath, setDatasetPath] = useState("");
   const [registering, setRegistering] = useState(false);
@@ -127,6 +129,7 @@ export function RecordingsPage() {
         <Space>
           <Button onClick={() => setRegisterOpen(true)}>{t("common.registerDataset")}</Button>
           <Button onClick={() => setImportRunOpen(true)}>{t("common.importRun")}</Button>
+          <Button onClick={() => setBatchImportOpen(true)}>{t("batchImport.action")}</Button>
           <Button type="primary" onClick={() => setModalOpen(true)}>{t("common.importRecording")}</Button>
         </Space>
       </div>
@@ -222,6 +225,8 @@ export function RecordingsPage() {
       </Modal>
 
       <ImportRunModal open={importRunOpen} recordings={recordings} onClose={() => setImportRunOpen(false)} />
+
+      <BatchImportModal open={batchImportOpen} onClose={() => setBatchImportOpen(false)} />
     </Space>
   );
 }
