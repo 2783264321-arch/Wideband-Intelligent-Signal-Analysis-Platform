@@ -2,6 +2,7 @@ import { Alert, Button, Select, Space } from "antd";
 import { useEffect, useState } from "react";
 import { compareDatasetBenchmarks, listDatasetExperiments, PlatformApiError } from "../../api/client";
 import type { DatasetBenchmarkCompareResult, DatasetExperiment } from "../../api/types";
+import { CompareDeltaTable } from "./CompareDeltaTable";
 
 function toErrorText(reason: unknown): string {
   if (reason instanceof PlatformApiError) return reason.display;
@@ -68,6 +69,7 @@ export function ExperimentComparePanel() {
           }
         />
       ) : null}
+      {result !== null && result.comparable ? <CompareDeltaTable result={result} /> : null}
     </Space>
   );
 }
