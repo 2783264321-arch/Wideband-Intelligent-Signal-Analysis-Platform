@@ -5,6 +5,7 @@ import type { DatasetExperiment } from "../../api/types";
 import { ExperimentProgressHeader } from "./ExperimentProgressHeader";
 import { ExperimentItemTable } from "./ExperimentItemTable";
 import { ExperimentAttemptsTab } from "./AttemptTimeline";
+import { LinkedEvaluationSummary } from "./LinkedEvaluationSummary";
 
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_failures", "failed"]);
 const POLL_INTERVAL_MS = 1000;
@@ -57,7 +58,7 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
         items={[
           { key: "items", label: "Items", children: <ExperimentItemTable experimentId={experiment.id} /> },
           { key: "attempts", label: "Attempts", children: <ExperimentAttemptsTab experimentId={experiment.id} /> },
-          { key: "evaluation", label: "Evaluation", children: <div data-testid="experiment-evaluation-tab" /> },
+          { key: "evaluation", label: "Evaluation", children: <LinkedEvaluationSummary experiment={experiment} /> },
         ]}
       />
     </>
