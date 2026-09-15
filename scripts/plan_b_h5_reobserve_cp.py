@@ -139,6 +139,9 @@ def main(argv=None) -> int:
 
     app, _settings = core.build_app(root)
     cycle = membership.h5_cycles()[0]  # H5_FULL, exactly 16 stems, index 0
+    membership.register_dataset_view(
+        app, dataset_name=membership.H5_FULL, stems=tuple(common.H2_STEMS)
+    )
     membership.assert_cycle_membership(app, cycle)
 
     def _run_ids(experiment_id: str) -> list[str]:
