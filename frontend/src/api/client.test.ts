@@ -1,4 +1,4 @@
-import { apiGet, apiPostJson, PlatformApiError, compareAnalysisRuns, createAnalysisRun, createDatasetExperiment, getDatasetExperiment, getExecutorAvailability, getExecutorSelection, importAnalysisPackage, importRecording, listDatasetExperimentItemAttempts, listDatasetExperimentItems, listDatasetExperiments, listPipelines, retryDatasetExperimentEvaluation, retryFailedDatasetExperimentItems, runDatasetExperiment } from "./client";
+import { apiGet, apiPostJson, PlatformApiError, compareAnalysisRuns, createAnalysisRun, createDatasetExperiment, getDatasetExperiment, getExecutorAvailability, getExecutorSelection, importAnalysisPackage, importBatchRun, importRecording, listDatasetExperimentItemAttempts, listDatasetExperimentItems, listDatasetExperiments, listPipelines, retryDatasetExperimentEvaluation, retryFailedDatasetExperimentItems, runDatasetExperiment } from "./client";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -578,4 +578,92 @@ test("compareAnalysisRuns preserves the structured backend error", async () => {
   expect(err.code).toBe("COMPARE_INVALID");
   expect(err.message).toBe("not comparable");
   expect(err.details).toEqual({ reason: "x" });
+});
+
+// ---------------------------------------------------------------------------
+// Batch Analysis Package import (POST /api/imported-runs/batch)
+// ---------------------------------------------------------------------------
+
+const batchSummaryWire = {
+  batch_id: "id_abc123",
+  import_fingerprint: "a".repeat(64),
+  archive_sha256: "b".repeat(64),
+  dataset_name: "SpaceNet",
+  dataset_split: "test",
+  pipeline_id: "zoomspec_yolo26n_aug_combined_frn_v3",
+  pipeline_version: "1.0.0",
+  label_space: "spacenet_14",
+  item_count: 4,
+  detection_count: 12,
+  already_imported: false,
+  created_runs: 3,
+  existing_runs: 1,
+  created_detections: 9,
+  matched_recordings: 4,
+  missing_recordings: 0,
+  ambiguous_recordings: 0,
+  fingerprint_mismatches: 0,
+  recording_run_mapping: [
+    { recording_id: "rec_1", recording_name: "0", analysis_run_id: "run_1" },
+    { recording_id: "rec_2", recording_name: "1", analysis_run_id: "run_2" },
+  ],
+};
+
+test("importBatchRun posts multipart file to /api/imported-runs/batch", async () => {
+  const fetchMock = vi.fn(async () => new Response(JSON.stringify(batchSummaryWire), { status: 201 }));
+  vi.stubGlobal("fetch", fetchMock);
+  const file = new File(["zip-bytes"], "batch.zip", { type: "application/zip" });
+
+  await importBatchRun(file);
+
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+  expect(url).toBe("http://127.0.0.1:8000/api/imported-runs/batch");
+  expect(init.method).toBe("POST");
+  expect(init.body).toBeInstanceOf(FormData);
+  expect((init.body as FormData).get("file")).toBe(file);
+});
+
+test("importBatchRun maps snake_case summary to camelCase", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(batchSummaryWire), { status: 201 })));
+
+  const summary = await importBatchRun(new File(["x"], "batch.zip"));
+
+  expect(summary.batchId).toBe("id_abc123");
+  expect(summary.importFingerprint).toBe("a".repeat(64));
+  expect(summary.archiveSha256).toBe("b".repeat(64));
+  expect(summary.datasetName).toBe("SpaceNet");
+  expect(summary.datasetSplit).toBe("test");
+  expect(summary.pipelineId).toBe("zoomspec_yolo26n_aug_combined_frn_v3");
+  expect(summary.pipelineVersion).toBe("1.0.0");
+  expect(summary.labelSpace).toBe("spacenet_14");
+  expect(summary.itemCount).toBe(4);
+  expect(summary.detectionCount).toBe(12);
+  expect(summary.alreadyImported).toBe(false);
+  expect(summary.createdRuns).toBe(3);
+  expect(summary.existingRuns).toBe(1);
+  expect(summary.createdDetections).toBe(9);
+  expect(summary.matchedRecordings).toBe(4);
+  expect(summary.missingRecordings).toBe(0);
+  expect(summary.ambiguousRecordings).toBe(0);
+  expect(summary.fingerprintMismatches).toBe(0);
+  expect(summary.recordingRunMapping).toEqual([
+    { recordingId: "rec_1", recordingName: "0", analysisRunId: "run_1" },
+    { recordingId: "rec_2", recordingName: "1", analysisRunId: "run_2" },
+  ]);
+});
+
+test("importBatchRun preserves the structured backend error", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "BATCH_RECORDING_NOT_FOUND", message: "Recording not found.", details: {} } }),
+    { status: 422 },
+  )));
+
+  let thrown: unknown;
+  try { await importBatchRun(new File(["x"], "batch.zip")); } catch (e) { thrown = e; }
+  const err = thrown as PlatformApiError;
+  expect(err).toBeInstanceOf(PlatformApiError);
+  expect(err.status).toBe(422);
+  expect(err.code).toBe("BATCH_RECORDING_NOT_FOUND");
+  expect(err.display).toContain("Recording not found.");
 });
