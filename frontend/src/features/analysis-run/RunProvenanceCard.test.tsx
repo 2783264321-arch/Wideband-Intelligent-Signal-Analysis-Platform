@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { RunProvenanceCard } from "./RunProvenanceCard";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { AnalysisRun } from "../../api/types";
 
 function run(overrides: Partial<AnalysisRun> = {}): AnalysisRun {
@@ -24,12 +25,12 @@ function run(overrides: Partial<AnalysisRun> = {}): AnalysisRun {
 }
 
 test("shows the resolved concrete executor", () => {
-  render(<RunProvenanceCard run={run({ executor: "remote_gpu" })} />);
+  render(renderWithLocalization(<RunProvenanceCard run={run({ executor: "remote_gpu" })} />));
   expect(screen.getByTestId("run-provenance-card")).toHaveTextContent("Executor: remote_gpu");
 });
 
 test("shows bounded auto provenance when the backend projects it", () => {
-  render(<RunProvenanceCard run={run({
+  render(renderWithLocalization(<RunProvenanceCard run={run({
     executor: "local_gpu",
     executionMetadata: {
       requested_execution_mode: "auto",
@@ -37,16 +38,16 @@ test("shows bounded auto provenance when the backend projects it", () => {
       auto_reason: "Local GPU certified and available.",
       workload_class: "GPU_BENEFICIAL",
     },
-  })} />);
+  })} />));
   const card = screen.getByTestId("run-provenance-card");
-  expect(card).toHaveTextContent("Mode: auto");
+  expect(card).toHaveTextContent("Execution mode: auto");
   expect(card).toHaveTextContent("AUTO_LOCAL_GPU_PREFERRED");
   expect(card).toHaveTextContent("Local GPU certified and available.");
   expect(card).toHaveTextContent("Workload: GPU_BENEFICIAL");
 });
 
 test("absent execution provenance does not fabricate mode or reasons", () => {
-  render(<RunProvenanceCard run={run({ executor: "local_cpu", executionMetadata: null })} />);
+  render(renderWithLocalization(<RunProvenanceCard run={run({ executor: "local_cpu", executionMetadata: null })} />));
   const card = screen.getByTestId("run-provenance-card");
   expect(card).toHaveTextContent("Executor: local_cpu");
   expect(card).not.toHaveTextContent(/Mode:/);
@@ -55,16 +56,16 @@ test("absent execution provenance does not fabricate mode or reasons", () => {
 });
 
 test("never invents a ModelRelease", () => {
-  render(<RunProvenanceCard run={run({
+  render(renderWithLocalization(<RunProvenanceCard run={run({
     executionMetadata: { model_release_id: "golden", release: "golden" },
-  })} />);
+  })} />));
   const card = screen.getByTestId("run-provenance-card");
   expect(card).not.toHaveTextContent(/golden/i);
   expect(card).not.toHaveTextContent(/release/i);
 });
 
 test("does not render arbitrary private execution metadata", () => {
-  render(<RunProvenanceCard run={run({
+  render(renderWithLocalization(<RunProvenanceCard run={run({
     executor: "remote_gpu",
     executionMetadata: {
       remote_profile: "autodl_primary",
@@ -74,9 +75,9 @@ test("does not render arbitrary private execution metadata", () => {
       asset_path: "/abs/path/model.pt",
       cgroup_memory: "1234",
     },
-  })} />);
+  })} />));
   const card = screen.getByTestId("run-provenance-card");
-  expect(card).toHaveTextContent("Profile: autodl_primary");
+  expect(card).toHaveTextContent("Remote execution configuration: autodl_primary");
   expect(card).not.toHaveTextContent(/coord_abc123/);
   expect(card).not.toHaveTextContent(/id_abc/);
   expect(card).not.toHaveTextContent(/miniconda|environment_ref/);
@@ -85,7 +86,7 @@ test("does not render arbitrary private execution metadata", () => {
 });
 
 test("renders allowlisted remote device provenance with short SHAs", () => {
-  render(<RunProvenanceCard run={run({
+  render(renderWithLocalization(<RunProvenanceCard run={run({
     executor: "remote_gpu",
     hardwareInfo: { device_type: "cuda", device_name: "NVIDIA GeForce RTX 5090" },
     executionMetadata: {
@@ -95,9 +96,9 @@ test("renders allowlisted remote device provenance with short SHAs", () => {
       remote_started_at: "2026-09-09T15:28:41+00:00",
       remote_finished_at: "2026-09-09T15:28:54+00:00",
     },
-  })} />);
+  })} />));
   const card = screen.getByTestId("run-provenance-card");
   expect(card).toHaveTextContent("Device: NVIDIA GeForce RTX 5090 (cuda)");
-  expect(card).toHaveTextContent("Runtime commit: 6f24f379");
+  expect(card).toHaveTextContent("Runtime commit version: 6f24f379");
   expect(card).toHaveTextContent("Payload SHA: 20b8130a");
 });

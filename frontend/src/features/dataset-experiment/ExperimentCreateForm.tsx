@@ -124,7 +124,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-      {error !== null ? <Alert type="error" showIcon message="Unable to create experiment" description={error} /> : null}
+      {error !== null ? <Alert type="error" showIcon message={t("experiment.createError")} description={error} /> : null}
       <Space direction="vertical" size={4} style={{ width: "100%" }}>
         <Typography.Text>{t("form.name")}</Typography.Text>
         <Input aria-label={t("form.name")} value={name} onChange={(event) => setName(event.target.value)} />
@@ -136,7 +136,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
         <Input aria-label={t("form.labelSpace")} value={datasetLabelSpace} onChange={(event) => setDatasetLabelSpace(event.target.value)} />
         <Typography.Text>{t("form.pipeline")}</Typography.Text>
         <Select
-          aria-label="Pipeline"
+          aria-label={t("form.pipeline")}
           style={{ width: 360 }}
           value={pipelineId ?? undefined}
           onChange={setPipelineId}
@@ -157,7 +157,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
         value={environment}
         onChange={setEnvironment}
       />
-      <Button type="primary" disabled={!canCreate} loading={submitting} onClick={() => void submit()}>Create Experiment</Button>
+      <Button type="primary" disabled={!canCreate} loading={submitting} onClick={() => void submit()}>{t("common.createExperiment")}</Button>
     </Space>
   );
 }

@@ -52,10 +52,10 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
   }, [experimentId, refreshToken]);
 
   if (error !== null) {
-    return <Alert type="error" showIcon message="Unable to load experiment" description={error} />;
+    return <Alert type="error" showIcon message={t("experiment.detailLoadError")} description={error} />;
   }
   if (experiment === null) {
-    return <Spin tip="Loading experiment..." />;
+    return <Spin tip={t("common.loadingExperiment")} />;
   }
 
   return (

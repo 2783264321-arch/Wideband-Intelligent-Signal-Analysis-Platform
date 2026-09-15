@@ -26,6 +26,21 @@ const EXPERIMENT_STATUS_KEYS: Record<string, MessageKey> = {
   failed: "status.failed",
 };
 
+const ITEM_STATUS_KEYS: Record<string, MessageKey> = {
+  queued: "status.queued",
+  running: "status.running",
+  completed: "status.completed",
+  failed: "status.failed",
+};
+
+const EVALUATION_STATUS_KEYS: Record<string, MessageKey> = {
+  pending: "status.pending",
+  running: "status.running",
+  completed: "status.completed",
+  failed: "status.failed",
+  interrupted: "status.interrupted",
+};
+
 const REASON_KEYS: Record<string, MessageKey> = {
   EXECUTION_CAPABILITY_UNAVAILABLE: "reason.EXECUTION_CAPABILITY_UNAVAILABLE",
   EXECUTION_NOT_CERTIFIED: "reason.EXECUTION_NOT_CERTIFIED",
@@ -46,6 +61,14 @@ export function runStatusKey(status: string): MessageKey | null {
 
 export function experimentStatusKey(status: string): MessageKey | null {
   return EXPERIMENT_STATUS_KEYS[status] ?? null;
+}
+
+export function itemStatusKey(status: string): MessageKey | null {
+  return ITEM_STATUS_KEYS[status] ?? null;
+}
+
+export function evaluationStatusKey(status: string): MessageKey | null {
+  return EVALUATION_STATUS_KEYS[status] ?? null;
 }
 
 export function reasonKey(code: string | null | undefined): MessageKey | null {

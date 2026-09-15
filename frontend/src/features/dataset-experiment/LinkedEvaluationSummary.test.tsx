@@ -92,7 +92,7 @@ test("renders the linked evaluation summary and enables Retry Evaluation when el
   );
   const summary = await screen.findByTestId("linked-evaluation-summary");
   await waitFor(() => expect(summary).toHaveTextContent("eval_1"));
-  expect(summary).toHaveTextContent("failed");
+  expect(summary).toHaveTextContent("Failed");
   expect(summary).toHaveTextContent("3 / 3");
   expect(summary).toHaveTextContent("BENCHMARK_FAILED");
 
@@ -110,7 +110,7 @@ test("Retry Evaluation is disabled while the linked evaluation is not failed/int
     ),
   );
   const summary = await screen.findByTestId("linked-evaluation-summary");
-  await waitFor(() => expect(summary).toHaveTextContent("completed"));
+  await waitFor(() => expect(summary).toHaveTextContent("Completed"));
   expect(screen.queryByRole("button", { name: "Retry Evaluation" })).toBeNull();
 });
 
@@ -197,7 +197,7 @@ test("refetches the linked evaluation when the experiment lifecycle changes (sam
     ),
   );
   await waitFor(() => expect(benchmarkFetches).toBeGreaterThan(before));
-  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("completed"));
+  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("Completed"));
 });
 
 test("a lifecycle change clears a transient linked-evaluation error on success", async () => {
@@ -225,5 +225,46 @@ test("a lifecycle change clears a transient linked-evaluation error on success",
       <MemoryRouter><LinkedEvaluationSummary experiment={experiment({ status: "evaluating" })} /></MemoryRouter>,
     ),
   );
-  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("completed"));
+  await waitFor(() => expect(screen.getByTestId("linked-evaluation-summary")).toHaveTextContent("Completed"));
+});
+
+// ---------------------------------------------------------------------------
+// Review corrective C — zh-CN ordinary error shell + raw identity preserved
+// ---------------------------------------------------------------------------
+
+test("localizes the linked-evaluation error shell in zh-CN and preserves the raw backend identity", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    JSON.stringify({ error: { code: "BOOM", message: "transient" } }),
+    { status: 503 },
+  )));
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <LinkedEvaluationSummary experiment={experiment()} />
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  expect(await screen.findByText("无法加载关联评测")).toBeInTheDocument();
+  expect(screen.queryByText("Unable to load linked evaluation")).not.toBeInTheDocument();
+  expect(screen.getByText(/BOOM: transient/)).toBeInTheDocument();
+});
+
+test("localizes a known linked-evaluation status in zh-CN", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(evaluationWire({
+    status: "interrupted",
+    error_type: "BENCHMARK_INTERRUPTED",
+    error_message: "stopped",
+  })))));
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <LinkedEvaluationSummary experiment={experiment()} />
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  const summary = await screen.findByTestId("linked-evaluation-summary");
+  await waitFor(() => expect(summary).toHaveTextContent("已中断"));
+  expect(summary).toHaveTextContent("BENCHMARK_INTERRUPTED");
 });

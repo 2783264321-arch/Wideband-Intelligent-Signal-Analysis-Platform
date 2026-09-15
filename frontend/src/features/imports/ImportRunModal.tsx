@@ -34,7 +34,7 @@ export function ImportRunModal({ open, recordings, onClose }: Props) {
       const run = await importAnalysisPackage(values.recordingId, file);
       setImported(run);
     } catch (reason) {
-      setError(toErrorText(reason, "Unable to import analysis package."));
+      setError(toErrorText(reason, t("import.error")));
     } finally {
       setSubmitting(false);
     }

@@ -4,6 +4,7 @@ import { getDatasetBenchmark, PlatformApiError, retryDatasetExperimentEvaluation
 import type { DatasetEvaluation, DatasetExperiment } from "../../api/types";
 import { EvaluationMetricsView } from "../evaluation/EvaluationMetricsView";
 import { useLocalization } from "../../localization/useLocalization";
+import { evaluationStatusKey } from "../analysis-run/statusModel";
 
 function toErrorText(reason: unknown): string {
   if (reason instanceof PlatformApiError) return reason.display;
@@ -51,10 +52,12 @@ export function LinkedEvaluationSummary({
   }
   if (evaluation === null) {
     return error !== null
-      ? <Alert type="error" showIcon message="Unable to load linked evaluation" description={error} />
+      ? <Alert type="error" showIcon message={t("evaluation.loadError")} description={error} />
       : null;
   }
 
+  const statusKey = evaluationStatusKey(evaluation.status);
+  const statusLabel = statusKey !== null ? t(statusKey) : evaluation.status;
   const allItemsCompleted =
     experiment.queuedItems === 0 &&
     experiment.runningItems === 0 &&
@@ -80,7 +83,7 @@ export function LinkedEvaluationSummary({
     <Space direction="vertical" size={4} data-testid="linked-evaluation-summary">
       <Space size={8} wrap>
         <Typography.Text>{t("evaluation.summaryPrefix")} {evaluation.id}</Typography.Text>
-        <Tag>{evaluation.status}</Tag>
+        <Tag>{statusLabel}</Tag>
         <Typography.Text>{evaluation.evaluatedRecordings} / {evaluation.expectedRecordings}</Typography.Text>
         <Typography.Text type="secondary">{t("evaluation.missing")} {evaluation.missingRecordings}</Typography.Text>
         <Typography.Text type="secondary">{t("evaluation.coverage")} {evaluation.coverage}</Typography.Text>

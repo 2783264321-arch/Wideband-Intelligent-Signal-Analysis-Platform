@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetExperiments, PlatformApiError, retryFailedDatasetExperimentItems, runDatasetExperiment } from "../../api/client";
 import { useLocalization } from "../../localization/useLocalization";
+import { experimentStatusKey } from "../analysis-run/statusModel";
 import type { DatasetExperiment } from "../../api/types";
 
 const COLUMN_KEYS = {
@@ -95,7 +96,10 @@ export function ExperimentList() {
         {
           title: t(COLUMN_KEYS.status),
           dataIndex: "status",
-          render: (status: string) => <Tag color={STATUS_COLORS[status] ?? "default"}>{status}</Tag>,
+          render: (status: string) => {
+            const key = experimentStatusKey(status);
+            return <Tag color={STATUS_COLORS[status] ?? "default"}>{key !== null ? t(key) : status}</Tag>;
+          },
         },
         {
           title: t(COLUMN_KEYS.items),
@@ -109,10 +113,10 @@ export function ExperimentList() {
           key: "actions",
           render: (_: unknown, record: DatasetExperiment) => {
             if (record.status === "pending") {
-              return <Button size="small" onClick={() => void trigger(() => runDatasetExperiment(record.id))}>Run</Button>;
+              return <Button size="small" onClick={() => void trigger(() => runDatasetExperiment(record.id))}>{t("common.run")}</Button>;
             }
             if (record.status === "completed_with_failures" && record.failedItems > 0) {
-              return <Button size="small" onClick={() => void trigger(() => retryFailedDatasetExperimentItems(record.id))}>Retry Failed</Button>;
+              return <Button size="small" onClick={() => void trigger(() => retryFailedDatasetExperimentItems(record.id))}>{t("common.retryFailedItems")}</Button>;
             }
             return null;
           },

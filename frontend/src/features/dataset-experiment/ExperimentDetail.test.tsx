@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom";
 import { LocalizationProvider } from "../../localization/LocalizationProvider";
 import { ExperimentDetail } from "./ExperimentDetail";
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
 function localized(children: React.ReactNode) {
   return <LocalizationProvider initialLocale="en-US">{children}</LocalizationProvider>;
@@ -133,6 +134,42 @@ test("recovers from a transient polling error when a later poll succeeds", async
   await waitFor(() => expect(screen.getByTestId("experiment-progress-header")).toBeInTheDocument(), { timeout: 3000 });
 });
 
+
+test("localizes the experiment loading shell in zh-CN", () => {
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentDetail experimentId="exp_1" />
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  expect(screen.getByText("正在加载数据集实验…")).toBeInTheDocument();
+  expect(screen.queryByText("Loading experiment...")).not.toBeInTheDocument();
+});
+
+test("localizes the experiment error shell in zh-CN and preserves the raw backend identity", async () => {
+  let calls = 0;
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ error: { code: "BOOM", message: "transient" } }), { status: 503 });
+    }
+    return new Response(JSON.stringify(experimentWire({ status: "running" })));
+  }));
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentDetail experimentId="exp_1" />
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  expect(await screen.findByText("无法加载数据集实验")).toBeInTheDocument();
+  expect(screen.queryByText("Unable to load experiment")).not.toBeInTheDocument();
+  expect(screen.getByText(/BOOM: transient/)).toBeInTheDocument();
+});
 
 const linkedEvaluationWire = {
   id: "eval_1", name: "Eval", dataset_name: "spacenet", dataset_split: "test", label_space: "spacenet_14",

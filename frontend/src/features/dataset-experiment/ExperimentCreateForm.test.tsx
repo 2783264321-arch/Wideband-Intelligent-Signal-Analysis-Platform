@@ -239,3 +239,45 @@ test("a manual current-scope available executor posts the exact executor", async
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ executor: "local_gpu", execution_mode: "manual" });
 });
+
+test("localizes the create-form shell and submit control in zh-CN without changing the API payload", async () => {
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
+    if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify(pipelines));
+    if (url.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionWire));
+    if (url.endsWith("/api/dataset-experiments") && options?.method === "POST") {
+      posted = JSON.parse(String(options.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify(experimentWire), { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <ExperimentCreateForm />
+      </MemoryRouter>,
+      { locale: "zh-CN" },
+    ),
+  );
+  await screen.findByLabelText("名称");
+  expect(screen.queryByRole("button", { name: "Create Experiment" })).toBeNull();
+  expect(screen.getByLabelText("算法流水线")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("名称"), { target: { value: "Exp" } });
+  fireEvent.change(screen.getByLabelText("数据集名称"), { target: { value: "spacenet" } });
+  fireEvent.change(screen.getByLabelText("数据集划分"), { target: { value: "test" } });
+  fireEvent.change(screen.getByLabelText("标签空间"), { target: { value: "spacenet_14" } });
+  fireEvent.mouseDown(screen.getByLabelText("算法流水线"));
+  fireEvent.click(await screen.findByTitle(/Dummy Pipeline 1.0/));
+
+  const createButton = screen.getByRole("button", { name: "创建数据集实验" });
+  await waitFor(() => expect(createButton).not.toBeDisabled());
+  fireEvent.click(createButton);
+
+  await waitFor(() => expect(posted).not.toBeNull());
+  expect(posted as unknown as Record<string, unknown>).toMatchObject({
+    plugin_id: "dummy",
+    plugin_version: "1.0",
+    execution_mode: "auto",
+  });
+});

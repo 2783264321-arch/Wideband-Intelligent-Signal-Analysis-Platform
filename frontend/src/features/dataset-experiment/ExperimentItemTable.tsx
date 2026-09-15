@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetExperimentItems, PlatformApiError } from "../../api/client";
 import { useLocalization } from "../../localization/useLocalization";
+import { itemStatusKey } from "../analysis-run/statusModel";
 import type { DatasetExperimentItem } from "../../api/types";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -46,7 +47,10 @@ export function ExperimentItemTable({ experimentId }: { experimentId: string }) 
         {
           title: t("items.columnStatus"),
           dataIndex: "status",
-          render: (status: string) => <Tag color={STATUS_COLORS[status] ?? "default"}>{status}</Tag>,
+          render: (status: string) => {
+            const key = itemStatusKey(status);
+            return <Tag color={STATUS_COLORS[status] ?? "default"}>{key !== null ? t(key) : status}</Tag>;
+          },
         },
         {
           title: t("items.columnError"),

@@ -60,6 +60,8 @@ export const enUS = {
   "experiment.evaluationTab": "Evaluation",
   "experiment.empty": "No dataset experiments yet.",
   "experiment.loadError": "Unable to load experiments",
+  "experiment.detailLoadError": "Unable to load experiment",
+  "experiment.createError": "Unable to create experiment",
   "experiment.columnName": "Name",
   "experiment.columnDataset": "Dataset",
   "experiment.columnPlugin": "Plugin",
@@ -84,6 +86,7 @@ export const enUS = {
   "import.selectRecording": "Select a Recording",
   "import.zipLabel": "Analysis Package ZIP",
   "import.zipHint": "Import a ZIP containing manifest.json and detections.json generated on an AutoDL/GPU server.",
+  "import.error": "Unable to import analysis package.",
   "analysisRun.label": "Analysis Run {id}",
 
   "items.columnOrder": "Order",
@@ -99,6 +102,7 @@ export const enUS = {
   "attempts.empty": "No attempts.",
 
   "evaluation.summaryPrefix": "Evaluation",
+  "evaluation.loadError": "Unable to load linked evaluation",
   "evaluation.coverage": "coverage",
   "evaluation.missing": "missing",
   "evaluation.metricsUnavailable": "Evaluation metrics are not available yet.",

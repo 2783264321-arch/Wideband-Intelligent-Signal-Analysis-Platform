@@ -66,6 +66,8 @@ export const zhCN: Record<MessageKey, string> = {
   "experiment.evaluationTab": "评测",
   "experiment.empty": "暂无数据集实验。",
   "experiment.loadError": "无法加载数据集实验",
+  "experiment.detailLoadError": "无法加载数据集实验",
+  "experiment.createError": "无法创建数据集实验",
   "experiment.columnName": "名称",
   "experiment.columnDataset": "数据集",
   "experiment.columnPlugin": "算法插件",
@@ -90,6 +92,7 @@ export const zhCN: Record<MessageKey, string> = {
   "import.selectRecording": "选择信号记录",
   "import.zipLabel": "分析包 ZIP",
   "import.zipHint": "导入包含 AutoDL/GPU 服务器生成的 manifest.json 与 detections.json 的 ZIP 文件。",
+  "import.error": "无法导入分析包。",
   "analysisRun.label": "分析任务 {id}",
 
   "items.columnOrder": "序号",
@@ -105,6 +108,7 @@ export const zhCN: Record<MessageKey, string> = {
   "attempts.empty": "暂无执行尝试。",
 
   "evaluation.summaryPrefix": "评测",
+  "evaluation.loadError": "无法加载关联评测",
   "evaluation.coverage": "覆盖率",
   "evaluation.missing": "缺失",
   "evaluation.metricsUnavailable": "评测指标暂不可用。",

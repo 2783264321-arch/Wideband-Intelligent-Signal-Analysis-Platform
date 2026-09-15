@@ -31,7 +31,7 @@ test("renders items with status and a link to the analysis run", async () => {
     ),
   );
   expect(await screen.findByText("rec_1")).toBeInTheDocument();
-  expect(screen.getByText("completed")).toBeInTheDocument();
+  expect(screen.getByText("Completed")).toBeInTheDocument();
   const link = screen.getByRole("link", { name: /run_1/ });
   expect(link).toHaveAttribute("href", "/signals/run_1");
 });
@@ -46,8 +46,24 @@ test("a failed item shows its bounded last error type", async () => {
     </MemoryRouter>,
     ),
   );
-  expect(await screen.findByText("failed")).toBeInTheDocument();
+  expect(await screen.findByText("Failed")).toBeInTheDocument();
   expect(screen.getByText("INPUT_INCOMPATIBLE")).toBeInTheDocument();
+});
+
+test("localizes a known item status in zh-CN while preserving raw identity", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([
+    itemWire({ status: "queued", latest_analysis_run_id: "run_42" }),
+  ]))));
+  render(renderWithLocalization(
+    <MemoryRouter>
+      <ExperimentItemTable experimentId="exp_1" />
+    </MemoryRouter>,
+    { locale: "zh-CN" },
+  ));
+  expect(await screen.findByText("rec_1")).toBeInTheDocument();
+  expect(screen.getByText("排队中")).toBeInTheDocument();
+  expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /run_42/ })).toHaveAttribute("href", "/signals/run_42");
 });
 
 test("shows an empty state when there are no items", async () => {
