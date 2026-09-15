@@ -12,7 +12,7 @@
 
 **Authoritative baseline:** integration branch `integration/v1-candidate` @ `6716eaef217de97c5746d0468d62abede9b1c63c` (parents `2a76219388bf76b791c91260d4af5a57f8677c02`, `291861d36e2045396996e5d2b7beb5d0f2ac09e1`; merge base `d4b22ee4f01914974aaf47c1a88e4f8afa461913`). Backend regression on that SHA: focused 188 passed; full 2138 passed / 32 skipped / 0 failed / 0 errors; control plane `torch: None`, `ultralytics: None`. Plan B is `COMPLETE WITH OPERATOR-APPROVED DEVIATIONS` (final actual 152).
 
-**This document revision:** supersedes the first Plan-C draft (`b4fcb533…`) per independent review. Deltas: I-1 implementation surface; new C-pre-0 compatibility ruling; I-3 per-installation certificates; I-4 strict zero-inference C4; I-5 Plan-B read-only semantics; remote identity-scheme decision; revised task order. The Plan-C source branch is `feature/backend-v1-plan-c-remote-gpu`, created from the exact integration SHA.
+**This document revision:** supersedes the first Plan-C draft (`b4fcb533…`) per independent review, and records the **executed C-pre-0 audit and its Ruling B** (`PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED`; Ruling A rejected). Deltas: I-1 implementation surface; C-pre-0 result + ruling; strict per-installation certificate/no-reuse semantics; normative Pre-Live Freeze Rule and reordered C-pre phases; I-4 strict zero-inference C4; I-5 Plan-B read-only semantics; remote identity label `remote_commit_v1`. The Plan-C source branch is `feature/backend-v1-plan-c-remote-gpu`, created from the exact integration SHA.
 
 ## Global Constraints
 
@@ -105,9 +105,9 @@ Classification: **A** implemented + unit/integration tested; **B** implemented b
 
 ## Remaining Plan-C Gaps
 
-1. **Gap C-1 (conditional D, gated by C-pre-0): `remote_gpu` qualification type.** Only if Ruling B. `INSTALL_ELIGIBLE_TYPES["remote_gpu"] == ()` and `cli._cmd_qualify` defers `remote_gpu`; a new remote commit yields a new `runtime_ref` requiring a new exact certificate provisioned through the platform CLI. **Actual minimum implementation surface (if required):** `backend/app/runtime_qualification/qualification.py` **and** `backend/app/cli.py` **and** the relevant qualification/CLI/certificate tests. `identity.py` is required only if a derived remote hash scheme is chosen (see "Remote Qualification Identity Model"); `doctor.py` is required only if remote doctor reporting is part of the ruling. Do not assume a single-file change.
-2. **Gap C-2 (C): certified-runtime compatibility is unproven.** Must be decided by C-pre-0 with concrete field-level evidence and an operator ruling; not by "files changed".
-3. **Gap C-3 (C): server-side foreign-GPU admission tooling.**
+1. **Gap C-1 (D, Ruling B selected): `remote_gpu` qualification type.** `INSTALL_ELIGIBLE_TYPES["remote_gpu"] == ()` and `cli._cmd_qualify` defers `remote_gpu`; a new remote commit yields a new `runtime_ref` requiring a new exact certificate provisioned through the platform CLI. **Actual minimum implementation surface:** `backend/app/runtime_qualification/qualification.py` **and** `backend/app/cli.py` (`_cmd_qualify` remote wiring **and** `runtime doctor`/identity resolver for `remote_gpu`) **and** the applicable qualification/CLI/certificate tests. `identity.py`/`doctor.py` only if the implementation proves they are required. Do not assume a single-file change.
+2. **Gap C-2 (resolved by C-pre-0): certified-runtime incompatibility proven.** Four hard field-level incompatibilities (P1–P4) with no compatibility adapter → `PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED` (Ruling B); Ruling A rejected.
+3. **Gap C-3 (C): server-side foreign-GPU admission tooling** (acceptance-only, `scripts/`, no production dependency).
 4. **Gap C-4 (E): operator bootstrap** (profile env, known-hosts + fingerprint, remote repo pin, asset map, dataset root, Host-A DB/work root).
 5. **Gap C-5 (C/E): Plan-C per-installation evidence + ledger.**
 
@@ -136,39 +136,28 @@ terminal envelope schema + analysis_result.zip contract + payload_sha256
 result ingestion expectations + write-once/conflict
 ```
 
-### Preliminary read-only findings (planning time; MUST be formally confirmed and operator-approved in C-pre-0)
+### C-pre-0 RESULT — EXECUTED (2026-09-16, read-only source audit)
 
-Read-only `git diff 5bb5be4..6716eae` on `backend/app/remote_execution/` already shows concrete, field-level incompatibilities (not merely renamed files):
+C-pre-0 was executed against the exact sources (`git show`/`git diff`, no inference). All four findings are **independently confirmed** as `HARD_INCOMPATIBILITY`, and no compatibility adapter exists in the accepted current source (no `WSP_REMOTE_DETECTOR_CHECKPOINT`/`_FRN_CHECKPOINT`/`_FROZEN_CONFIG`/`_LS_STFT_NORMALIZATION` anywhere in `backend/app/`; current `runner._cli_probe` hard-requires `args.plugin_id`/`args.plugin_version`/`args.asset_manifest_sha256`).
 
-| # | Contract | Certified runtime `5bb5be4` | Current control plane `6716eae` | Consequence |
-|---|---|---|---|---|
-| P1 | `probe` CLI args | `probe` takes no `--plugin-id`/`--plugin-version`/`--model-release-id`/`--asset-manifest-sha256` flags | `SshRemoteExecutorProbe.availability` sends all four | old `argparse` rejects unknown args → probe fails |
-| P2 | Worker env | requires legacy flat scalars `WSP_REMOTE_DETECTOR_CHECKPOINT`, `WSP_REMOTE_FRN_CHECKPOINT`, `WSP_REMOTE_FROZEN_CONFIG`, `WSP_REMOTE_LS_STFT_NORMALIZATION` | `_runner_env_prefix` sends `WSP_REMOTE_MANIFEST_ROOT` + namespaced `WSP_REMOTE_ASSET_PATHS_JSON` only; profile rejects the legacy flat shape | old `RemoteWorkerContext.from_env` fails closed on missing scalars |
-| P3 | Wire schema | `RemotePipelineRefV1`/`RemoteExecutionEnvelopeV1` have no `model_release_id`; `RemoteWireModel` is `strict=True, extra="forbid"` | adds `model_release_id` (set to `golden` for release-required plugins) and `canonical_request_payload(..., exclude_none=True)` | current request rejected by old schema; hashes differ |
-| P4 | Result envelope | envelope has no `model_release_id` | `result_ingestor._verify_envelope_identity` compares against the local run’s `golden` | old-worker envelope rejected by current ingestor |
+| # | Contract | Certified runtime `5bb5be4` | Current control plane `6716eae` | Confirmed evidence | Verdict |
+|---|---|---|---|---|---|
+| P1 | `probe` CLI args | `probe` subparser declares **no** arguments | `runner._build_parser` declares `--plugin-id`, `--plugin-version`, `--model-release-id`, `--asset-manifest-sha256`; `SshRemoteExecutorProbe.availability` sends all four | old `argparse` rejects unknown args | HARD_INCOMPATIBILITY |
+| P2 | Worker env | `RemoteWorkerContext.from_env` calls `_require_posix` on the four legacy flat scalars `WSP_REMOTE_DETECTOR_CHECKPOINT`, `WSP_REMOTE_FRN_CHECKPOINT`, `WSP_REMOTE_FROZEN_CONFIG`, `WSP_REMOTE_LS_STFT_NORMALIZATION` | `_runner_env_prefix` sends generic namespaced `WSP_REMOTE_ASSET_PATHS_JSON` (+ `WSP_REMOTE_MANIFEST_ROOT`), never the four scalars; `_parse_generic_asset_paths` explicitly rejects the legacy flat shape | old worker fails closed on missing scalars | HARD_INCOMPATIBILITY |
+| P3 | Request wire schema | `RemoteWireModel` = `strict=True, extra="forbid"`; `RemotePipelineRefV1` has only `{id, version}` | `request_builder._build_batch_content` sets `pipeline.model_release_id = metadata["model_release_id"]` (= `golden`); `canonical_request_payload(..., exclude_none=True)` | current request rejected by old strict schema | HARD_INCOMPATIBILITY |
+| P4 | Result envelope | `RemoteExecutionEnvelopeV1` has no `model_release_id` | current envelope adds `model_release_id`; `result_ingestor._verify_envelope_identity` compares `envelope.model_release_id` to the local frozen `golden` when `local_release_id is not None` | old-worker envelope rejected by current ingestor | HARD_INCOMPATIBILITY |
 
-These findings **strongly indicate Ruling B**, but the formal ruling is produced by C-pre-0 execution and an explicit operator decision. They are recorded here so the audit is concrete, not speculative.
+Because one or more hard incompatibilities are proven and no compatibility adapter exists, the operator authorization condition is met.
 
-### Mandatory outcomes (exactly one)
+### Formal operator architecture ruling
 
-**Ruling A — compatible.** If (and only if) C-pre-0 proves the current control plane can safely operate against `5bb5be4`:
 ```text
-required_remote_runtime_commit = 5bb5be4b04d04a071bc9d8f4f61172595ecee037
-existing exact repo certificate remains valid
-NO new remote qualification production code
-Host A and Host B may run distinct commits because the frozen remote
-wire/runtime contract is explicitly proven compatible
+PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED
+Ruling B — incompatible — SELECTED
+required_remote_runtime_commit = the frozen PLAN_C_PRELIVE_SHA (see Pre-Live Freeze Rule)
 ```
-This is the preferred minimal-change outcome if technically valid. Do not repin for commit symmetry.
 
-**Ruling B — incompatible.** If C-pre-0 proves incompatibility with concrete field/schema/contract mismatches:
-```text
-required_remote_runtime_commit = Plan-C candidate SHA
-PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED   (operator architecture ruling)
-→ new exact remote certificate required
-→ C-pre-1 remote qualification flow required
-```
-Proof must name exact fields/contracts (as in P1–P4), never "many files changed".
+**Ruling A is marked `REJECTED BY C-PRE-0`.** It is retained only as historical decision-tree documentation; no executable Ruling-A branch remains. Do not add a compatibility shim to preserve `5bb5be4`; do not modify the accepted remote-execution protocol. (Note: Ruling A was also internally inconsistent with C1 — the only existing repo certificate covers `remote:autodl_primary:5bb5be4…`, not `remote:plan_c_loopback:…`.)
 
 ---
 
@@ -248,10 +237,10 @@ restart/registry rebuild requirement acknowledged (no hot reload)
 ```
 
 Rules:
-- Each installation runs its own qualification + install. **Default (strict final-design): two independent 0-inference qualifications.** Evidence reuse between installations is permitted **only if** `validate_evidence_for_install` re-resolves the CURRENT live authority (provider registered, `runtime_ref`, descriptor, technical capability) and the loopback vs true-two-host profiles differ (different `runtime_ref`), which the live-authority revalidation enforces. When in doubt, qualify separately.
-- Qualification probes do NOT consume the six model executions.
-- Do NOT silently reuse the loopback certificate as proof of true-two-host qualification.
-- **Repo-default certificate commit is a secondary, operator-approved fallback only.** Default Plan-C flow prefers the operator certificate store; do not convert an installation-specific qualification into a portable repo-default certificate silently.
+- **No qualification-evidence reuse across the two installations.** `install` requires exact `evidence.runtime_ref == live authority.runtime_ref` and `evidence.runtime_descriptor == live authority.runtime_descriptor`; since `remote:plan_c_loopback:<commit>` ≠ `remote:autodl_primary:<commit>`, loopback evidence can never install the true-two-host certificate (and vice versa). Each installation performs its **own** `qualify → evidence → certificate install → readback → registry/control-plane rebuild`.
+- Both installations are zero-model-inference qualification operations and do NOT consume the six model executions.
+- The loopback certificate never authorizes the true two-host installation; the true two-host certificate never authorizes loopback.
+- **Repo-default certificate commit is a secondary, operator-approved fallback only.** Default Plan-C flow prefers the operator certificate store (`<data_root>/runtime_certificates.json`); do not convert an installation-specific qualification into a portable repo-default certificate silently.
 
 ---
 
@@ -268,7 +257,7 @@ Rules:
 | Gate | Real remote model executions | Executor | Model | Purpose | Max |
 |---|---:|---|---|---|---:|
 | C-pre-0 | 0 | — | — | compatibility ruling | 0 |
-| C-pre-1/2/3 | 0 | — | — | implementation (if needed), qualification/cert, admission gate | 0 |
+| C-pre-1 / C-pre-3 / C-pre-FREEZE / C-pre-2 | 0 | — | — | qualification seam, admission tooling, SHA freeze, two installs | 0 |
 | C0 | 0 | — | — | static preflight | 0 |
 | C1 loopback | 1 | `remote_gpu` | ZoomSpec golden | transport + same-run ingestion | 1 |
 | C2 true two-host single | 1 | `remote_gpu` | ZoomSpec golden | one cross-host run → SAME run | 1 |
@@ -437,7 +426,7 @@ Plan C ends with the GPU still ON. No H5.5-S, cold switch, H5.5-C, Plan D, or `B
 ```text
 source/branch not at the exact approved SHA
 control plane not ML-free
-C-pre-0 unresolved (no explicit Ruling A/B)
+C-pre-0 unresolved (no explicit Ruling A/B)  [RESOLVED: Ruling B]
 remote HEAD != required_remote_runtime_commit
 host-key mismatch or `StrictHostKeyChecking=no` anywhere
 foreign GPU compute process present before a live gate
@@ -454,46 +443,78 @@ GPU powered off
 ## Revised Task Order
 
 ```text
-C-pre-0  Remote protocol/runtime compatibility audit            (0 inference)
+C-pre-0  remote protocol/runtime compatibility audit             (0 inference)
+         DONE — Ruling B; PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED
+         Ruling A marked REJECTED BY C-PRE-0 (historical only)
          │
-         ├── Ruling A: keep certified remote runtime
-         │             minimize/no production changes
-         │
-         └── Ruling B: operator-approved repin
-                       PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED
-                       → C-pre-1 required
-                             │
-C-pre-1  remote_gpu qualification implementation                 (0 inference)
-         ONLY if Ruling B; surface = qualification.py + cli.py + tests
-         (+ identity.py/doctor.py only if the identity ruling requires)
+C-pre-1  remote_gpu qualification/install support implementation  (0 inference)
+         surface = qualification.py + cli.py + tests
+         (identity.py/doctor.py only if the identity ruling requires)
          TDD; no change to remote-execution behavior
-                             │
+         │
+C-pre-3  foreign-GPU admission / acceptance tooling              (0 inference)
+         acceptance-only under scripts/; no production nvidia-smi dependency
+         │
+PRE-LIVE REGRESSION
+         focused + full backend regression: 0 failed / 0 errors
+         control plane ML-free
+         │
+C-pre-FREEZE
+         freeze exact PLAN_C_PRELIVE_SHA
+         Host A orchestrator checkout   = PLAN_C_PRELIVE_SHA
+         Host B remote runtime checkout = PLAN_C_PRELIVE_SHA
+         required_remote_runtime_commit = PLAN_C_PRELIVE_SHA
+         │
 C-pre-2  per-installation qualification + certificate provisioning (0 inference)
-         loopback installation AND true two-host installation, separately
-                             │
-C-pre-3  foreign-GPU admission gate tooling                      (0 inference)
-                             │
-C0       static preflight                                        (0)
+         (a) plan_c_loopback   — its own qualify/evidence/install/readback
+         (b) autodl_primary    — its own qualify/evidence/install/readback
+         NO cross-installation evidence reuse
          │
-C1       loopback mechanics                                      (1)
+C0       static preflight                                         (0)
          │
-C2       true two-host single run                                (1)
+C1       loopback mechanics                                       (1)
          │
-C3       true two-host small DatasetExperiment                   (4)
+C2       true two-host single run                                 (1)
          │
-C4       zero-inference reconciliation                           (0)
+C3       true two-host small DatasetExperiment                    (4)
          │
-C5       acceptance + regression                                 (0)
+C4       zero-inference reconciliation                            (0)
+         │
+C5       acceptance + regression                                  (0)
 ```
 
-Do not pre-decide C-pre-1 before C-pre-0. Do not amend `b4fcb533…`.
+Do not amend `b4fcb533…` or `9ddf640…`.
+
+---
+
+## Pre-Live Freeze Rule (normative)
+
+Certificate installation binds the exact `runtime_ref`, which embeds `required_remote_runtime_commit`. Therefore **certificate provisioning must occur only after all source-changing prerequisite work is complete.**
+
+```text
+C-pre-1 (source) → C-pre-3 (source) → PRE-LIVE REGRESSION
+  → C-pre-FREEZE: freeze PLAN_C_PRELIVE_SHA
+  → C-pre-2: provision certificates at PLAN_C_PRELIVE_SHA
+  → C0..C4 pinned to PLAN_C_PRELIVE_SHA
+```
+
+Once `PLAN_C_PRELIVE_SHA` is frozen and C-pre-2 certificates are provisioned, **no production/backend/script/config source change is allowed before C0–C4 complete.** If a source change becomes necessary after freeze:
+
+```text
+STOP
+invalidate the Plan-C pre-live freeze
+invalidate any not-yet-used Plan-C certificate assumptions
+new review required
+```
+
+Documentation/evidence recording may be committed later, but the Host-A orchestrator and Host-B remote runtime actually used for C1–C4 must remain exactly pinned to the recorded `PLAN_C_PRELIVE_SHA`. Do not mint a certificate and then create another source-changing commit that changes the required remote runtime SHA.
 
 ---
 
 ## Production Change Policy
 
-- Default: **no production change** beyond acceptance tooling.
-- Only under Ruling B: a bounded remote qualification flow spanning **`backend/app/runtime_qualification/qualification.py` + `backend/app/cli.py` + tests** (and `identity.py`/`doctor.py` only if the identity ruling requires). Justified as parity with the Plan-B `local_gpu_cuda_v1` addition; changes only how remote identity is *qualified/certified*, never how remote execution *runs*.
+- C-pre-0 selected **Ruling B**; the bounded C-pre-1 change is therefore required. Surface: **`backend/app/runtime_qualification/qualification.py` + `backend/app/cli.py` + the applicable qualification/CLI/certificate tests** (`test_cli.py`, `test_runtime_qualification.py`, `test_runtime_qualification_integration.py`, `test_certificate_install.py`). `cli.py` review must cover **both** `_cmd_qualify` remote_gpu probe/runner wiring **and** `runtime doctor` / identity-resolver behavior for `remote_gpu`. Modify `doctor.py`/`identity.py` only if the implementation proves they are required. No remote-execution behavior change.
+- C-pre-3 is acceptance tooling only, under `scripts/`; `backend/app/**` must not depend on `nvidia-smi`/`/proc`/cgroup.
 - Repo-default certificate edits remain a secondary, operator-approved fallback.
 - Any other production change must be separately justified and reviewed; if a remote-execution production defect is found, STOP and report.
 
@@ -501,10 +522,10 @@ Do not pre-decide C-pre-1 before C-pre-0. Do not amend `b4fcb533…`.
 
 ## Plan Self-Review
 
-1. **C-pre-0 precedes production change; ruling not pre-decided in the plan.** Preliminary read-only evidence (P1–P4) recorded for the audit but the ruling is C-pre-0 + operator. ✅
-2. **Implementation surface corrected (I-1).** Minimum = `qualification.py` + `cli.py` + tests; `identity.py`/`doctor.py` conditional on the identity ruling; no single-file claim. ✅
-3. **Compatibility proven by contract, not filenames.** P1–P4 are concrete field/schema mismatches. ✅
-4. **Per-installation certificates (I-3).** Loopback (`plan_c_loopback`) and true two-host (`autodl_primary`) are distinct installations with distinct `runtime_ref`, data roots, and (default) separate 0-inference qualifications; no cross-projection. ✅
+1. **C-pre-0 executed; ruling recorded, Ruling A rejected.** P1–P4 confirmed as hard incompatibilities with no compatibility adapter; `PLAN_C_REMOTE_RUNTIME_REPIN_REQUIRED`. ✅
+2. **Implementation surface corrected (I-1).** Minimum = `qualification.py` + `cli.py` + tests; `cli` covers `_cmd_qualify` and doctor/identity for `remote_gpu`; `identity.py`/`doctor.py` conditional; no single-file claim. ✅
+3. **Compatibility proven by contract, not filenames.** P1–P4 are exact field/schema evidence. ✅
+4. **Per-installation certificates (I-3).** Strict no cross-installation evidence reuse; each of `plan_c_loopback` / `autodl_primary` qualifies, installs, reads back, and rebuilds separately. ✅
 5. **Remote identity model explicit.** `runtime_ref = remote:<profile>:<commit>`; scheme label `remote_commit_v1`; no GPU/driver encoded; local schemes not reused. ✅
 6. **Strict C4 zero-inference (I-4).** No submit/work/run/attempt; budget review STOP if inference would be required; `request_sha256` is not an exemption. ✅
 7. **Plan-B read-only semantics (I-5).** Read-only hash/stat allowed; lifecycle/mutation/reuse forbidden. ✅
