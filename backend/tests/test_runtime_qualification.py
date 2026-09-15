@@ -189,7 +189,10 @@ def test_select_runner_is_executor_based() -> None:
     assert isinstance(select_runner(executor="local_cpu", target_probe=lambda t: None), LocalCpuQualificationRunner)
     assert isinstance(select_runner(executor="local_gpu", target_probe=lambda t: None), LocalGpuQualificationRunner)
     assert isinstance(select_runner(executor="local_gpu", target_probe=None), LocalGpuQualificationRunner)
-    assert isinstance(select_runner(executor="remote_gpu", target_probe=None), DeferredGpuQualificationRunner)
+    # Plan C C-pre-1: remote_gpu now uses the real remote runner (not deferred).
+    remote_runner = select_runner(executor="remote_gpu", target_probe=None)
+    assert type(remote_runner).__name__ == "RemoteGpuQualificationRunner"
+    assert remote_runner.qualification_type == "remote_gpu_probe_v1"
 
 
 def test_run_qualification_echoes_identity(tmp_path: Path) -> None:

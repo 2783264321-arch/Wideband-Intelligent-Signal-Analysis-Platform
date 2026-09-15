@@ -188,7 +188,14 @@ def build_runtime_doctor_report(
     providers: list[ProviderReport] = []
     for spec in provider_specs:
         interpreter = interpreter_probe.inspect(spec.python_path)
-        gpu = gpu_probe.inspect() if spec.device_type == "cuda" else _not_applicable_gpu(spec.device_type)
+        # Local GPU diagnostics apply ONLY to a local GPU provider. A remote_gpu
+        # (cuda) provider must never trigger Host-A nvidia-smi telemetry; remote
+        # CUDA health is established by the SSH qualification/availability probe.
+        gpu = (
+            gpu_probe.inspect()
+            if (spec.executor == "local_gpu" and spec.device_type == "cuda")
+            else _not_applicable_gpu(spec.device_type)
+        )
         configured_ref, derived_ref, scheme, status = resolver(spec, settings)
         providers.append(
             ProviderReport(

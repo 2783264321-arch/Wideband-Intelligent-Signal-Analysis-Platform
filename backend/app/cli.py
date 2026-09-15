@@ -32,8 +32,10 @@ from app.runtime_qualification.install import (
     resolve_live_authority,
 )
 from app.runtime_qualification.qualification import (
+    REMOTE_COMMIT_V1,
     QualificationTarget,
     build_default_target_probe,
+    parse_remote_runtime_ref,
     run_qualification,
     select_runner,
 )
@@ -49,10 +51,49 @@ class CliContext:
     executor_registry: object
     repo_certificate_path: Path
     data_root: Path
+    # Plan C C-pre-1: present only when a valid RemoteProfile is configured.
+    remote_profile: object | None = None
+    remote_transport: object | None = None
 
 
 def _repo_certificate_path() -> Path:
     return Path(__file__).resolve().parent / "pipelines" / "execution_certificates.json"
+
+
+def _build_remote_provider(settings: Settings, providers: dict) -> tuple[object | None, object | None]:
+    """Register the production ``remote_gpu`` provider when a valid profile exists.
+
+    Mirrors the application remote bootstrap. Construction performs NO network
+    I/O and launches NO coordinator: ``CoordinatorJobManager`` is only a launcher
+    object. A missing/invalid profile leaves local executors fully usable and the
+    ``remote_gpu`` provider absent (remote qualification then fails closed).
+    """
+    try:
+        from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
+        from app.remote_execution.executor import SshRemoteExecutorProbe
+        from app.remote_execution.profile import RemoteProfile
+        from app.remote_execution.runtime import RemoteGpuExecutorProvider
+        from app.remote_execution.transport import SshRunner
+    except Exception:
+        return None, None
+    try:
+        profile = RemoteProfile.from_env(settings)
+        transport = SshRunner(profile)
+        probe = SshRemoteExecutorProbe(
+            profile,
+            transport,
+            expected_runtime_commit=profile.required_remote_runtime_commit,
+        )
+        provider = RemoteGpuExecutorProvider(
+            profile=profile,
+            probe=probe,
+            launcher=CoordinatorJobManager(settings),
+            required_runtime_commit=profile.required_remote_runtime_commit,
+        )
+    except Exception:
+        return None, None
+    providers[provider.name] = provider
+    return profile, transport
 
 
 def _default_context(settings: Settings) -> CliContext:
@@ -62,6 +103,7 @@ def _default_context(settings: Settings) -> CliContext:
     )
     repo_path = _repo_certificate_path()
     providers = dict(build_local_providers(settings))
+    remote_profile, remote_transport = _build_remote_provider(settings, providers)
     executor_registry = ExecutorRegistry(
         providers, build_certificate_store(repo_path=repo_path, data_root=settings.data_root)
     )
@@ -72,6 +114,8 @@ def _default_context(settings: Settings) -> CliContext:
         executor_registry=executor_registry,
         repo_certificate_path=repo_path,
         data_root=settings.data_root,
+        remote_profile=remote_profile,
+        remote_transport=remote_transport,
     )
 
 
@@ -105,7 +149,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _make_identity_resolver(repo_provenance: frozenset[tuple[str, str]]):
+def _make_identity_resolver(
+    repo_provenance: frozenset[tuple[str, str]],
+    *,
+    expected_remote_runtime_ref: str | None = None,
+):
     """Derive and compare each provider's identity against the interpreter material.
 
     ``legacy_opaque`` is provenance-based, keyed by ``(executor, runtime_ref)``, and
@@ -129,6 +177,20 @@ def _make_identity_resolver(repo_provenance: frozenset[tuple[str, str]]):
         configured = spec.runtime_ref
         if configured is None:
             return (None, None, spec.identity_scheme, "not_configured")
+
+        if spec.executor == "remote_gpu":
+            # The remote identity is profile + exact commit only (`remote_commit_v1`).
+            # `match` requires a well-formed profile-derived ref; when the CLI has a
+            # configured profile it must equal that exact deployment identity.
+            if parse_remote_runtime_ref(configured) is None:
+                return (configured, None, REMOTE_COMMIT_V1, "mismatch")
+            if (
+                expected_remote_runtime_ref is not None
+                and configured != expected_remote_runtime_ref
+            ):
+                return (configured, None, REMOTE_COMMIT_V1, "mismatch")
+            return (configured, None, REMOTE_COMMIT_V1, "match")
+
         parsed = identity_module.parse_local_runtime_ref(configured)
 
         if spec.executor == "local_gpu":
@@ -175,12 +237,20 @@ def _cmd_runtime_doctor(ctx: CliContext, out) -> int:
         for certificate in load_execution_certificates(ctx.repo_certificate_path)
     )
     specs = doctor_module.build_provider_specs(ctx.settings, _providers_of(ctx.executor_registry))
+    expected_remote_runtime_ref = None
+    if ctx.remote_profile is not None:
+        expected_remote_runtime_ref = (
+            f"remote:{ctx.remote_profile.name}:"
+            f"{ctx.remote_profile.required_remote_runtime_commit}"
+        )
     report = doctor_module.build_runtime_doctor_report(
         settings=ctx.settings,
         provider_specs=specs,
         interpreter_probe=doctor_module.SubprocessInterpreterProbe(),
         gpu_probe=doctor_module.NvidiaSmiGpuProbe(),
-        identity_resolver=_make_identity_resolver(repo_provenance),
+        identity_resolver=_make_identity_resolver(
+            repo_provenance, expected_remote_runtime_ref=expected_remote_runtime_ref
+        ),
     )
     print(json.dumps(report.to_operator_json(), indent=2), file=out)
     return 0
@@ -221,6 +291,7 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
         runtime_descriptor=provider.runtime_descriptor().to_metadata(),
     )
 
+    input_identity: dict | None = None
     if args.executor in ("local_cpu", "local_gpu"):
         probe = build_default_target_probe(
             target=target,
@@ -230,10 +301,33 @@ def _cmd_qualify(ctx: CliContext, args, out) -> int:
             executor_registry=ctx.executor_registry,
         )
         runner = select_runner(executor=args.executor, target_probe=probe)
+    elif args.executor == "remote_gpu":
+        # Plan C C-pre-1: the real remote probe over the configured transport.
+        # When the remote profile/transport is absent the probe fails closed.
+        probe = build_default_target_probe(
+            target=target,
+            settings=ctx.settings,
+            pipeline_registry=ctx.pipeline_registry,
+            model_release_store=ctx.model_release_store,
+            executor_registry=ctx.executor_registry,
+            remote_profile=ctx.remote_profile,
+            remote_transport=ctx.remote_transport,
+        )
+        runner = select_runner(executor="remote_gpu", target_probe=probe)
+        if ctx.remote_profile is not None:
+            input_identity = {
+                "remote_profile": ctx.remote_profile.name,
+                "required_remote_runtime_commit": ctx.remote_profile.required_remote_runtime_commit,
+            }
     else:
         runner = select_runner(executor=args.executor, target_probe=None)
 
-    evidence = run_qualification(target=target, runner=runner, asset_manifest_sha256=asset_manifest_sha256)
+    evidence = run_qualification(
+        target=target,
+        runner=runner,
+        asset_manifest_sha256=asset_manifest_sha256,
+        input_identity=input_identity,
+    )
     path = write_evidence(ctx.data_root, evidence)
     print(
         json.dumps(
