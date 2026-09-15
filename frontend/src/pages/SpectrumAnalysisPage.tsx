@@ -1,10 +1,12 @@
 import { Alert, Button, Card, Checkbox, Col, Row, Select, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorAvailability, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
-import type { AnalysisRun, DetectionResult, ExecutorAvailability, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
+import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
+import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
-import { resolveExecutorForPipeline, type AvailabilityState } from "../features/spectrum/executorPolicy";
+import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
+import { optionsFromSelection } from "../features/execution-environment/executionEnvironment";
+import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
 import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
 
@@ -72,8 +74,12 @@ export function SpectrumAnalysisPage() {
   const [showPredictions, setShowPredictions] = useState(true);
   const [showGroundTruth, setShowGroundTruth] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [availability, setAvailability] = useState<ExecutorAvailability | null>(null);
-  const [availabilityStatus, setAvailabilityStatus] = useState<AvailabilityState["state"]>("idle");
+  // Backend execution-environment projection (sole authority). Never computed client-side.
+  const [selection, setSelection] = useState<ExecutorSelection | null>(null);
+  const [selectionLoading, setSelectionLoading] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  // User's explicit execution environment value. Auto stays Auto across the request boundary.
+  const [environment, setEnvironment] = useState<ExecutionEnvironmentValue>({ mode: "auto", executor: null });
 
   useEffect(() => {
     let active = true;
@@ -102,25 +108,33 @@ export function SpectrumAnalysisPage() {
     return () => { active = false; };
   }, [recordingId, runId]);
 
-  // Executor availability for the SELECTED pipeline only. On recording/pipeline
-  // change the stale availability is cleared immediately and an in-flight
-  // response for the previous pipeline is ignored (active flag torn down).
+  // Execution environment selection for the SELECTED pipeline/recording only.
+  // On change the stale selection is cleared immediately and an in-flight response
+  // for the previous pipeline is ignored (active flag torn down). Auto is reset to
+  // avoid carrying a manual choice across pipelines.
   useEffect(() => {
-    setAvailability(null);
-    setAvailabilityStatus("idle");
+    setSelection(null);
+    setSelectionError(null);
+    setSelectionLoading(false);
+    setEnvironment({ mode: "auto", executor: null });
     if (!recording || !pipelines.length) return undefined;
-    const selectedPipeline = pipelines.find((item) => item.id === pipelineId);
-    if (!selectedPipeline?.executorsSupported.includes("remote_gpu")) return undefined;
     let active = true;
-    setAvailabilityStatus("loading");
-    void getExecutorAvailability(recordingId, pipelineId)
+    setSelectionLoading(true);
+    void getExecutorSelection({
+      scope: { kind: "recording", recordingId },
+      pipelineId,
+    })
       .then((result) => {
         if (!active) return;
-        setAvailability(result);
-        setAvailabilityStatus(result.available ? "available" : "unavailable");
+        setSelection(result);
       })
-      .catch(() => {
-        if (active) setAvailabilityStatus("error");
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setSelectionError(reason instanceof Error ? reason.message : "Unable to load execution environments.");
+      })
+      .finally(() => {
+        if (!active) return;
+        setSelectionLoading(false);
       });
     return () => { active = false; };
   }, [recordingId, pipelineId, recording, pipelines]);
@@ -139,33 +153,14 @@ export function SpectrumAnalysisPage() {
   }, [currentRun?.id, currentRun?.status]);
 
   const selected = useMemo(() => detections.find((d) => d.id === selectedId), [detections, selectedId]);
-  const selectedPipeline = pipelines.find((item) => item.id === pipelineId);
   const runActive = currentRun ? activeStatuses.has(currentRun.status) : false;
 
-  const resolution = useMemo(() => {
-    if (!selectedPipeline) return { executor: null as "remote_gpu" | "local_cpu" | null, disabledReason: null };
-    const availabilityState: AvailabilityState =
-      availabilityStatus === "available"
-        ? { state: "available" }
-        : availabilityStatus === "unavailable"
-          ? { state: "unavailable", reason: availability?.reasonMessage ?? null }
-          : availabilityStatus === "error"
-            ? { state: "error", reason: availability?.reasonMessage ?? null }
-            : availabilityStatus === "loading"
-              ? { state: "loading" }
-              : { state: "idle" };
-    return resolveExecutorForPipeline(selectedPipeline, availabilityState);
-  }, [selectedPipeline, availabilityStatus, availability]);
-
-  const availabilitySummary = useMemo(() => {
-    if (availabilityStatus === "loading") return "Checking remote GPU...";
-    if (availabilityStatus === "error") return "Remote GPU check failed.";
-    if (availabilityStatus === "available" && availability) return `Remote GPU available${availability.remoteProfile ? ` · ${availability.remoteProfile}` : ""}`;
-    if (availabilityStatus === "unavailable" && availability) {
-      return `Remote GPU unavailable${availability.reasonMessage ? ` · ${availability.reasonMessage}` : ""}`;
-    }
-    return null;
-  }, [availabilityStatus, availability]);
+  const environmentOptions = useMemo(() => optionsFromSelection(selection), [selection]);
+  const selectedEnvironmentOption = useMemo(
+    () => environmentOptions.find((option) => option.key === (environment.mode === "auto" ? "auto" : environment.executor)) ?? null,
+    [environmentOptions, environment.mode, environment.executor],
+  );
+  const canRun = !runActive && selectedEnvironmentOption?.enabled === true;
 
   const selectDetection = (id: string) => {
     setSelectedId(id);
@@ -176,15 +171,10 @@ export function SpectrumAnalysisPage() {
 
   const runAnalysis = async () => {
     setError(null);
-    const executor = resolution.executor;
-    if (!executor) return;
+    if (!canRun) return;
     try {
-      // F1.3 compatibility migration: executorPolicy is retired in F1.4.
-      const request = buildAnalysisRunRequest({
-        recordingId,
-        pipelineId,
-        environment: { mode: "manual", executor },
-      });
+      // Auto stays Auto; the backend resolves the concrete executor.
+      const request = buildAnalysisRunRequest({ recordingId, pipelineId, environment });
       const run = await createAnalysisRun(request);
       setCurrentRun(run);
       setDetections([]);
@@ -219,16 +209,19 @@ export function SpectrumAnalysisPage() {
             onChange={setPipelineId}
             options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item) }))}
           />
-          <Button type="primary" loading={runActive} disabled={!resolution.executor || runActive} onClick={() => void runAnalysis()}>
+          <Button type="primary" loading={runActive} disabled={!canRun} onClick={() => void runAnalysis()}>
             {runActive ? "Analyzing..." : "Run Analysis"}
           </Button>
-          {selectedPipeline?.executorsSupported.includes("remote_gpu") ? (
-            <Typography.Text type="secondary" data-testid="executor-availability">
-              {availabilitySummary ?? (resolution.disabledReason ?? "")}
-            </Typography.Text>
-          ) : null}
         </Space>
       </div>
+      <ExecutionEnvironmentSelector
+        selection={selection}
+        loading={selectionLoading}
+        error={selectionError}
+        value={environment}
+        onChange={setEnvironment}
+        disabled={runActive}
+      />
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>Prediction</Checkbox>
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>Ground Truth</Checkbox>
