@@ -1,3 +1,13 @@
+"""SpaceNet dataset adapter.
+
+Observation-range semantics: ``observation_range`` is SOURCE metadata. The
+``sample_rate_hz`` and ``center_frequency_hz`` values produced here are
+PLATFORM-DERIVED values (bandwidth and midpoint of ``observation_range``). They
+remain platform-derived unless the official dataset contract is independently
+verified to guarantee that the complex-IQ sampling rate equals the observation
+bandwidth. Inspecting sample JSON alone does not establish that contract. See
+the V1.1 design specification section 7.
+"""
 from dataclasses import dataclass
 import json
 import math
