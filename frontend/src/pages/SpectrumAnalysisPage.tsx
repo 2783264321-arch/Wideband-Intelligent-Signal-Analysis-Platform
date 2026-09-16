@@ -11,6 +11,7 @@ import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { useLocalization } from "../localization/useLocalization";
 import type { MessageKey } from "../localization/types";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
+import { NoRunnableExecutorPanel } from "../features/execution-environment/NoRunnableExecutorPanel";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
@@ -192,6 +193,9 @@ export function SpectrumAnalysisPage() {
         onChange={setEnvironment}
         disabled={runActive}
       />
+      {!selectionLoading && selectionError === null && effectiveSelection !== null && !environmentOptions.some((option) => option.enabled) ? (
+        <NoRunnableExecutorPanel selection={effectiveSelection} />
+      ) : null}
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>{t("common.prediction")}</Checkbox>
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t("common.groundTruth")}</Checkbox>

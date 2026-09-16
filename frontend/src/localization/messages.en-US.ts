@@ -235,6 +235,8 @@ export const enUS = {
   "executionEnv.checking": "Checking execution environments...",
   "executionEnv.recommended": "Recommended: {executor}",
   "executionEnv.unresolved": "Auto has no runnable executor.",
+  "executionEnv.noRunnableTitle": "No runnable execution environment",
+  "executionEnv.noRunnableHint": "This pipeline has no runnable execution environment. See each environment below.",
   "common.technicalDetails": "Technical details",
   "executionEnv.temporarilyUnavailable": "Temporarily unavailable",
   "executionEnv.notCertified": "Not certified",

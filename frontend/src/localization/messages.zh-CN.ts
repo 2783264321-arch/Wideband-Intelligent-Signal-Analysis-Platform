@@ -241,6 +241,8 @@ export const zhCN: Record<MessageKey, string> = {
   "executionEnv.checking": "正在检查执行环境…",
   "executionEnv.recommended": "推荐执行环境：{executor}",
   "executionEnv.unresolved": "自动选择没有可运行的执行环境。",
+  "executionEnv.noRunnableTitle": "没有可用的执行环境",
+  "executionEnv.noRunnableHint": "该算法流水线当前没有可用的执行环境。请查看下方各执行环境状态。",
   "common.technicalDetails": "技术详情",
   "executionEnv.temporarilyUnavailable": "暂时不可用",
   "executionEnv.notCertified": "未通过认证",
