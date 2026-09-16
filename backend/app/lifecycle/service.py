@@ -46,12 +46,11 @@ def quarantine_managed_dirs(storage, managed_dirs: Iterable[Path]):
 
 
 def _run_owned_managed_dirs(storage, run: AnalysisRunModel) -> list[Path]:
+    managed = [storage.artifact_path(run.id)]
     payload = run.parameters_json or {}
-    if "batch_import" in payload:
-        return []
-    if "package" in payload:
-        return [storage.import_package_dir(run.id)]
-    return []
+    if "package" in payload and "batch_import" not in payload:
+        managed.append(storage.import_package_dir(run.id))
+    return managed
 
 
 def _owned_runs(session, recording_ids: list[str]) -> list[AnalysisRunModel]:

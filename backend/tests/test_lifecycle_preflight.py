@@ -111,3 +111,43 @@ def test_recording_parent_exposes_attempt_blocker(session):
     kinds = {(b.kind, b.resource_id) for b in blockers}
     assert ("dataset_experiment", "exp_att2") in kinds
     assert ("dataset_experiment_attempt", "attempt_att2") in kinds
+
+
+# ---------- Active-run guard ----------
+
+def test_pending_run_direct_delete_is_blocked(session):
+    add_recording(session, recording_id="rec_p", name="p")
+    add_run(session, run_id="run_pending", recording_id="rec_p", executor="local_cpu", status="pending")
+    session.commit()
+    blockers = find_run_blockers(session, ["run_pending"])
+    active = [b for b in blockers if b.kind == "active_analysis_run"]
+    assert len(active) == 1
+    assert active[0].resource_id == "run_pending"
+    assert active[0].reference == "analysis_run"
+
+
+def test_running_run_direct_delete_is_blocked(session):
+    add_recording(session, recording_id="rec_r", name="r")
+    add_run(session, run_id="run_running", recording_id="rec_r", executor="local_cpu", status="running")
+    session.commit()
+    blockers = find_run_blockers(session, ["run_running"])
+    active = [b for b in blockers if b.kind == "active_analysis_run"]
+    assert len(active) == 1
+    assert active[0].resource_id == "run_running"
+
+
+def test_terminal_run_is_not_blocked_by_active_rule(session):
+    add_recording(session, recording_id="rec_t", name="t")
+    add_run(session, run_id="run_done", recording_id="rec_t", executor="local_cpu", status="completed")
+    session.commit()
+    blockers = find_run_blockers(session, ["run_done"])
+    assert all(blocker.kind != "active_analysis_run" for blocker in blockers)
+
+
+def test_recording_with_active_owned_run_is_blocked(session):
+    add_recording(session, recording_id="rec_ar", name="ar")
+    add_run(session, run_id="run_ar", recording_id="rec_ar", executor="local_cpu", status="running")
+    session.commit()
+    blockers = find_recording_blockers(session, ["rec_ar"])
+    active = [b for b in blockers if b.kind == "active_analysis_run"]
+    assert any(blocker.resource_id == "run_ar" for blocker in active)

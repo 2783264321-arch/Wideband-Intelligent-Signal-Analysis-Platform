@@ -11,6 +11,7 @@ class DeleteBlockerRead(BaseModel):
         "dataset_experiment",
         "dataset_experiment_attempt",
         "imported_batch",
+        "active_analysis_run",
     ]
     resource_id: str
     reference: Literal["recording", "analysis_run"]

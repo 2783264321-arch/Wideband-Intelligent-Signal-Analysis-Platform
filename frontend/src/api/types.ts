@@ -585,7 +585,7 @@ export interface DatasetAnalysisHistoryPage {
 }
 
 export interface DeleteBlocker {
-  kind: "dataset_evaluation" | "dataset_experiment" | "dataset_experiment_attempt" | "imported_batch";
+  kind: "dataset_evaluation" | "dataset_experiment" | "dataset_experiment_attempt" | "imported_batch" | "active_analysis_run";
   resourceId: string;
   reference: "recording" | "analysis_run";
 }

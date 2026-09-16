@@ -43,5 +43,9 @@ class StorageService:
         """WISA-owned single-import package directory (may not exist yet)."""
         return self._safe_child_no_mkdir("imports", run_id)
 
+    def artifact_path(self, run_id: str) -> Path:
+        """WISA-owned analysis artifact directory (non-creating; for deletion)."""
+        return self._safe_child_no_mkdir("artifacts", run_id)
+
     def quarantine_root(self) -> Path:
         return self._safe_child("quarantine")

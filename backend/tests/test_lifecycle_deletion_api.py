@@ -123,3 +123,119 @@ def test_db_failure_restores_quarantined_files(client, session, monkeypatch):
     with pytest.raises(RuntimeError):
         delete_analysis_run(session, client.app.state.storage, "run_q")
     assert package_dir.exists()
+
+
+# ---------- Active-run safety ----------
+
+def test_pending_run_delete_is_blocked(client, session):
+    add_recording(session, recording_id="rec_pd", name="pd", dataset_name=None,
+                  dataset_split=None, label_space=None)
+    add_run(session, run_id="run_pd", recording_id="rec_pd", executor="local_cpu", status="pending")
+    session.commit()
+    response = client.delete("/api/analysis-runs/run_pd")
+    assert response.status_code == 409
+    body = response.json()["error"]
+    assert body["code"] == "ANALYSIS_RUN_DELETE_BLOCKED"
+    active = [b for b in body["details"]["blockers"] if b["kind"] == "active_analysis_run"]
+    assert active and active[0]["resource_id"] == "run_pd" and active[0]["reference"] == "analysis_run"
+
+
+def test_running_run_delete_is_blocked(client, session):
+    add_recording(session, recording_id="rec_rd", name="rd", dataset_name=None,
+                  dataset_split=None, label_space=None)
+    add_run(session, run_id="run_rd", recording_id="rec_rd", executor="local_cpu", status="running")
+    session.commit()
+    response = client.delete("/api/analysis-runs/run_rd")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "ANALYSIS_RUN_DELETE_BLOCKED"
+
+
+def test_dataset_removal_atomic_with_active_member_run(client, session, tmp_path):
+    root = tmp_path / "SpaceNet-ACTIVE"
+    members = [_add_root_member(session, root, f"ac{index}")[0] for index in range(3)]
+    add_run(session, run_id="run_ac", recording_id=members[0].id, executor="local_cpu", status="running")
+    session.commit()
+    pid = DatasetProjectionResolver(session).find_for_recording(members[0]).dataset_projection_id
+
+    response = client.delete(f"/api/data-library/datasets/{pid}")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "DATASET_REMOVE_BLOCKED"
+    session.expire_all()
+    remaining = {row.id for row in session.query(RecordingModel).all() if row.id.startswith("rec_SpaceNet-ACTIVE")}
+    assert remaining == {member.id for member in members}
+
+
+# ---------- Artifact cleanup ----------
+
+def test_normal_run_artifact_is_removed(client, session):
+    add_recording(session, recording_id="rec_art", name="art", dataset_name=None,
+                  dataset_split=None, label_space=None)
+    add_run(session, run_id="run_art", recording_id="rec_art", executor="local_cpu", status="completed")
+    session.commit()
+    artifact = client.app.state.settings.data_root / "artifacts" / "run_art"
+    artifact.mkdir(parents=True, exist_ok=True)
+    (artifact / "result.bin").write_bytes(b"x")
+
+    assert client.delete("/api/analysis-runs/run_art").status_code == 204
+    assert not artifact.exists()
+
+
+def test_no_artifact_directory_is_not_created(client, session):
+    add_recording(session, recording_id="rec_noart", name="noart", dataset_name=None,
+                  dataset_split=None, label_space=None)
+    add_run(session, run_id="run_noart", recording_id="rec_noart", executor="local_cpu", status="completed")
+    session.commit()
+
+    assert client.delete("/api/analysis-runs/run_noart").status_code == 204
+    assert not (client.app.state.settings.data_root / "artifacts" / "run_noart").exists()
+
+
+def test_artifact_restored_on_db_failure(client, session, monkeypatch):
+    add_recording(session, recording_id="rec_artdb", name="artdb", dataset_name=None,
+                  dataset_split=None, label_space=None)
+    add_run(session, run_id="run_artdb", recording_id="rec_artdb", executor="local_cpu", status="completed")
+    session.commit()
+    artifact = client.app.state.settings.data_root / "artifacts" / "run_artdb"
+    artifact.mkdir(parents=True, exist_ok=True)
+    (artifact / "result.bin").write_bytes(b"x")
+
+    def boom():
+        raise RuntimeError("db failure")
+
+    monkeypatch.setattr(session, "commit", boom)
+    with pytest.raises(RuntimeError):
+        delete_analysis_run(session, client.app.state.storage, "run_artdb")
+    assert artifact.exists()
+
+
+def test_standalone_recording_deletion_removes_owned_run_artifact(client, session):
+    add_recording(session, recording_id="rec_sart", name="sart", dataset_name=None,
+                  dataset_split=None, label_space=None)
+    add_run(session, run_id="run_sart", recording_id="rec_sart", executor="local_cpu", status="completed")
+    session.commit()
+    artifact = client.app.state.settings.data_root / "artifacts" / "run_sart"
+    artifact.mkdir(parents=True, exist_ok=True)
+    (artifact / "result.bin").write_bytes(b"x")
+
+    assert client.delete("/api/recordings/rec_sart").status_code == 204
+    assert not artifact.exists()
+
+
+def test_dataset_removal_removes_owned_run_artifacts(client, session, tmp_path):
+    root = tmp_path / "SpaceNet-AR"
+    members = [_add_root_member(session, root, f"ar{index}")[0] for index in range(2)]
+    for index, member in enumerate(members):
+        add_run(session, run_id=f"run_ar_{index}", recording_id=member.id,
+                executor="local_cpu", status="completed")
+    session.commit()
+    artifacts = []
+    for index in range(2):
+        path = client.app.state.settings.data_root / "artifacts" / f"run_ar_{index}"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "result.bin").write_bytes(b"x")
+        artifacts.append(path)
+
+    pid = DatasetProjectionResolver(session).find_for_recording(members[0]).dataset_projection_id
+    assert client.delete(f"/api/data-library/datasets/{pid}").status_code == 204
+    for path in artifacts:
+        assert not path.exists()

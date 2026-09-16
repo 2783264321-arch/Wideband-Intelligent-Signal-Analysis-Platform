@@ -129,11 +129,29 @@ def _imported_batch_blockers(
     return blockers
 
 
+_ACTIVE_RUN_STATUSES = ("pending", "running")
+
+
+def _active_run_blockers(session, run_ids: Sequence[str]) -> list[DeleteBlocker]:
+    ids = list(run_ids)
+    if not ids:
+        return []
+    rows = session.execute(
+        select(AnalysisRunModel.id, AnalysisRunModel.status).where(AnalysisRunModel.id.in_(ids))
+    ).all()
+    return [
+        DeleteBlocker("active_analysis_run", run_id, "analysis_run")
+        for run_id, status in rows
+        if status in _ACTIVE_RUN_STATUSES
+    ]
+
+
 def find_run_blockers(session, run_ids: Sequence[str]) -> list[DeleteBlocker]:
     ids = list(run_ids)
     return _dedupe(
         _fk_run_blockers(session, ids)
         + _imported_batch_blockers(session, set(ids), "analysis_run")
+        + _active_run_blockers(session, ids)
     )
 
 
@@ -152,4 +170,5 @@ def find_recording_blockers(session, recording_ids: Sequence[str]) -> list[Delet
         _fk_recording_blockers(session, ids)
         + _fk_run_blockers(session, owned)
         + _imported_batch_blockers(session, owned, "recording")
+        + _active_run_blockers(session, owned)
     )
