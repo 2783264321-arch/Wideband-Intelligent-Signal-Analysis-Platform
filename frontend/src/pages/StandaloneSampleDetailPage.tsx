@@ -11,6 +11,7 @@ import { useLocalization } from "../localization/useLocalization";
 import type { AnalysisRun, DeleteBlocker, RecordingDetail } from "../api/types";
 import { DeleteConfirmModal } from "../features/data-library/DeleteConfirmModal";
 import { DeleteConflictAlert } from "../features/data-library/DeleteConflictAlert";
+import { CompareShortcut } from "../features/algorithm-lab/CompareShortcut";
 
 export function StandaloneSampleDetailPage() {
   const { recordingId = "" } = useParams();
@@ -80,7 +81,7 @@ export function StandaloneSampleDetailPage() {
 
       <Space>
         <Button type="primary" onClick={() => navigate(`/spectrum/${recordingId}`)}>
-          {t("dataLibrary.openWorkspace")}
+          {t("dataLibrary.analyze")}
         </Button>
         <Button danger onClick={() => { setBlockers([]); setConfirmOpen(true); }}>
           {t("dataLibrary.delete")}
@@ -101,6 +102,17 @@ export function StandaloneSampleDetailPage() {
               </Space>
             </List.Item>
           )}
+        />
+      </Card>
+
+      <Card title={t("common.compare")}>
+        <CompareShortcut
+          recordingId={recordingId}
+          hasGroundTruth={recording?.hasGroundTruth ?? false}
+          runs={runs}
+          onCompare={(runA, runB) =>
+            navigate(`/algorithm-lab?recording=${recordingId}&runA=${runA}&runB=${runB}`)
+          }
         />
       </Card>
 

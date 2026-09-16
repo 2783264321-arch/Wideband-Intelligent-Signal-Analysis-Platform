@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { StandaloneSampleDetailPage } from "./StandaloneSampleDetailPage";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
@@ -51,12 +51,18 @@ function route(url: string, init?: RequestInit): Response {
   return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
 function renderPage() {
   return render(
     renderWithLocalization(
       <MemoryRouter initialEntries={["/data-library/samples/rec_1"]}>
         <Routes>
           <Route path="/data-library/samples/:recordingId" element={<StandaloneSampleDetailPage />} />
+          <Route path="/algorithm-lab" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
     ),
@@ -101,4 +107,34 @@ test("frequency range is labelled distinctly from source", async () => {
   await screen.findAllByTestId("run-history-item");
   expect(screen.getByText("Frequency Range")).toBeInTheDocument();
   expect(screen.getAllByText("Source")).toHaveLength(1);
+});
+
+import userEvent from "@testing-library/user-event";
+
+test("compare shortcut navigates with recording/runA/runB business state", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if ((init?.method ?? "GET") === "DELETE") return new Response(null, { status: 204 });
+    if (url.includes("/api/analysis-runs")) {
+      return new Response(
+        JSON.stringify([runWire("run_a", "completed"), runWire("run_b", "completed")]),
+        { status: 200 },
+      );
+    }
+    if (url.includes("/api/recordings/rec_1")) {
+      return new Response(JSON.stringify({ ...recordingWire, has_ground_truth: true }), {
+        status: 200,
+      });
+    }
+    return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+  }));
+
+  renderPage();
+  await screen.findAllByTestId("run-history-item");
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("checkbox", { name: "run_a" }));
+  await user.click(screen.getByRole("checkbox", { name: "run_b" }));
+  await user.click(screen.getByRole("button", { name: "Compare" }));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent(
+    "/algorithm-lab?recording=rec_1&runA=run_a&runB=run_b",
+  );
 });
