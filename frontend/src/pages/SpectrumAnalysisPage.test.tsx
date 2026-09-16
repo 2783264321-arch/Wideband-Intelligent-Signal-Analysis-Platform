@@ -368,12 +368,7 @@ test("completed remote run renders allowlisted metadata only", async () => {
 test("exposes STFT Energy Detector with detection-only copy and submits its id", async () => {
   const { posted } = setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable });
   await screen.findByText("Burst Demo");
-  expect(screen.getByText("Dummy Pipeline · CPU")).toBeInTheDocument();
-
-  fireEvent.mouseDown(screen.getByText("Dummy Pipeline · CPU"));
-  const detectorOption = await screen.findByTitle("STFT Energy Detector · CPU · Detection & localization only");
-  fireEvent.click(detectorOption);
-  await waitFor(() => expect(screen.getAllByText("STFT Energy Detector · CPU · Detection & localization only").length).toBeGreaterThan(0));
+  expect(screen.getByText("STFT Energy Detector · CPU · Detection & localization only")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "Run Analysis" }));
   await waitFor(() => expect(posted.length).toBe(1));
@@ -503,10 +498,8 @@ test("localizes the active run control in zh-CN", async () => {
 test("localizes the detection-only pipeline capability copy in zh-CN and preserves pipeline identity", async () => {
   setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable, locale: "zh-CN" });
   await screen.findByText("Burst Demo");
-  fireEvent.mouseDown(screen.getByText("Dummy Pipeline · CPU"));
-  const option = await screen.findByTitle("STFT Energy Detector · CPU · 仅检测与定位");
-  expect(option).toBeInTheDocument();
-  expect(screen.queryByTitle(/Detection & localization only/)).toBeNull();
+  expect(await screen.findByText("STFT Energy Detector · CPU · 仅检测与定位")).toBeInTheDocument();
+  expect(screen.queryByText(/Detection & localization only/)).toBeNull();
 });
 
 test("localizes the selected-detection label in zh-CN while preserving raw class identity", async () => {
@@ -538,4 +531,14 @@ test("localizes the spectrum error shell in zh-CN and preserves the raw backend 
   expect(await screen.findByText("无法打开频谱工作台")).toBeInTheDocument();
   expect(screen.queryByText("Unable to open spectrum workspace")).toBeNull();
   expect(screen.getByText(/BOOM: transient/)).toBeInTheDocument();
+});
+
+test("defaults to STFT Energy Detector instead of a placeholder pipeline", async () => {
+  const { posted } = setup({ pipelines: [remotePipeline, detectorPipeline], selection: selectionLocalAvailable });
+  await screen.findByText("Burst Demo");
+  const runButton = await screen.findByRole("button", { name: "Run Analysis" });
+  await waitFor(() => expect(runButton).not.toBeDisabled());
+  fireEvent.click(runButton);
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toMatchObject({ pipeline_id: "stft_energy_detector", execution_mode: "auto" });
 });

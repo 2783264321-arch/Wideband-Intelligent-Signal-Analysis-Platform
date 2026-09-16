@@ -39,6 +39,11 @@ FROZEN_AUTHORITY_ITEM_CODES = (
 )
 
 
+# Pragmatic Standard Mode allowlist: built-in, release-less CPU pipelines that a
+# Standard-Mode provider may serve without an execution certificate.
+STANDARD_MODE_PIPELINE_IDS = frozenset({"stft_energy_detector"})
+
+
 @dataclass(frozen=True)
 class RuntimeDescriptor:
     executor: str
@@ -258,13 +263,47 @@ class ExecutorRegistry:
             technical=definition.technical_execution_capabilities,
         )
 
+    def _standard_capability(
+        self,
+        provider: ExecutorProvider,
+        definition: PipelineDefinition,
+        model_release_id: str | None,
+    ) -> ExecutionCapability | None:
+        """Standard-Mode allowance for a built-in release-less CPU pipeline.
+
+        Returns the matching technical capability when a Standard-Mode provider
+        serves an allowlisted pipeline, without manufacturing a certificate.
+        Strict/certified providers are unaffected: they must still present an
+        exact execution certificate.
+        """
+        if not getattr(provider, "standard_mode", False):
+            return None
+        if definition.model_release_required or model_release_id is not None:
+            return None
+        if definition.plugin_id not in STANDARD_MODE_PIPELINE_IDS:
+            return None
+        descriptor = provider.runtime_descriptor()
+        if descriptor is None or descriptor.executor != provider.name:
+            return None
+        for capability in definition.technical_execution_capabilities:
+            if (
+                capability.executor == descriptor.executor
+                and capability.device_type == descriptor.device_type
+                and capability.precision == descriptor.precision
+            ):
+                return capability
+        return None
+
     def certified_executors(
         self, definition: PipelineDefinition, model_release_id: str | None
     ) -> dict[str, list[ExecutionCapability]]:
         certified: dict[str, list[ExecutionCapability]] = {}
         for name, provider in self._providers.items():
-            capabilities = self.certified_capabilities(
-                definition, model_release_id, provider.runtime_ref
+            standard = self._standard_capability(provider, definition, model_release_id)
+            capabilities = (
+                [standard]
+                if standard is not None
+                else self.certified_capabilities(definition, model_release_id, provider.runtime_ref)
             )
             if capabilities:
                 certified[name] = capabilities
@@ -296,6 +335,9 @@ class ExecutorRegistry:
         ]
         if not technical:
             return None
+        standard = self._standard_capability(provider, definition, model_release_id)
+        if standard is not None:
+            return standard
         certified = self._certificates.certified_capabilities(
             plugin_id=definition.plugin_id,
             plugin_version=definition.plugin_version,

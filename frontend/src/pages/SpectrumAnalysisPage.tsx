@@ -27,6 +27,20 @@ function pipelineOptionLabel(item: PipelineDefinition, t: (key: MessageKey) => s
   return base;
 }
 
+/**
+ * User-friendly initial pipeline: prefer the built-in STFT Energy Detector,
+ * then any detection/localization pipeline, then the first available pipeline.
+ * Never keep a stale/absent selection, and never default to a placeholder.
+ */
+function preferredPipelineId(pipelines: PipelineDefinition[], current: string): string {
+  if (current && pipelines.some((item) => item.id === current)) return current;
+  const preferred =
+    pipelines.find((item) => item.id === "stft_energy_detector") ??
+    pipelines.find((item) => item.taskCapability === "detection_localization") ??
+    pipelines[0];
+  return preferred?.id ?? "";
+}
+
 export function SpectrumAnalysisPage() {
   const navigate = useNavigate();
   const { recordingId = "" } = useParams();
@@ -39,7 +53,7 @@ export function SpectrumAnalysisPage() {
   const [detections, setDetections] = useState<DetectionResult[]>([]);
   const [groundTruth, setGroundTruth] = useState<GroundTruthResult[]>([]);
   const [pipelines, setPipelines] = useState<PipelineDefinition[]>([]);
-  const [pipelineId, setPipelineId] = useState("dummy");
+  const [pipelineId, setPipelineId] = useState("");
   const [currentRun, setCurrentRun] = useState<AnalysisRun | null>(null);
   const [showPredictions, setShowPredictions] = useState(true);
   const [showGroundTruth, setShowGroundTruth] = useState(false);
@@ -65,7 +79,7 @@ export function SpectrumAnalysisPage() {
         setRecording(nextRecording);
         setSpectrogram(nextSpectrogram);
         setPipelines(nextPipelines);
-        if (nextPipelines.length && !nextPipelines.some((item) => item.id === pipelineId)) setPipelineId(nextPipelines[0].id);
+        if (nextPipelines.length) setPipelineId((current) => preferredPipelineId(nextPipelines, current));
         const [nextDetections, nextGroundTruth, nextRun] = await Promise.all([
           runId ? getDetections(runId) : Promise.resolve([]),
           nextRecording.hasGroundTruth ? getGroundTruth(recordingId) : Promise.resolve([]),
@@ -92,7 +106,7 @@ export function SpectrumAnalysisPage() {
     setSelectionError(null);
     setSelectionLoading(false);
     setEnvironment({ mode: "auto", executor: null });
-    if (!recording || !pipelines.length) return undefined;
+    if (!recording || !pipelines.length || !pipelineId) return undefined;
     const scopeKey = scopeKeyFor(recordingId, pipelineId);
     let active = true;
     setSelectionLoading(true);

@@ -1,10 +1,16 @@
 """M9.2-D2 local inference-worker executor providers.
 
-Local CPU/GPU plugin inference must run in a separate, explicitly configured ML
-interpreter, never the control-plane ``sys.executable`` and never the legacy
-``app.analysis.worker``. A provider is registered only when both its interpreter
-and its immutable runtime generation label are configured; otherwise that executor
-is unavailable (fail closed).
+Strict/qualified local CPU/GPU plugin inference must run in a separate,
+explicitly configured ML interpreter and never the legacy
+``app.analysis.worker``. A strict provider is registered only when both its
+interpreter and its immutable runtime generation label are configured;
+otherwise that executor is unavailable (fail closed).
+
+Pragmatic Standard Mode adds a built-in, unqualified local CPU provider used
+only when no explicit ``local_cpu`` provider is configured. It runs the
+release-less built-in CPU detection pipeline in a separate subprocess using the
+control-plane interpreter (never inline in the API process) and never
+manufactures a qualification certificate.
 
 The worker entrypoint body is implemented in D2B
 (``app.analysis.local_inference_worker``); D2 owns only provider construction and
@@ -16,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 from app.analysis.schema import ExecutorAvailabilityRead
 from app.core.config import Settings
@@ -249,4 +256,54 @@ def build_local_providers(settings: Settings) -> dict[str, LocalInferenceWorkerP
             executor_kind=executor_kind,
             settings=settings,
         )
+    return providers
+
+
+# Pragmatic Standard Mode: a built-in, unqualified local CPU path for the
+# platform's own release-less CPU detection pipeline. It runs the real inference
+# in a separate subprocess (never inline in the API process) using the
+# control-plane interpreter. It never replaces an explicitly configured,
+# qualified local_cpu provider.
+STANDARD_LOCAL_CPU_RUNTIME_REF = "local:builtin:cpu:standard"
+
+
+class StandardLocalCpuProvider(LocalInferenceWorkerProvider):
+    """Built-in local CPU provider used when no explicit local_cpu is configured."""
+
+    standard_mode = True
+
+    def __init__(
+        self,
+        *,
+        interpreter: Path,
+        work_root: Path | None,
+        settings: Settings | None = None,
+    ) -> None:
+        super().__init__(
+            interpreter=interpreter,
+            runtime_ref=STANDARD_LOCAL_CPU_RUNTIME_REF,
+            work_root=work_root,
+            executor_kind="local_cpu",
+            settings=settings,
+        )
+
+
+def build_standard_local_cpu_provider(settings: Settings) -> StandardLocalCpuProvider:
+    return StandardLocalCpuProvider(
+        interpreter=Path(sys.executable),
+        work_root=settings.local_inference_work_root,
+        settings=settings,
+    )
+
+
+def build_deployment_local_providers(settings: Settings) -> dict[str, LocalInferenceWorkerProvider]:
+    """Deployment provider set for Standard Mode.
+
+    Strict, explicitly configured providers always take precedence. When no
+    explicit ``local_cpu`` provider is configured, the built-in Standard-Mode
+    local CPU provider fills the gap for release-less built-in pipelines.
+    """
+    providers: dict[str, LocalInferenceWorkerProvider] = dict(build_local_providers(settings))
+    if "local_cpu" not in providers:
+        providers["local_cpu"] = build_standard_local_cpu_provider(settings)
     return providers

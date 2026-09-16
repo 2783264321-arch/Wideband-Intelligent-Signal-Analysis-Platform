@@ -32,7 +32,7 @@ from app.imported_runs.router import router as imported_runs_router
 from app.pipelines.registry import create_pipeline_registry
 from app.remote_execution.coordinator_job_manager import CoordinatorJobManager
 from app.remote_execution.model_release import ModelReleaseStore, load_model_release_defaults
-from app.analysis.local_executor import build_local_providers
+from app.analysis.local_executor import build_deployment_local_providers
 from app.remote_execution.runtime import (
     ExecutionCertificateStore,
     ExecutorRegistry,
@@ -50,7 +50,7 @@ def _build_certificate_store(settings) -> ExecutionCertificateStore:
 
 
 def _build_executor_registry(app, settings) -> ExecutorRegistry:
-    providers = dict(build_local_providers(settings))
+    providers = dict(build_deployment_local_providers(settings))
     remote = getattr(app.state, "remote_executor_provider", None)
     if remote is not None:
         providers[remote.name] = remote
