@@ -518,10 +518,13 @@ export async function getAnalysisRun(runId: string): Promise<import("./types").A
   return mapAnalysisRun(await apiGet<AnalysisRunWire>(`/api/analysis-runs/${runId}`));
 }
 
-export async function listAnalysisRuns(recordingId: string): Promise<import("./types").AnalysisRun[]> {
-  const items = await apiGet<AnalysisRunWire[]>(
-    `/api/analysis-runs?recording_id=${encodeURIComponent(recordingId)}&status=completed`,
-  );
+export async function listAnalysisRuns(
+  recordingId: string,
+  status: import("./types").AnalysisRunStatus | null = "completed",
+): Promise<import("./types").AnalysisRun[]> {
+  const base = `/api/analysis-runs?recording_id=${encodeURIComponent(recordingId)}`;
+  const query = status === null ? base : `${base}&status=${encodeURIComponent(status)}`;
+  const items = await apiGet<AnalysisRunWire[]>(query);
   return items.map(mapAnalysisRun);
 }
 

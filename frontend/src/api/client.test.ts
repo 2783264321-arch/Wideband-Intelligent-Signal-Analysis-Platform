@@ -753,3 +753,17 @@ test("resolved imported batch keeps projection identity and posts it on create",
   await createDatasetBenchmark({ name: "e", resolution });
   expect(posted!.dataset_projection_id).toBe("dsproj_A");
 });
+
+import { listAnalysisRuns } from "./client";
+
+test("listAnalysisRuns defaults to completed and omits status when null", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    urls.push(String(url));
+    return new Response(JSON.stringify([]), { status: 200 });
+  }));
+  await listAnalysisRuns("rec_1");
+  await listAnalysisRuns("rec_1", null);
+  expect(urls[0]).toContain("status=completed");
+  expect(urls[1]).not.toContain("status=");
+});
