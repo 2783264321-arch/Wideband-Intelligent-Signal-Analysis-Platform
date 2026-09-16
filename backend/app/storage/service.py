@@ -29,3 +29,19 @@ class StorageService:
 
     def import_temp_dir(self, token: str) -> Path:
         return self._safe_child("imports", token)
+
+    def _safe_child_no_mkdir(self, *parts: str) -> Path:
+        for part in parts:
+            if not part or part in {".", ".."} or "/" in part or "\\" in part:
+                raise PlatformError("INVALID_PATH", "Storage path component is invalid.")
+        path = self.data_root.joinpath(*parts).resolve()
+        if self.data_root not in path.parents and path != self.data_root:
+            raise PlatformError("INVALID_PATH", "Storage path escapes the data root.")
+        return path
+
+    def import_package_dir(self, run_id: str) -> Path:
+        """WISA-owned single-import package directory (may not exist yet)."""
+        return self._safe_child_no_mkdir("imports", run_id)
+
+    def quarantine_root(self) -> Path:
+        return self._safe_child("quarantine")

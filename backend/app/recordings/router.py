@@ -2,6 +2,7 @@ from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 
 from app.recordings.schema import RecordingListRead, RecordingRead
 from app.recordings.service import RecordingService
+from app.lifecycle.service import delete_standalone_recording
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
 
@@ -46,3 +47,9 @@ def list_recordings(request: Request, limit: int = Query(100, ge=1, le=500), off
 def get_recording(recording_id: str, request: Request):
     with request.app.state.database.session_factory() as session:
         return _service(request, session).get(recording_id)
+
+
+@router.delete("/{recording_id}", status_code=204)
+def delete_recording(recording_id: str, request: Request):
+    with request.app.state.database.session_factory() as session:
+        delete_standalone_recording(session, request.app.state.storage, recording_id)
