@@ -31,8 +31,8 @@ export function ExperimentComparePanel() {
   const [error, setError] = useState<string | null>(null);
   // Only the request that owns the current generation may set result/error.
   const compareGenerationRef = useRef(0);
-  // Identity of the URL pair already auto-hydrated (business state is URL-authoritative).
-  const lastAutoPairRef = useRef<string | null>(null);
+  // Most recent URL pair already processed (business state is URL-authoritative).
+  const lastProcessedPairRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -85,15 +85,24 @@ export function ExperimentComparePanel() {
   const preselectA = searchParams.get("a");
   const preselectB = searchParams.get("b");
   useEffect(() => {
-    if (!preselectA || !preselectB || evaluations.length === 0) return;
-    const pairKey = `${preselectA}\u0000${preselectB}`;
-    if (lastAutoPairRef.current === pairKey) return;
+    if (evaluations.length === 0) return;
+    const pairKey = preselectA && preselectB ? `${preselectA}\u0000${preselectB}` : null;
+    if (lastProcessedPairRef.current === pairKey) return;
+    // Any URL pair change invalidates the previous generation BEFORE validity is decided.
+    lastProcessedPairRef.current = pairKey;
+    invalidateComparison();
+    if (pairKey === null) {
+      setAId(null);
+      setBId(null);
+      return;
+    }
     const a = eligible.find((evaluation) => evaluation.id === preselectA);
     const b = eligible.find((evaluation) => evaluation.id === preselectB);
-    if (!a || !b || a.id === b.id) return;
-    lastAutoPairRef.current = pairKey;
-    setResult(null);
-    setError(null);
+    if (!a || !b || a.id === b.id) {
+      setAId(null);
+      setBId(null);
+      return;
+    }
     setAId(a.id);
     setBId(b.id);
     void compareEvaluations(a.id, b.id);

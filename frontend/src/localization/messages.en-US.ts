@@ -248,10 +248,10 @@ export const enUS = {
   "evaluation.metricsUnavailable": "Evaluation metrics are not available yet.",
 
   "compare.title": "Compare",
-  "compare.empty": "No completed experiments with linked evaluations to compare.",
+  "compare.empty": "No completed evaluations to compare.",
   "compare.notComparable": "Not comparable",
-  "compare.selectA": "Experiment A",
-  "compare.selectB": "Experiment B",
+  "compare.selectA": "Evaluation A",
+  "compare.selectB": "Evaluation B",
   "compare.openRecordingInAlgorithmLab": "Open recording in Algorithm Lab",
   "compare.columnMetric": "Metric",
   "compare.columnDelta": "Delta",

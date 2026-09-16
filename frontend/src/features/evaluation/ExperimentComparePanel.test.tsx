@@ -44,9 +44,9 @@ test("manual comparison of two completed evaluations renders not-comparable reas
   }));
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
 
-  await screen.findByLabelText("Experiment A");
-  await choose("Experiment A", "Eval A");
-  await choose("Experiment B", "Eval B");
+  await screen.findByLabelText("Evaluation A");
+  await choose("Evaluation A", "Eval A");
+  await choose("Evaluation B", "Eval B");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
   expect(await screen.findByText("label_space_mismatch")).toBeInTheDocument();
 });
@@ -64,13 +64,13 @@ test("changing a selected evaluation clears the previous result", async () => {
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
-  await screen.findByLabelText("Experiment A");
-  await choose("Experiment A", "Eval A");
-  await choose("Experiment B", "Eval B");
+  await screen.findByLabelText("Evaluation A");
+  await choose("Evaluation A", "Eval A");
+  await choose("Evaluation B", "Eval B");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
   expect(await screen.findByTestId("compare-delta-table")).toBeInTheDocument();
 
-  await choose("Experiment A", "Eval C");
+  await choose("Evaluation A", "Eval C");
   expect(screen.queryByTestId("compare-delta-table")).toBeNull();
 });
 
@@ -80,7 +80,7 @@ test("shows an explicit empty state when no comparison is possible", async () =>
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
-  expect(await screen.findByText(/No completed experiments with linked evaluations to compare/i)).toBeInTheDocument();
+  expect(await screen.findByText(/No completed evaluations to compare/i)).toBeInTheDocument();
 });
 
 test("a stale compare success cannot render against a changed identity", async () => {
@@ -101,12 +101,12 @@ test("a stale compare success cannot render against a changed identity", async (
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
-  await screen.findByLabelText("Experiment A");
-  await choose("Experiment A", "Eval A1");
-  await choose("Experiment B", "Eval B1");
+  await screen.findByLabelText("Evaluation A");
+  await choose("Evaluation A", "Eval A1");
+  await choose("Evaluation B", "Eval B1");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
 
-  await choose("Experiment A", "Eval A2");
+  await choose("Evaluation A", "Eval A2");
   await act(async () => { resolveR1?.(new Response(JSON.stringify(compareResult(false, "STALE_A1B1")))); await Promise.resolve(); });
   expect(screen.queryByText("STALE_A1B1")).toBeNull();
 
@@ -132,12 +132,12 @@ test("a stale compare error cannot render against a changed identity", async () 
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
-  await screen.findByLabelText("Experiment A");
-  await choose("Experiment A", "Eval A1");
-  await choose("Experiment B", "Eval B1");
+  await screen.findByLabelText("Evaluation A");
+  await choose("Evaluation A", "Eval A1");
+  await choose("Evaluation B", "Eval B1");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
 
-  await choose("Experiment A", "Eval A2");
+  await choose("Evaluation A", "Eval A2");
   await act(async () => {
     resolveR1?.(new Response(JSON.stringify({ error: { code: "STALE_ERR", message: "old pair failed", details: {} } }), { status: 409 }));
     await Promise.resolve();
@@ -216,4 +216,42 @@ test("URL pair change rehydrates once and does not duplicate requests", async ()
   fireEvent.click(screen.getByRole("button", { name: "go-cd" }));
   await act(async () => { await Promise.resolve(); });
   expect(compareBodies).toHaveLength(2);
+});
+
+test("changing to an invalid pair invalidates the in-flight valid comparison", async () => {
+  let resolveAB: ((value: Response) => void) | undefined;
+  const ab = new Promise<Response>((resolve) => { resolveAB = resolve; });
+  const compareBodies: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("/api/dataset-benchmarks/compare")) {
+      compareBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return ab;
+    }
+    if (u.endsWith("/api/dataset-benchmarks")) {
+      return new Response(JSON.stringify([evaluationWire("eval_a", "Eval A"), evaluationWire("eval_b", "Eval B")]));
+    }
+    throw new Error(`Unexpected request: ${u}`);
+  }));
+
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/experiments?tab=compare&a=eval_a&b=eval_b"]}>
+        <ExperimentComparePanel />
+        <NavButton to="/experiments?tab=compare&a=missing&b=eval_b" label="go-invalid" />
+        <NavButton to="/experiments?tab=compare" label="go-none" />
+      </MemoryRouter>,
+    ),
+  );
+  await waitFor(() => expect(compareBodies).toHaveLength(1));
+  expect(compareBodies[0]).toMatchObject({ evaluation_a_id: "eval_a", evaluation_b_id: "eval_b" });
+
+  fireEvent.click(screen.getByRole("button", { name: "go-invalid" }));
+  await act(async () => { resolveAB?.(new Response(JSON.stringify(compareResult(true, "")))); await Promise.resolve(); });
+  expect(screen.queryByTestId("compare-delta-table")).toBeNull();
+  expect(compareBodies).toHaveLength(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "go-none" }));
+  await act(async () => { await Promise.resolve(); });
+  expect(screen.queryByTestId("compare-delta-table")).toBeNull();
 });

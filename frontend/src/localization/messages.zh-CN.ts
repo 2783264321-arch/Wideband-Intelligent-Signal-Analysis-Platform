@@ -254,10 +254,10 @@ export const zhCN: Record<MessageKey, string> = {
   "evaluation.metricsUnavailable": "评测指标暂不可用。",
 
   "compare.title": "对比",
-  "compare.empty": "暂无可用于对比的已完成、且已关联评测的数据集实验。",
+  "compare.empty": "暂无可对比的已完成评测。",
   "compare.notComparable": "不可对比",
-  "compare.selectA": "实验 A",
-  "compare.selectB": "实验 B",
+  "compare.selectA": "评测 A",
+  "compare.selectB": "评测 B",
   "compare.openRecordingInAlgorithmLab": "在算法评测实验室中打开该信号记录",
   "compare.columnMetric": "指标",
   "compare.columnDelta": "差值",
