@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { DatasetDetailPage } from "./DatasetDetailPage";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
@@ -53,7 +53,29 @@ const historyWire = {
   ],
 };
 
-function route(url: string): Response {
+let deleteMode: "ok" | "blocked" = "ok";
+
+function route(url: string, init?: RequestInit): Response {
+  const method = init?.method ?? "GET";
+  if (method === "DELETE" && url.includes("/api/data-library/datasets/dsproj_1")) {
+    if (deleteMode === "blocked") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: "DATASET_REMOVE_BLOCKED",
+            message: "blocked",
+            details: {
+              blockers: [
+                { kind: "active_analysis_run", resource_id: "run_1", reference: "analysis_run" },
+              ],
+            },
+          },
+        }),
+        { status: 409 },
+      );
+    }
+    return new Response(null, { status: 204 });
+  }
   if (url.includes("/analysis-history")) {
     return new Response(JSON.stringify(historyWire), { status: 200 });
   }
@@ -69,12 +91,19 @@ function route(url: string): Response {
   return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
 function renderPage() {
   return render(
     renderWithLocalization(
       <MemoryRouter initialEntries={["/data-library/datasets/dsproj_1"]}>
         <Routes>
           <Route path="/data-library/datasets/:datasetProjectionId" element={<DatasetDetailPage />} />
+          <Route path="/experiments" element={<LocationProbe />} />
+          <Route path="/data-library" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
     ),
@@ -82,9 +111,10 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  deleteMode = "ok";
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => route(String(url))),
+    vi.fn(async (url: string, init?: RequestInit) => route(String(url), init)),
   );
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -112,4 +142,40 @@ test("analysis history renders an imported batch before any evaluation", async (
   const item = await screen.findByTestId("analysis-history-item");
   expect(item).toHaveTextContent("Imported batch");
   expect(item).toHaveTextContent("2500 / 2500");
+});
+
+test("Create Experiment navigates with the exact datasetProjectionId", async () => {
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Analysis History" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Create Dataset Experiment" }));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent(
+    "/experiments?datasetProjectionId=dsproj_1",
+  );
+});
+
+test("Import Batch Analysis Results opens the batch import modal", async () => {
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Analysis History" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Import Batch Analysis Results" }));
+  expect(await screen.findByText("Import Batch Analysis Package")).toBeInTheDocument();
+});
+
+test("Remove Dataset confirms external-file preservation and navigates back on success", async () => {
+  renderPage();
+  await screen.findByTestId("dataset-overview");
+  fireEvent.click(screen.getByRole("button", { name: "Remove Dataset" }));
+  expect(await screen.findByText(/NOT deleted/)).toBeInTheDocument();
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove Dataset" }));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/data-library");
+});
+
+test("blocked removal stays on the page and renders the blocker", async () => {
+  deleteMode = "blocked";
+  renderPage();
+  await screen.findByTestId("dataset-overview");
+  fireEvent.click(screen.getByRole("button", { name: "Remove Dataset" }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove Dataset" }));
+  expect(await screen.findByTestId("delete-conflict-alert")).toHaveTextContent("run_1");
 });

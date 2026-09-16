@@ -95,3 +95,10 @@ test("delete confirmation is explicit", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Delete" }));
   expect(await screen.findByText(/permanently deletes/)).toBeInTheDocument();
 });
+
+test("frequency range is labelled distinctly from source", async () => {
+  renderPage();
+  await screen.findAllByTestId("run-history-item");
+  expect(screen.getByText("Frequency Range")).toBeInTheDocument();
+  expect(screen.getAllByText("Source")).toHaveLength(1);
+});

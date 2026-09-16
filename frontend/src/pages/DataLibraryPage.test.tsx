@@ -111,3 +111,10 @@ test("blocked removal renders the structured blocker", async () => {
   fireEvent.click(within(dialog).getByRole("button", { name: "Remove Dataset" }));
   expect(await screen.findByTestId("delete-conflict-alert")).toHaveTextContent("eval_1");
 });
+
+test("card import results opens the batch import modal", async () => {
+  renderPage();
+  const card = await screen.findByTestId("dataset-card");
+  fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
+  expect(await screen.findByText("Import Batch Analysis Package")).toBeInTheDocument();
+});

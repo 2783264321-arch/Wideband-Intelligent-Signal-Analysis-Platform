@@ -61,6 +61,7 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
   };
 
   if (loading) return <Typography.Text>{t("common.loading")}</Typography.Text>;
+  if (error && items.length === 0) return <Typography.Text type="danger">{error}</Typography.Text>;
   if (items.length === 0) return <Empty description={t("dataLibrary.empty")} />;
 
   return (

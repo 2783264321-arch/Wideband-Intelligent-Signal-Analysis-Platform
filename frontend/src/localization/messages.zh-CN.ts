@@ -25,6 +25,7 @@ export const zhCN: Record<MessageKey, string> = {
   "dataLibrary.sampleCount": "样本数",
   "dataLibrary.groundTruth": "真值标注（GT）",
   "dataLibrary.source": "来源",
+  "dataLibrary.frequencyRange": "频率范围",
   "dataLibrary.external": "外部",
   "dataLibrary.local": "平台托管",
   "dataLibrary.browseSamples": "浏览样本",

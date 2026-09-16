@@ -19,6 +19,7 @@ export const enUS = {
   "dataLibrary.sampleCount": "Samples",
   "dataLibrary.groundTruth": "Ground Truth",
   "dataLibrary.source": "Source",
+  "dataLibrary.frequencyRange": "Frequency Range",
   "dataLibrary.external": "External",
   "dataLibrary.local": "Managed",
   "dataLibrary.browseSamples": "Browse Samples",

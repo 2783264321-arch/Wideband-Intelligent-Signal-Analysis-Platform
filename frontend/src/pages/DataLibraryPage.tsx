@@ -92,7 +92,7 @@ export function DataLibraryPage() {
 
       <Tabs
         items={[
-          { key: "datasets", label: t("dataLibrary.tabDatasets"), children: <DatasetList /> },
+          { key: "datasets", label: t("dataLibrary.tabDatasets"), children: <DatasetList onImportResults={() => setBatchOpen(true)} /> },
           {
             key: "standalone",
             label: t("dataLibrary.tabStandalone"),

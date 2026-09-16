@@ -62,7 +62,7 @@ export function StandaloneSampleDetailPage() {
             },
             {
               key: "range",
-              label: t("dataLibrary.source"),
+              label: t("dataLibrary.frequencyRange"),
               children: `${(recording.frequencyLowHz / 1e6).toFixed(3)}–${(recording.frequencyHighHz / 1e6).toFixed(3)} MHz`,
             },
             {
