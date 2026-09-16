@@ -7,12 +7,8 @@ import { SignalDetailPage } from "../pages/SignalDetailPage";
 import { AlgorithmLabPage } from "../pages/AlgorithmLabPage";
 import { ExperimentsPage } from "../pages/ExperimentsPage";
 import { ExperimentDetailPage } from "../pages/ExperimentDetailPage";
-import { useLocalization } from "../localization/useLocalization";
-
-function SettingsPage() {
-  const { t } = useLocalization();
-  return <div><h2>{t("settings.title")}</h2><p>{t("settings.subtitle")}</p></div>;
-}
+import { SettingsPage } from "../pages/SettingsPage";
+import { UserGuidePage } from "../pages/UserGuidePage";
 
 export function App() {
   return (
@@ -26,6 +22,7 @@ export function App() {
         <Route path="experiments" element={<ExperimentsPage />} />
         <Route path="experiments/:experimentId" element={<ExperimentDetailPage />} />
         <Route path="algorithm-lab" element={<AlgorithmLabPage />} />
+        <Route path="guide" element={<UserGuidePage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/recordings" replace />} />
       </Route>

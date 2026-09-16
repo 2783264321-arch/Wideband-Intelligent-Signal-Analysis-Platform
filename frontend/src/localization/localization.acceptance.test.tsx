@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "../app/App";
 import { LOCALE_STORAGE_KEY, LocalizationProvider } from "./LocalizationProvider";
+import { ThemeProvider } from "../theme/ThemeProvider";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 import { useLocalization } from "./useLocalization";
 import { enUS } from "./messages.en-US";
@@ -26,7 +27,9 @@ function renderApp(initialPath = "/") {
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
       <LocalizationProvider>
-        <App />
+        <ThemeProvider>
+          <App />
+        </ThemeProvider>
       </LocalizationProvider>
     </MemoryRouter>,
   );
@@ -50,7 +53,7 @@ afterEach(() => { window.localStorage.clear(); vi.unstubAllGlobals(); });
 test("a fresh install defaults to zh-CN with document.lang zh-CN and Chinese primary UI", async () => {
   stubShellFetches();
   renderApp();
-  expect(await screen.findByRole("menuitem", { name: /信号记录/ })).toBeInTheDocument();
+  expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /数据集实验/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /算法评测实验室/ })).toBeInTheDocument();
   expect(document.documentElement.lang).toBe("zh-CN");
@@ -61,24 +64,24 @@ test("an invalid persisted locale falls back to zh-CN", async () => {
   stubShellFetches();
   window.localStorage.setItem(LOCALE_STORAGE_KEY, "fr-FR");
   renderApp();
-  expect(await screen.findByRole("menuitem", { name: /信号记录/ })).toBeInTheDocument();
+  expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
   expect(document.documentElement.lang).toBe("zh-CN");
 });
 
 test("the header switch changes to en-US live, without reload, and persists", async () => {
   stubShellFetches();
   renderApp();
-  await screen.findByRole("menuitem", { name: /信号记录/ });
+  await screen.findByRole("menuitem", { name: /数据管理/ });
 
   fireEvent.click(screen.getByText("EN"));
 
-  expect(await screen.findByRole("menuitem", { name: /Recordings/ })).toBeInTheDocument();
-  expect(screen.queryByRole("menuitem", { name: /信号记录/ })).toBeNull();
+  expect(await screen.findByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: /数据管理/ })).toBeNull();
   expect(document.documentElement.lang).toBe("en-US");
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("en-US");
 
   fireEvent.click(screen.getByText("中文"));
-  expect(await screen.findByRole("menuitem", { name: /信号记录/ })).toBeInTheDocument();
+  expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("zh-CN");
 });
 
@@ -87,11 +90,11 @@ test("both locales survive a remount through localStorage", async () => {
 
   window.localStorage.setItem(LOCALE_STORAGE_KEY, "en-US");
   const first = renderApp();
-  expect(await screen.findByRole("menuitem", { name: /Recordings/ })).toBeInTheDocument();
+  expect(await screen.findByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
   first.unmount();
 
   renderApp();
-  expect(await screen.findByRole("menuitem", { name: /Recordings/ })).toBeInTheDocument();
+  expect(await screen.findByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
   expect(document.documentElement.lang).toBe("en-US");
 });
 
@@ -110,13 +113,13 @@ test("Ant Design ConfigProvider locale stays coupled to the application locale",
 // §4 Primary navigation acceptance
 // ---------------------------------------------------------------------------
 
-test("primary navigation is exactly the three intended destinations in both locales", async () => {
+test("primary navigation is exactly the five intended destinations in both locales", async () => {
   const { unmount } = render(renderWithLocalization(
     <MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>,
     { locale: "zh-CN" },
   ));
   const zhItems = await screen.findAllByRole("menuitem");
-  expect(zhItems.map((item) => item.textContent)).toEqual(["信号记录", "数据集实验", "算法评测实验室"]);
+  expect(zhItems.map((item) => item.textContent)).toEqual(["数据管理", "数据集实验", "算法评测实验室", "使用指南", "设置"]);
   unmount();
 
   render(renderWithLocalization(
@@ -124,7 +127,13 @@ test("primary navigation is exactly the three intended destinations in both loca
     { locale: "en-US" },
   ));
   const enItems = await screen.findAllByRole("menuitem");
-  expect(enItems.map((item) => item.textContent)).toEqual(["Recordings", "Experiments", "Algorithm Lab"]);
+  expect(enItems.map((item) => item.textContent)).toEqual([
+    "Data Library",
+    "Dataset Experiments",
+    "Algorithm Lab",
+    "User Guide",
+    "Settings",
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -138,7 +147,7 @@ const TERMINOLOGY: Array<[MessageKey, string, string]> = [
   ["signals.title", "Signals", "信号检测结果"],
   ["signalDetail.title", "Signal Detail", "检测结果详情"],
   ["common.groundTruth", "Ground Truth", "真值标注（GT）"],
-  ["nav.experiments", "Experiments", "数据集实验"],
+  ["nav.experiments", "Dataset Experiments", "数据集实验"],
   ["experiment.itemsTab", "Items", "实验样本"],
   ["experiment.attemptsTab", "Attempts", "执行尝试"],
   ["experiment.evaluationTab", "Evaluation", "评测"],

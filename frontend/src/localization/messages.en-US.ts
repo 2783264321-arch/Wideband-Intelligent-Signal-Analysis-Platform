@@ -11,11 +11,31 @@ export const enUS = {
   "language.en": "EN",
 
   "nav.recordings": "Recordings",
-  "nav.experiments": "Experiments",
+  "nav.dataLibrary": "Data Library",
+  "nav.experiments": "Dataset Experiments",
   "nav.algorithmLab": "Algorithm Lab",
+  "nav.guide": "User Guide",
+  "nav.settings": "Settings",
+
+  "theme.title": "Theme",
+  "theme.system": "System",
+  "theme.light": "Light",
+  "theme.dark": "Dark",
+
+  "sidebar.collapse": "Collapse sidebar",
+  "sidebar.expand": "Expand sidebar",
+
+  "guide.title": "User Guide",
+  "guide.subtitle": "Task-oriented guides for the main WISA workflows.",
+  "guide.open": "Guide",
 
   "settings.title": "Settings",
   "settings.subtitle": "V1 keeps runtime configuration intentionally minimal.",
+  "settings.appearance": "Appearance",
+  "settings.language": "Language",
+  "settings.sidebar": "Sidebar",
+  "settings.sidebarCollapsed": "Collapsed by default",
+  "settings.openGuide": "Open User Guide",
 
   "common.loading": "Loading",
   "common.loadingRecording": "Loading recording and STFT spectrum...",

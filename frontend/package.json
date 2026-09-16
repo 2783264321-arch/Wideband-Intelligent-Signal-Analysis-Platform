@@ -9,12 +9,13 @@
     "test": "vitest"
   },
   "dependencies": {
+    "@ant-design/icons": "latest",
     "@vitejs/plugin-react": "latest",
     "antd": "latest",
+    "marked": "^18.0.13",
     "react": "latest",
     "react-dom": "latest",
-    "react-router-dom": "latest",
-    "@ant-design/icons": "latest"
+    "react-router-dom": "latest"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "latest",
