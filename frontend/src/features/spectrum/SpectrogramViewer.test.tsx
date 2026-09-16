@@ -1,8 +1,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { SpectrogramViewer } from "./SpectrogramViewer";
 import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
-import type { DetectionResult, SpectrogramMeta } from "../../api/types";
+import type { DetectionResult, GroundTruthResult, SpectrogramMeta } from "../../api/types";
 
 const meta: SpectrogramMeta = {
   imageUrl: "",
@@ -27,6 +28,17 @@ const detections: DetectionResult[] = [
     confidence: 0.93,
   },
 ];
+
+const groundTruth = (id: string): GroundTruthResult => ({
+  id,
+  recordingId: "rec",
+  tStartS: 0.1,
+  tEndS: 0.3,
+  fLowHz: 2_410_000_000,
+  fHighHz: 2_430_000_000,
+  classId: 2,
+  className: "WiFi 20MHz 64QAM",
+});
 
 test("selects a detection from its physical-coordinate overlay", () => {
   const onSelectDetection = vi.fn();
@@ -64,16 +76,67 @@ test("reports physical time and frequency under the pointer", () => {
   expect(screen.getByTestId("cursor-readout")).toHaveTextContent("2460.000 MHz");
 });
 
-test("supports zoom and reset without changing physical overlays", () => {
-  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={detections} />));
+test("wheel scrolls the page and does not zoom or prevent default", () => {
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} />));
   const viewer = screen.getByTestId("spectrogram-viewer");
-
-  fireEvent.wheel(viewer, { deltaY: -100 });
-  expect(screen.getByTestId("zoom-readout")).not.toHaveTextContent("1.00×");
-
-  fireEvent.click(screen.getByRole("button", { name: "Reset View" }));
+  const event = new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true });
+  viewer.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(false);
   expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
-  expect(screen.getByLabelText("Select det_002")).toBeInTheDocument();
+});
+
+test("zoom controls change the zoom percentage and fit/reset restore 100%", async () => {
+  const user = userEvent.setup();
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} />));
+  await user.click(screen.getByRole("button", { name: "Zoom out" }));
+  expect(screen.getByTestId("zoom-readout")).not.toHaveTextContent("1.00×");
+  await user.click(screen.getByRole("button", { name: "Zoom in" }));
+  expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
+  await user.click(screen.getByRole("button", { name: "Zoom in" }));
+  await user.click(screen.getByRole("button", { name: "Fit" }));
+  expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
+  await user.click(screen.getByRole("button", { name: "Zoom in" }));
+  await user.click(screen.getByRole("button", { name: "Reset View" }));
+  expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
+});
+
+test("renders distinct ground-truth, prediction, and selected overlays with a legend", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer
+        meta={meta}
+        detections={detections}
+        groundTruth={[groundTruth("gt_1")]}
+        selectedDetectionId="det_002"
+      />,
+    ),
+  );
+  const gt = screen.getByTestId("overlay-gt-gt_1");
+  const selected = screen.getByTestId("overlay-det-det_002");
+  expect(gt).toHaveAttribute("data-overlay", "ground-truth");
+  expect(gt).toHaveAttribute("stroke-dasharray");
+  expect(selected).toHaveAttribute("data-overlay", "prediction");
+  expect(selected).toHaveAttribute("data-selected", "true");
+  expect(Number(selected.getAttribute("stroke-width"))).toBeGreaterThan(
+    Number(gt.getAttribute("stroke-width")),
+  );
+  const legend = screen.getByTestId("spectrogram-legend");
+  expect(legend).toHaveTextContent("Ground Truth");
+  expect(legend).toHaveTextContent("Prediction");
+  expect(legend).toHaveTextContent("Selected prediction");
+});
+
+test("frame aspect follows the intrinsic image aspect", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer meta={{ ...meta, imageUrl: "/x.png" }} detections={[]} />,
+    ),
+  );
+  const img = screen.getByAltText("STFT spectrogram") as HTMLImageElement;
+  Object.defineProperty(img, "naturalWidth", { value: 1200 });
+  Object.defineProperty(img, "naturalHeight", { value: 400 });
+  fireEvent.load(img);
+  expect(screen.getByTestId("spectrogram-viewer").style.aspectRatio).toBe("3 / 1");
 });
 
 test("localizes ordinary controls and hints in zh-CN without changing physical values", () => {
