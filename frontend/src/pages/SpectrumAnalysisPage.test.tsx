@@ -493,7 +493,9 @@ test("localizes the active run control in zh-CN", async () => {
     runFixture: runWire({ status: "running" }),
   });
   await screen.findByText("Burst Demo");
-  fireEvent.click(screen.getByRole("button", { name: "开始分析" }));
+  const runButton = screen.getByRole("button", { name: "开始分析" });
+  await waitFor(() => expect(runButton).not.toBeDisabled());
+  fireEvent.click(runButton);
   await waitFor(() => expect(posted.length).toBe(1));
   expect(await screen.findByRole("button", { name: "分析中…" })).toBeInTheDocument();
 });
