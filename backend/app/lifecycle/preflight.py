@@ -52,15 +52,12 @@ def _fk_run_blockers(session, run_ids: Sequence[str]) -> list[DeleteBlocker]:
     for (evaluation_id,) in rows:
         blockers.append(DeleteBlocker("dataset_evaluation", evaluation_id, "analysis_run"))
     rows = session.execute(
-        select(DatasetExperimentItemModel.experiment_id)
-        .join(
-            DatasetExperimentAttemptModel,
-            DatasetExperimentAttemptModel.experiment_item_id == DatasetExperimentItemModel.id,
+        select(DatasetExperimentAttemptModel.id).where(
+            DatasetExperimentAttemptModel.analysis_run_id.in_(ids)
         )
-        .where(DatasetExperimentAttemptModel.analysis_run_id.in_(ids))
     ).all()
-    for (experiment_id,) in rows:
-        blockers.append(DeleteBlocker("dataset_experiment", experiment_id, "analysis_run"))
+    for (attempt_id,) in rows:
+        blockers.append(DeleteBlocker("dataset_experiment_attempt", attempt_id, "analysis_run"))
     return blockers
 
 

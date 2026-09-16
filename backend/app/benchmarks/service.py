@@ -547,6 +547,25 @@ class DatasetBenchmarkService:
         dataset_projection_id: str | None = None,
     ) -> DatasetEvaluationModel:
         if dataset_projection_id is not None:
+            projection = DatasetProjectionResolver(self.session).get(dataset_projection_id)
+            if dataset_name != projection.dataset_name:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_name does not match the dataset projection.",
+                )
+            if dataset_split != projection.dataset_split:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_split does not match the dataset projection.",
+                )
+            if label_space != (projection.label_space or ""):
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied label_space does not match the dataset projection.",
+                )
+            dataset_name = projection.dataset_name
+            dataset_split = projection.dataset_split
+            label_space = projection.label_space or ""
             frozen = self._build_projection_frozen_manifest(dataset_projection_id)
         else:
             frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)

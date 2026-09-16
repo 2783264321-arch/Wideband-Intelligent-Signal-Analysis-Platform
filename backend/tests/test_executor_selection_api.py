@@ -279,3 +279,70 @@ def test_existing_endpoints_preserved(client):
     })
     assert availability.status_code == 200
     assert availability.json()["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# V1.1 dataset_projection scope (B7)
+# ---------------------------------------------------------------------------
+
+from app.datasets.projection import DatasetProjectionResolver
+from app.execution_selection import router as selection_router_module
+
+
+def _seed_root(client, root: str, count: int) -> None:
+    with client.app.state.database.session_factory() as session:
+        for index in range(count):
+            rid = f"rec_{root}_{index}"
+            data_path = f"/data/{root}/test/{rid}.bin"
+            session.add(RecordingModel(
+                id=rid, name=f"{root}_{index}", data_path=data_path,
+                data_format="float16_interleaved_le", source="spacenet", external_path=data_path,
+                sample_rate_hz=1e6, center_frequency_hz=0.0, frequency_low_hz=-5e5,
+                frequency_high_hz=5e5, num_samples=1000, duration_s=0.001,
+                dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+                has_ground_truth=True,
+            ))
+            add_ground_truth(session, gt_id=f"gt_{root}_{index}", recording_id=rid, class_id=9,
+                             class_name="LoRa 250kHz", t0=0.01, t1=0.02,
+                             f0=2_440_600_000.0, f1=2_440_700_000.0)
+        session.commit()
+
+
+def _projection_id(client, name: str) -> str:
+    with client.app.state.database.session_factory() as session:
+        member = session.query(RecordingModel).filter(RecordingModel.name == name).one()
+        return DatasetProjectionResolver(session).find_for_recording(member).dataset_projection_id
+
+
+def test_projection_scope_uses_exact_member_count(client, monkeypatch):
+    _seed_root(client, "A", 2)
+    _seed_root(client, "B", 20)
+    _default_install(client)
+    pid_a = _projection_id(client, "A_0")
+
+    captured = {}
+    real = selection_router_module.resolve_auto_execution
+
+    def spy(*, definition, model_release, probe_recording, executor_registry, dataset_item_count=None):
+        captured["dataset_item_count"] = dataset_item_count
+        return real(definition=definition, model_release=model_release,
+                    probe_recording=probe_recording, executor_registry=executor_registry,
+                    dataset_item_count=dataset_item_count)
+
+    monkeypatch.setattr(selection_router_module, "resolve_auto_execution", spy)
+    response = client.get("/api/executor-selection", params={
+        "pipeline_id": PLUGIN_ID, "dataset_projection_id": pid_a,
+    })
+    assert response.status_code == 200
+    assert captured["dataset_item_count"] == 2
+    assert captured["dataset_item_count"] != 22
+
+
+def test_projection_scope_mixed_with_legacy_triple_is_rejected(client):
+    _default_install(client)
+    response = client.get("/api/executor-selection", params={
+        "pipeline_id": PLUGIN_ID, "dataset_projection_id": "dsproj_x",
+        "dataset_name": "SpaceNet", "dataset_split": "test", "dataset_label_space": "spacenet_14",
+    })
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "EXECUTION_SELECTION_REQUEST_INVALID"

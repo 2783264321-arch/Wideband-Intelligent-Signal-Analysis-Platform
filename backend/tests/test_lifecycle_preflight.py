@@ -60,3 +60,54 @@ def test_complete_imported_batch_set_is_not_blocked(session):
 
     blockers = find_run_blockers(session, ["run_c_0", "run_c_1"])
     assert all(blocker.kind != "imported_batch" for blocker in blockers)
+
+
+from app.dataset_experiments.model import (
+    DatasetExperimentAttemptModel,
+    DatasetExperimentItemModel,
+    DatasetExperimentModel,
+)
+
+
+def _experiment_attempt(session, *, experiment_id, item_id, attempt_id, recording_id, run_id):
+    session.add(DatasetExperimentModel(
+        id=experiment_id, name="e", dataset_name="SpaceNet", dataset_split="test",
+        dataset_label_space="spacenet_14", recording_manifest_hash="0" * 64,
+        plugin_id="p", plugin_version="1.0", parameters_json={}, executor="local_cpu",
+        runtime_descriptor_json={}, evaluation_protocol="physical_tf_detection_ap_v2",
+        max_concurrency=1, status="running",
+    ))
+    session.add(DatasetExperimentItemModel(
+        id=item_id, experiment_id=experiment_id, manifest_order=0,
+        recording_id=recording_id, status="running",
+    ))
+    session.add(DatasetExperimentAttemptModel(
+        id=attempt_id, experiment_item_id=item_id, attempt_number=1, analysis_run_id=run_id,
+    ))
+
+
+def test_attempt_reference_emits_attempt_blocker(session):
+    add_recording(session, recording_id="rec_att", name="att")
+    add_run(session, run_id="run_att", recording_id="rec_att", executor="local_cpu", status="completed")
+    _experiment_attempt(session, experiment_id="exp_att", item_id="item_att",
+                        attempt_id="attempt_att", recording_id="rec_att", run_id="run_att")
+    session.commit()
+
+    blockers = find_run_blockers(session, ["run_att"])
+    attempt_blockers = [b for b in blockers if b.kind == "dataset_experiment_attempt"]
+    assert len(attempt_blockers) == 1
+    assert attempt_blockers[0].resource_id == "attempt_att"
+    assert attempt_blockers[0].reference == "analysis_run"
+
+
+def test_recording_parent_exposes_attempt_blocker(session):
+    add_recording(session, recording_id="rec_att2", name="att2")
+    add_run(session, run_id="run_att2", recording_id="rec_att2", executor="local_cpu", status="completed")
+    _experiment_attempt(session, experiment_id="exp_att2", item_id="item_att2",
+                        attempt_id="attempt_att2", recording_id="rec_att2", run_id="run_att2")
+    session.commit()
+
+    blockers = find_recording_blockers(session, ["rec_att2"])
+    kinds = {(b.kind, b.resource_id) for b in blockers}
+    assert ("dataset_experiment", "exp_att2") in kinds
+    assert ("dataset_experiment_attempt", "attempt_att2") in kinds

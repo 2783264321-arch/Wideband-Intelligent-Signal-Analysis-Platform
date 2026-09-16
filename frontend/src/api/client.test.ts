@@ -715,3 +715,41 @@ test("dataset_projection executor-selection scope serializes the projection id",
   await getExecutorSelection({ scope: { kind: "dataset_projection", datasetProjectionId: "dsproj_1" }, pipelineId: "p" });
   expect(fetchMock).toHaveBeenCalled();
 });
+
+import { createDatasetBenchmark, resolveImportedBenchmarkBatch } from "./client";
+
+test("createDatasetExperiment sends and maps dataset_projection_id", async () => {
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(body.dataset_projection_id).toBe("dsproj_A");
+    return new Response(JSON.stringify({ dataset_projection_id: "dsproj_A" }), { status: 201 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const experiment = await createDatasetExperiment({
+    name: "e", datasetName: "SpaceNet", datasetSplit: "test", datasetLabelSpace: "spacenet_14",
+    datasetProjectionId: "dsproj_A", pluginId: "p", pluginVersion: "1.0",
+    executionMode: "manual", executor: "local_cpu", parameters: {}, maxConcurrency: 1,
+  });
+  expect(experiment.datasetProjectionId).toBe("dsproj_A");
+});
+
+test("resolved imported batch keeps projection identity and posts it on create", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    import_fingerprint: "f".repeat(64), dataset_name: "SpaceNet", dataset_split: "test",
+    label_space: "spacenet_14", dataset_projection_id: "dsproj_A", pipeline_id: "z",
+    pipeline_version: "1.0", recording_manifest_hash: "0".repeat(64), expected_recordings: 1,
+    resolved_recordings: 1, missing_recordings: 0, conflict_count: 0,
+    entries: [{ manifest_order: 0, recording_id: "rec_1", recording_name: "n",
+      analysis_run_id: "run_1", item_key: "k" }],
+  }), { status: 200 })));
+  const resolution = await resolveImportedBenchmarkBatch("f".repeat(64));
+  expect(resolution.datasetProjectionId).toBe("dsproj_A");
+
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    posted = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ dataset_projection_id: "dsproj_A" }), { status: 201 });
+  }));
+  await createDatasetBenchmark({ name: "e", resolution });
+  expect(posted!.dataset_projection_id).toBe("dsproj_A");
+});

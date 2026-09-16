@@ -130,7 +130,7 @@ def test_evaluation_from_projection_is_scoped_and_persisted(session, tmp_path):
         items.append({"recording_id": entry.recording_id, "analysis_run_id": f"run_{entry.recording_id}"})
     session.commit()
     evaluation = service.prepare_evaluation(
-        name="A eval", dataset_name=None, dataset_split=None, label_space=None,
+        name="A eval", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
         recording_manifest_hash=manifest.recording_manifest_hash, items=items,
         dataset_projection_id=pid_a,
     )
@@ -157,3 +157,59 @@ def test_imported_batch_resolves_against_one_root_only(session, tmp_path):
     assert preview.dataset_projection_id == pid_a
     assert {entry.recording_id for entry in preview.entries} == {recording.id for recording in a}
     assert all(entry.recording_id not in {recording.id for recording in b} for entry in preview.entries)
+
+
+# ---------- B8: evaluation friendly identity validation ----------
+
+import pytest
+
+from app.core.errors import PlatformError
+
+
+def _eval_items(session, manifest, run_prefix):
+    items = []
+    for entry in manifest.entries:
+        run_id = f"run_{run_prefix}_{entry.recording_id}"
+        add_run(session, run_id=run_id, recording_id=entry.recording_id,
+                pipeline_id="stft_energy_detector", pipeline_version="1.0",
+                executor="local_cpu", status="completed")
+        items.append({"recording_id": entry.recording_id, "analysis_run_id": run_id})
+    session.commit()
+    return items
+
+
+def test_evaluation_matching_friendly_fields_succeeds(session, tmp_path):
+    pid_a, _pid_b, _a, _b = _two_roots(session, tmp_path)
+    service = DatasetBenchmarkService(session)
+    manifest = service.prepare_projection_manifest(pid_a)
+    items = _eval_items(session, manifest, "match")
+    evaluation = service.prepare_evaluation(
+        name="ok", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+        recording_manifest_hash=manifest.recording_manifest_hash, items=items,
+        dataset_projection_id=pid_a,
+    )
+    assert evaluation.dataset_name == "SpaceNet"
+    assert evaluation.dataset_split == "test"
+    assert evaluation.label_space == "spacenet_14"
+    assert evaluation.dataset_projection_id == pid_a
+
+
+@pytest.mark.parametrize("field,value", [
+    ("dataset_name", "Other"),
+    ("dataset_split", "train"),
+    ("label_space", "other_14"),
+])
+def test_evaluation_mismatched_friendly_fields_fail_closed(session, tmp_path, field, value):
+    pid_a, _pid_b, _a, _b = _two_roots(session, tmp_path)
+    service = DatasetBenchmarkService(session)
+    manifest = service.prepare_projection_manifest(pid_a)
+    items = _eval_items(session, manifest, field)
+    kwargs = dict(
+        name="bad", dataset_name="SpaceNet", dataset_split="test", label_space="spacenet_14",
+        recording_manifest_hash=manifest.recording_manifest_hash, items=items,
+        dataset_projection_id=pid_a,
+    )
+    kwargs[field] = value
+    with pytest.raises(PlatformError) as excinfo:
+        service.prepare_evaluation(**kwargs)
+    assert excinfo.value.code == "EXECUTION_REQUEST_INVALID"

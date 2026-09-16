@@ -266,6 +266,7 @@ export interface DatasetEvaluation {
   datasetName: string;
   datasetSplit: string;
   labelSpace: string;
+  datasetProjectionId: string | null;
   pipelineId: string;
   pipelineVersion: string;
   status: DatasetEvaluationStatus;
@@ -323,6 +324,7 @@ export interface ImportedBatchResolution {
   datasetName: string;
   datasetSplit: string;
   labelSpace: string;
+  datasetProjectionId: string | null;
   pipelineId: string;
   pipelineVersion: string;
   recordingManifestHash: string;
@@ -421,6 +423,7 @@ export interface DatasetExperiment {
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
+  datasetProjectionId: string | null;
   recordingManifestHash: string;
   pluginId: string;
   pluginVersion: string;
@@ -454,6 +457,7 @@ export interface DatasetExperimentCreateRequest {
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
+  datasetProjectionId?: string | null;
   pluginId: string;
   pluginVersion: string;
   executionMode: ExecutionMode;

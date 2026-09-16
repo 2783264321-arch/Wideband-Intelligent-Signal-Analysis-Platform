@@ -531,6 +531,7 @@ interface DatasetExperimentWire {
   dataset_name: string;
   dataset_split: string;
   dataset_label_space: string;
+  dataset_projection_id: string | null;
   recording_manifest_hash: string;
   plugin_id: string;
   plugin_version: string;
@@ -587,6 +588,7 @@ interface DatasetExperimentCreateWire {
   dataset_name: string;
   dataset_split: string;
   dataset_label_space: string;
+  dataset_projection_id?: string | null;
   plugin_id: string;
   plugin_version: string;
   execution_mode: ExecutionMode;
@@ -604,6 +606,7 @@ function mapDatasetExperiment(item: DatasetExperimentWire): import("./types").Da
     datasetName: item.dataset_name,
     datasetSplit: item.dataset_split,
     datasetLabelSpace: item.dataset_label_space,
+    datasetProjectionId: item.dataset_projection_id,
     recordingManifestHash: item.recording_manifest_hash,
     pluginId: item.plugin_id,
     pluginVersion: item.plugin_version,
@@ -683,6 +686,7 @@ export async function createDatasetExperiment(
     parameters: request.parameters,
     max_concurrency: request.maxConcurrency,
   };
+  if (request.datasetProjectionId != null) wire.dataset_projection_id = request.datasetProjectionId;
   if (request.executor !== undefined) wire.executor = request.executor;
   if (request.modelReleaseId !== undefined) wire.model_release_id = request.modelReleaseId;
   if (request.evaluationProtocol !== undefined) wire.evaluation_protocol = request.evaluationProtocol;
@@ -1011,6 +1015,7 @@ interface DatasetEvaluationWire {
   dataset_name: string;
   dataset_split: string;
   label_space: string;
+  dataset_projection_id: string | null;
   pipeline_id: string;
   pipeline_version: string;
   status: DatasetEvaluationStatus;
@@ -1069,6 +1074,7 @@ interface ImportedBatchResolutionWire {
   dataset_name: string;
   dataset_split: string;
   label_space: string;
+  dataset_projection_id: string | null;
   pipeline_id: string;
   pipeline_version: string;
   recording_manifest_hash: string;
@@ -1158,6 +1164,7 @@ function mapDatasetEvaluation(item: DatasetEvaluationWire): DatasetEvaluation {
     datasetName: item.dataset_name,
     datasetSplit: item.dataset_split,
     labelSpace: item.label_space,
+    datasetProjectionId: item.dataset_projection_id,
     pipelineId: item.pipeline_id,
     pipelineVersion: item.pipeline_version,
     status: item.status,
@@ -1216,6 +1223,7 @@ const mapImportedResolution = (item: ImportedBatchResolutionWire): ImportedBatch
   datasetName: item.dataset_name,
   datasetSplit: item.dataset_split,
   labelSpace: item.label_space,
+  datasetProjectionId: item.dataset_projection_id,
   pipelineId: item.pipeline_id,
   pipelineVersion: item.pipeline_version,
   recordingManifestHash: item.recording_manifest_hash,
@@ -1262,7 +1270,7 @@ export async function createDatasetBenchmark(payload: {
   name: string;
   resolution: ImportedBatchResolution;
 }): Promise<DatasetEvaluation> {
-  return mapDatasetEvaluation(await apiPostJson<DatasetEvaluationWire>("/api/dataset-benchmarks", {
+  const body: Record<string, unknown> = {
     name: payload.name,
     dataset_name: payload.resolution.datasetName,
     dataset_split: payload.resolution.datasetSplit,
@@ -1273,7 +1281,13 @@ export async function createDatasetBenchmark(payload: {
       recording_id: entry.recordingId,
       analysis_run_id: entry.analysisRunId,
     })),
-  }));
+  };
+  if (payload.resolution.datasetProjectionId != null) {
+    body.dataset_projection_id = payload.resolution.datasetProjectionId;
+  }
+  return mapDatasetEvaluation(
+    await apiPostJson<DatasetEvaluationWire>("/api/dataset-benchmarks", body),
+  );
 }
 
 export async function runDatasetBenchmark(id: string): Promise<DatasetEvaluation> {
