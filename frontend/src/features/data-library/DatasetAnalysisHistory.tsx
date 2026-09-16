@@ -5,6 +5,7 @@ import { listDatasetAnalysisHistory } from "../../api/client";
 import { toErrorText } from "../../api/errors";
 import { useLocalization } from "../../localization/useLocalization";
 import type { DatasetAnalysisHistoryItem } from "../../api/types";
+import { DatasetAnalysisCompareEntry } from "./DatasetAnalysisCompareEntry";
 
 export interface DatasetAnalysisHistoryProps {
   datasetProjectionId: string;
@@ -85,6 +86,7 @@ export function DatasetAnalysisHistory({
           </List.Item>
         )}
       />
+      <DatasetAnalysisCompareEntry datasetProjectionId={datasetProjectionId} items={items} />
     </Space>
   );
 }

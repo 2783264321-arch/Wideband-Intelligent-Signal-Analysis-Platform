@@ -179,3 +179,32 @@ test("blocked removal stays on the page and renders the blocker", async () => {
   fireEvent.click(within(dialog).getByRole("button", { name: "Remove Dataset" }));
   expect(await screen.findByTestId("delete-conflict-alert")).toHaveTextContent("run_1");
 });
+
+test("dataset history compare entry selects only evaluations and navigates with a/b", async () => {
+  const richHistory = {
+    dataset_projection_id: "dsproj_1",
+    total: 3,
+    items: [
+      { kind: "evaluation", resource_id: "eval_a", name: "Eval A", pipeline_id: "p", pipeline_version: "1.0", status: "completed", executor: null, expected_items: 1, completed_items: 1, failed_items: 0, coverage: 1.0, created_at: null, dataset_evaluation_id: "eval_a", batch_id: null, archive_sha256: null },
+      { kind: "evaluation", resource_id: "eval_b", name: "Eval B", pipeline_id: "p", pipeline_version: "1.0", status: "completed", executor: null, expected_items: 1, completed_items: 1, failed_items: 0, coverage: 1.0, created_at: null, dataset_evaluation_id: "eval_b", batch_id: null, archive_sha256: null },
+      { kind: "imported_batch", resource_id: "fp1", name: "zoom 1.0", pipeline_id: "zoom", pipeline_version: "1.0", status: "completed", executor: "imported", expected_items: 1, completed_items: 1, failed_items: 0, coverage: 1.0, created_at: null, dataset_evaluation_id: null, batch_id: "b", archive_sha256: null },
+    ],
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (String(url).includes("/analysis-history")) return new Response(JSON.stringify(richHistory), { status: 200 });
+    if (String(url).includes("/samples")) return new Response(JSON.stringify({ dataset_projection_id: "dsproj_1", items: [], total: 0 }), { status: 200 });
+    if (String(url).includes("/api/data-library/datasets/dsproj_1")) return new Response(JSON.stringify(datasetWire), { status: 200 });
+    return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+  }));
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Analysis History" }));
+  const entry = await screen.findByTestId("dataset-analysis-compare-entry");
+  const checkboxes = within(entry).getAllByRole("checkbox");
+  expect(checkboxes).toHaveLength(2);
+  fireEvent.click(within(entry).getByRole("checkbox", { name: "eval_a" }));
+  fireEvent.click(within(entry).getByRole("checkbox", { name: "eval_b" }));
+  fireEvent.click(within(entry).getByRole("button", { name: "Compare" }));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent(
+    "/experiments?tab=compare&a=eval_a&b=eval_b",
+  );
+});

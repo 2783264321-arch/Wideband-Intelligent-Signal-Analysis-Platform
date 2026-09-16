@@ -228,3 +228,34 @@ test("a stale compare error cannot render against a changed A/B identity", async
   });
   expect(screen.queryByText(/STALE_ERR/)).toBeNull();
 });
+
+test("URL a/b preselection runs the comparison once", async () => {
+  const compareCalls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("/api/dataset-benchmarks/compare")) {
+      compareCalls.push(u);
+      return new Response(JSON.stringify({
+        comparable: true, reasons: [], evaluation_a_id: "eval_a", evaluation_b_id: "eval_b",
+        aggregate_a: null, aggregate_b: null, deltas: {},
+      }), { status: 200 });
+    }
+    if (u.includes("/api/dataset-experiments")) {
+      return new Response(JSON.stringify([
+        { id: "exp_a", name: "A", status: "completed", dataset_evaluation_id: "eval_a" },
+        { id: "exp_b", name: "B", status: "completed", dataset_evaluation_id: "eval_b" },
+      ]), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  }));
+
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/experiments?tab=compare&a=eval_a&b=eval_b"]}>
+        <ExperimentComparePanel />
+      </MemoryRouter>,
+    ),
+  );
+  expect(await screen.findByTestId("compare-delta-table")).toBeInTheDocument();
+  expect(compareCalls).toHaveLength(1);
+});
