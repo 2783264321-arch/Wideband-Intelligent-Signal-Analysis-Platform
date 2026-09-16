@@ -667,3 +667,51 @@ test("importBatchRun preserves the structured backend error", async () => {
   expect(err.code).toBe("BATCH_RECORDING_NOT_FOUND");
   expect(err.display).toContain("Recording not found.");
 });
+
+import { deleteBlockersFromError, deleteRecording, listDatasetProjections } from "./client";
+
+test("listDatasetProjections maps wire snake_case to domain camelCase", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    items: [{
+      dataset_projection_id: "dsproj_1", source: "spacenet", dataset_name: "SpaceNet",
+      dataset_split: "test", label_space: "spacenet_14", sample_count: 2500,
+      ground_truth_sample_count: 2500, external: true, source_location: "D:\\SpaceNet\\test",
+    }],
+    total: 1,
+  }), { status: 200 })));
+  const page = await listDatasetProjections();
+  expect(page.total).toBe(1);
+  expect(page.items[0].datasetProjectionId).toBe("dsproj_1");
+  expect(page.items[0].sampleCount).toBe(2500);
+  expect(page.items[0].sourceLocation).toBe("D:\\SpaceNet\\test");
+});
+
+test("deleteRecording resolves on 204 and surfaces structured blockers on 409", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+  await expect(deleteRecording("rec_1")).resolves.toBeUndefined();
+
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    error: {
+      code: "RECORDING_DELETE_BLOCKED", message: "blocked",
+      details: { blockers: [{ kind: "dataset_evaluation", resource_id: "eval_1", reference: "recording" }] },
+    },
+  }), { status: 409 })));
+  const error = await deleteRecording("rec_1").catch((e) => e);
+  expect(deleteBlockersFromError(error)).toEqual([
+    { kind: "dataset_evaluation", resourceId: "eval_1", reference: "recording" },
+  ]);
+});
+
+test("dataset_projection executor-selection scope serializes the projection id", async () => {
+  const fetchMock = vi.fn(async (url: string) => {
+    expect(String(url)).toContain("dataset_projection_id=dsproj_1");
+    expect(String(url)).not.toContain("recording_id=");
+    return new Response(JSON.stringify({
+      requested_mode: "auto", resolved_executor: null, reason_code: "AUTO_NO_RUNNABLE_EXECUTOR",
+      reason: "none", workload_class: "small", candidates: [],
+    }), { status: 200 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  await getExecutorSelection({ scope: { kind: "dataset_projection", datasetProjectionId: "dsproj_1" }, pipelineId: "p" });
+  expect(fetchMock).toHaveBeenCalled();
+});
