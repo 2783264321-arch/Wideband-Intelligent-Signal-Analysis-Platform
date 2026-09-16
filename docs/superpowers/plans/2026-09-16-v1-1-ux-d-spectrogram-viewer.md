@@ -29,11 +29,18 @@ No analytical change to detections or coordinates.
 Mouse wheel performs NORMAL PAGE SCROLLING; it must not zoom the viewer.
 Viewer zoom uses explicit controls only.
 Controls: zoom out, zoom percentage, zoom in, fit, reset.
+Zoom range is MIN_ZOOM = 0.5, FIT/DEFAULT = 1.0, MAX_ZOOM = 8, factor 1.2, so
+    zoom out works from the default view.
 Ground Truth uses a clear green treatment; prediction uses a clear orange
     treatment; the selected prediction uses a high-contrast thicker highlight.
+GT and prediction must also differ by line style/weight, not color alone.
 A legend is visible.
-Semantic distinction must remain clear in both light and dark modes. Colors may
-    follow theme tokens.
+Semantic distinction must remain clear in both light and dark modes. Overlay
+    strokes derive from Ant Design `theme.useToken()` semantic values; do not
+    introduce a separate CSS file or scattered `.wisa-*` stylesheet rules.
+Keep testability attributes: data-overlay="ground-truth",
+    data-overlay="prediction", data-selected="true|false".
+UX-D is frontend-only and MUST NOT modify the API client or API types.
 Distinguish explicitly: model input size, spectrogram raster size, browser
     display size.
 Never force the viewer to 640x640 because a detection model uses 640x640 input.
@@ -86,9 +93,13 @@ Produces:
 ```ts
 // viewerGeometry.ts
 export const DEFAULT_VIEWER_ASPECT_RATIO: number;              // 16 / 8
+export const MIN_ZOOM: number;                                 // 0.5
+export const FIT_ZOOM: number;                                 // 1.0
+export const MAX_ZOOM: number;                                 // 8
+export const ZOOM_FACTOR: number;                              // 1.2
 export interface ViewerNaturalSize { width: number; height: number; }
 export function viewerAspectRatio(natural: ViewerNaturalSize | null): number;
-export function zoomStep(current: number, direction: "in" | "out"): number;  // clamp [1, 8]
+export function zoomStep(current: number, direction: "in" | "out"): number;  // clamp [0.5, 8]
 ```
 
 New message keys:
@@ -153,18 +164,19 @@ test("wheel scrolls the page and does not zoom or prevent default", () => {
 - [ ] Write the failing helper test:
 
 ```ts
-test("zoom step is clamped to [1, 8]", () => {
-  expect(zoomStep(1, "out")).toBe(1);
-  expect(zoomStep(1, "in")).toBeGreaterThan(1);
+test("zoom out works from the default view and clamps at 0.5", () => {
+  expect(zoomStep(1.0, "out")).toBeLessThan(1.0);
+  expect(zoomStep(0.5, "out")).toBe(0.5);
+  expect(zoomStep(1.0, "in")).toBeGreaterThan(1.0);
   expect(zoomStep(8, "in")).toBe(8);
-  expect(zoomStep(8, "out")).toBeLessThan(8);
 });
 ```
 
 - [ ] Implement `viewerGeometry.ts`:
 
 ```ts
-export const MIN_ZOOM = 1;
+export const MIN_ZOOM = 0.5;
+export const FIT_ZOOM = 1.0;
 export const MAX_ZOOM = 8;
 export const ZOOM_FACTOR = 1.2;
 
@@ -179,9 +191,9 @@ export function zoomStep(current: number, direction: "in" | "out"): number {
 ```tsx
 test("zoom controls change the zoom percentage and fit/reset restore 100%", async () => {
   render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} />));
-  await user.click(screen.getByRole("button", { name: "Zoom in" }));
-  expect(screen.getByTestId("zoom-readout")).not.toHaveTextContent("1.00×");
   await user.click(screen.getByRole("button", { name: "Zoom out" }));
+  expect(screen.getByTestId("zoom-readout")).not.toHaveTextContent("1.00×");
+  await user.click(screen.getByRole("button", { name: "Zoom in" }));
   expect(screen.getByTestId("zoom-readout")).toHaveTextContent("1.00×");
   await user.click(screen.getByRole("button", { name: "Zoom in" }));
   await user.click(screen.getByRole("button", { name: "Fit" }));
@@ -232,20 +244,27 @@ test("renders distinct ground-truth, prediction, and selected overlays with a le
 });
 ```
 
-- [ ] Render GT rects with `data-overlay="ground-truth"` and class
-      `wisa-overlay-gt`; predictions with `data-overlay="prediction"` and class
-      `wisa-overlay-pred`; the selected prediction additionally sets
-      `data-selected="true"` and class `wisa-overlay-pred-selected`.
-- [ ] Define semantic colors via CSS variables with dark/light-safe defaults:
+- [ ] Render GT rects with `data-overlay="ground-truth"`; predictions with
+      `data-overlay="prediction"`; the selected prediction additionally sets
+      `data-selected="true"`.
+- [ ] Derive overlay strokes from Ant Design tokens and semantic constants via
+      `const { token } = theme.useToken();`. Do not add a stylesheet:
 
-```css
-.wisa-overlay-gt { stroke: var(--wisa-overlay-gt, #16a34a); }
-.wisa-overlay-pred { stroke: var(--wisa-overlay-pred, #ea580c); }
-.wisa-overlay-pred-selected { stroke: var(--wisa-overlay-pred-strong, #f59e0b); stroke-width: 0.9; }
+```tsx
+const GT_STROKE = token.colorSuccess;          // clear green
+const PRED_STROKE = token.colorWarning;        // clear orange
+const PRED_SELECTED_STROKE = token.colorError; // high-contrast highlight
 ```
 
-  Keep GT dashed and predictions solid so the distinction survives
-  color-vision differences.
+```text
+Ground Truth           stroke = GT_STROKE,   strokeWidth 0.45, strokeDasharray "1.4 1"
+Prediction             stroke = PRED_STROKE, strokeWidth 0.45, solid
+Selected prediction    stroke = PRED_SELECTED_STROKE, strokeWidth 0.9, solid
+```
+
+- [ ] Keep GT dashed and predictions solid (plus the weight difference for the
+      selected prediction) so the distinction survives color-vision
+      differences. Do not rely on color alone.
 - [ ] Add a `data-testid="spectrogram-legend"` legend listing GT, prediction,
       and selected-prediction labels.
 - [ ] Rerun focused test; observe pass.
@@ -335,21 +354,26 @@ test("frame aspect follows the intrinsic image aspect", () => {
 - [ ] Write the failing test:
 
 ```tsx
-test("overlay frame exposes theme-readable semantic classes", () => {
+test("overlay semantics use theme tokens and are not color-only", () => {
   render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={detections}
     groundTruth={[groundTruth("gt_1")]} selectedDetectionId="det_002" />));
-  expect(screen.getByTestId("overlay-gt-gt_1").getAttribute("class")).toContain("wisa-overlay-gt");
-  expect(screen.getByTestId("overlay-det-det_002").getAttribute("class")).toContain("wisa-overlay-pred-selected");
+  const gt = screen.getByTestId("overlay-gt-gt_1");
+  const selected = screen.getByTestId("overlay-det-det_002");
+  expect(gt).toHaveAttribute("data-overlay", "ground-truth");
+  expect(gt).toHaveAttribute("stroke-dasharray");        // GT differs by style
+  expect(selected).toHaveAttribute("data-selected", "true");
+  expect(Number(selected.getAttribute("stroke-width"))).toBeGreaterThan(
+    Number(screen.getByTestId("overlay-gt-gt_1").getAttribute("stroke-width")),
+  );
 });
 ```
 
-- [ ] Ensure the viewer chrome (footer text, legend, cursor readout) uses theme
-      tokens (Ant Design `theme.useToken()` colors or the `data-theme`
-      attribute) rather than fixed hex values, while the spectrogram raster
-      background stays dark for contrast.
-- [ ] Confirm the legend and overlay colors remain distinguishable under both
+- [ ] Ensure the viewer chrome (frame border, footer text, legend, cursor
+      readout) uses Ant Design `theme.useToken()` values rather than fixed hex
+      values, while the spectrogram raster background stays dark for contrast.
+- [ ] Confirm the legend and overlay semantics remain distinguishable under both
       `data-theme="light"` and `data-theme="dark"` by matching on
-      `data-overlay` / `data-selected` rather than exact colors.
+      `data-overlay` / `data-selected` and stroke weight, not exact colors.
 - [ ] Rerun focused test; observe pass.
 - [ ] Commit: `feat(ux-d): theme-readable viewer chrome and legend`
 
@@ -376,5 +400,8 @@ test("overlay frame exposes theme-readable semantic classes", () => {
 [ ] Geometry respects intrinsic image aspect; no forced 640x640.
 [ ] Model input size vs raster size vs display size explicitly distinguished.
 [ ] No backend change; no DSP API redesign; no GPU; no sealed-baseline change.
+[ ] No API client/types change (intrinsic image geometry only).
+[ ] Zoom out works from the default 100% view; range is [0.5, 8].
+[ ] Overlay semantics use theme tokens with no separate stylesheet.
 [ ] Overlay rendering keeps physical-coordinate mapping unchanged.
 ```

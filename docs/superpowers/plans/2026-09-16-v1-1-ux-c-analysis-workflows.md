@@ -7,19 +7,19 @@
 
 **Goal:** Wire the four approved analysis workflows (single sample → one
 pipeline, sample → two-run comparison, dataset → one pipeline, dataset →
-evaluation entry) onto the UX-A shell and UX-B Data Library contracts, and make
-executor availability explainable — with the Local CPU question answered by
-evidence, not by a frontend workaround.
+evaluation entry) onto the UX-A shell and the projection-authoritative UX-B
+contracts, make executor availability explainable, and bring Local CPU to a
+genuinely qualified state on the Windows deployment.
 
-**Architecture:** Two independent streams first (C1 Local CPU diagnosis, C2
-executor candidate-state UX), then dependent wiring (C3–C7) after UX-A and UX-B
-are accepted. UX-C consumes UX-B dataset projection / analysis-history client
-functions and never creates a second dataset representation. The existing
-`SpectrumAnalysisPage`, `AlgorithmLabPage`, `ExperimentsPage`, and
-`ExecutionEnvironmentSelector` are reused.
+**Architecture:** Two independent streams first (C1 Local CPU qualification,
+C2 executor candidate-state UX), then dependent wiring (C3–C7) after UX-A and
+UX-B are accepted and merged into the UX-C branch by ordinary merge ancestry
+(never by rebasing accepted SHAs). Dataset-contextual flows use the opaque
+`dataset_projection_id` end to end — executor selection, experiment creation, and
+evaluation scoping all consume the same UX-B projection authority.
 
 **Tech Stack:** React + TypeScript + Vite + Ant Design + Vitest; FastAPI +
-pytest for the diagnosis tests.
+pytest; the existing `wisa` CLI operator workflow.
 
 **Spec:**
 `docs/superpowers/specs/2026-09-16-v1-1-ux-productization-design.md`
@@ -35,12 +35,16 @@ Never expose secrets, certificate contents, private interpreter paths, SSH
     details, or raw provider telemetry.
 Runnable predicate is authoritative in the backend:
     technical AND configured AND certified AND available.
-The Local CPU question is evidence-driven; do not assume a backend defect.
-Never reintroduce Remote-GPU as the solution.
-Comparison requires exactly two compatible completed runs for the same recording.
-Dataset experiment creation initiated from a dataset page prefills dataset
-    identity (name, split, label space); the user does not retype it.
-Business state stays in the URL. No GPU. No sealed-baseline changes.
+Dataset-contextual flows MUST carry dataset_projection_id end to end; the
+    legacy dataset_name/split/label_space triple MUST NOT be used by V1.1
+    contextual workflows.
+Local CPU acceptance requires the real operator qualification workflow
+    (runtime doctor -> qualify -> certificate install -> registry rebuild ->
+    four-predicate verification -> one CPU-only smoke), not just configuration.
+Algorithm Lab comparison requires: exactly two selected runs, both completed,
+    both for the current recording, AND the recording has Ground Truth.
+Business state stays in the URL. No GPU. No Remote-GPU. No sealed-baseline
+    changes. No new artifact format.
 ```
 
 ---
@@ -62,38 +66,37 @@ frontend/src/pages/WorkflowNavigation.test.tsx
 Modify:
 
 ```text
-frontend/src/features/execution-environment/ExecutionEnvironmentSelector.tsx   (reuse states)
 frontend/src/pages/SpectrumAnalysisPage.tsx        (no-runnable panel)
-frontend/src/features/dataset-experiment/ExperimentCreateForm.tsx  (initialDataset prop)
-frontend/src/features/dataset-experiment/types.ts   (no shape change unless required)
+frontend/src/features/dataset-experiment/ExperimentCreateForm.tsx  (projection identity + scope)
+frontend/src/features/dataset-experiment/types.ts   (projection id pass-through)
 frontend/src/pages/ExperimentsPage.tsx              (datasetProjectionId prefill + compare URL)
 frontend/src/features/evaluation/ExperimentComparePanel.tsx (URL preselection)
-frontend/src/pages/StandaloneSampleDetailPage.tsx   (UX-B file; one additive compare shortcut)
+frontend/src/pages/StandaloneSampleDetailPage.tsx   (UX-B file; additive compare shortcut, GT-gated)
 frontend/src/features/data-library/DatasetAnalysisHistory.tsx (UX-B file; additive compare entry)
-frontend/src/pages/AlgorithmLabPage.tsx             (no analytical change; already UX-A owner)
 frontend/src/localization/messages.en-US.ts
 frontend/src/localization/messages.zh-CN.ts
 ```
+
+Backend: only `backend/tests/test_local_cpu_diagnosis.py` is created, and only
+if the diagnosis proves a defect may
+`backend/app/execution_selection/resolver.py` or
+`backend/app/analysis/local_executor.py` change. No Remote-GPU code.
 
 ---
 
 ## Interfaces
 
-Consumes (from UX-A):
+Consumes (from UX-B; see the UX-B plan for exact shapes):
 
 ```ts
-useTheme, useSidebarCollapsed           // not required by workflow wiring
-readAlgorithmLabRoute                    // not required; Algorithm Lab already URL-driven
-```
-
-Consumes (from UX-B):
-
-```ts
-listDatasetProjections, getDatasetProjection, listDatasetSamples,
-listDatasetAnalysisHistory, listStandaloneSamples
-DatasetProjectionSummary, DatasetAnalysisHistoryItem
-listAnalysisRuns(recordingId)            // existing client
-compareAnalysisRuns({ recordingId, runAId, runBId })  // existing client
+getDatasetProjection(datasetProjectionId): Promise<DatasetProjectionSummary>
+listDatasetAnalysisHistory(datasetProjectionId): Promise<DatasetAnalysisHistoryPage>
+listAnalysisRuns(recordingId): Promise<AnalysisRun[]>            // existing
+compareAnalysisRuns({ recordingId, runAId, runBId }): Promise<AlgorithmLabCompareResponse> // existing
+// UX-B extends the client scope union and request/read types with:
+ExecutionSelectionScope = { kind: "dataset_projection"; datasetProjectionId: string } | ...
+DatasetExperimentCreateRequest.datasetProjectionId?: string | null
+DatasetExperiment.datasetProjectionId: string | null
 ```
 
 Produces:
@@ -102,20 +105,21 @@ Produces:
 // execution-environment/NoRunnableExecutorPanel.tsx
 export interface NoRunnableExecutorPanelProps {
   selection: ExecutorSelection | null;
-  contextKey?: MessageKey;   // e.g. "executionEnv.noRunnableForPipeline"
 }
 export function NoRunnableExecutorPanel(props: NoRunnableExecutorPanelProps): JSX.Element | null;
 
 // algorithm-lab/CompareShortcut.tsx
 export interface CompareShortcutProps {
   recordingId: string;
+  hasGroundTruth: boolean;
   runs: AnalysisRun[];
   onCompare: (runAId: string, runBId: string) => void;
 }
 export function CompareShortcut(props: CompareShortcutProps): JSX.Element;
 
-// dataset-experiment/ExperimentCreateForm.tsx (extended props)
+// dataset-experiment/ExperimentCreateForm.tsx (extended)
 export interface DatasetIdentityInput {
+  datasetProjectionId: string;
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
@@ -126,47 +130,78 @@ export interface ExperimentCreateFormProps {
 }
 ```
 
-Backend diagnosis produces:
-
-```text
-backend/tests/test_local_cpu_diagnosis.py  -> durable outcome record for spec follow-up B
-```
-
 ---
 
-## C1 (independent): Local CPU non-runnable diagnosis
+## C1 (independent): Local CPU qualification
 
 **Files:**
 - Create: `backend/tests/test_local_cpu_diagnosis.py`
 - Read: `backend/app/analysis/local_executor.py`,
   `backend/app/execution_selection/resolver.py`,
-  `backend/app/remote_execution/runtime.py`, `backend/app/core/config.py`
-- Modify (only if the diagnosis proves a defect): `backend/app/analysis/local_executor.py`
-  or `backend/app/execution_selection/resolver.py`
+  `backend/app/remote_execution/runtime.py`, `backend/app/core/config.py`,
+  `backend/app/cli.py`, `backend/app/runtime_qualification/*`
+- Modify (only if the diagnosis proves a defect):
+  `backend/app/execution_selection/resolver.py` or
+  `backend/app/analysis/local_executor.py`
 
 **Interfaces:**
-- Consumes: `build_local_providers(settings)`, `collect_candidates(...)`,
-  `GET /api/executor-selection`.
-- Produces: a recorded diagnosis outcome and, if required, a TDD backend fix.
+- Consumes: `GET /api/executor-selection`; `python -m app.cli` operator workflow.
+- Produces: a legitimately certified, available Windows `local_cpu` executor and
+  one CPU-only AnalysisRun smoke, or an explicit STOP blocker.
 
-- [ ] Run the control plane with the **current Windows deployment environment**
-      (no GPU) and query the candidate matrix for a pipeline that declares
-      `local_cpu` in `technical_execution_capabilities`:
+- [ ] Record the current candidate matrix for a `local_cpu`-capable,
+      release-less pipeline (`stft_energy_detector`) on a compatible Recording:
 
 ```text
-GET /api/executor-selection?recording_id=<rec>&pipeline_id=<pipeline>
+GET /api/executor-selection?recording_id=<rec>&pipeline_id=stft_energy_detector
 ```
 
-- [ ] Record, for the `local_cpu` candidate, the exact booleans
-      `technical / configured / certified / available` and the bounded
-      `reason_code`. The first `false` predicate is the failure point.
-- [ ] Write the diagnosis test that pins the configuration predicate:
+  Record `technical / configured / certified / available` and `reason_code` for
+  the `local_cpu` candidate.
+- [ ] Run the operator diagnostic: `python -m app.cli runtime doctor`.
+- [ ] Never reuse the repository's AutoDL-bound certificate
+      `local:autodl_primary:cpu:a1237f8faae7`. It does not represent Windows.
+- [ ] Configure a **separate Windows CPU inference interpreter** (never the
+      control-plane interpreter merely for convenience) via
+      `WSP_LOCAL_CPU_PYTHON_PATH`, configure `WSP_LOCAL_CPU_RUNTIME_REF` and the
+      Windows-owned `WSP_RUNTIME_FAMILY`, and confirm
+      `build_local_providers(settings)` registers `local_cpu`.
+- [ ] Run qualification against the real interpreter/runtime identity:
+
+```text
+python -m app.cli qualify --plugin stft_energy_detector --executor local_cpu
+```
+
+- [ ] Install the operator certificate produced by qualification:
+
+```text
+python -m app.cli certificate install --from <evidence_dir>
+python -m app.cli certificate list
+```
+
+- [ ] Restart / rebuild the control-plane registry as required (the CLI prints
+      that a certificate becomes effective on the next registry rebuild).
+- [ ] Re-query `/api/executor-selection` and require, for the compatible
+      Recording and `stft_energy_detector`:
+
+```text
+technical = true
+configured = true
+certified  = true
+available  = true
+resolved_executor = local_cpu where the policy selects it
+```
+
+- [ ] Run ONE small real CPU-only `stft_energy_detector` AnalysisRun through
+      `POST /api/analysis-runs` (manual `local_cpu` or Auto) and verify it reaches
+      `completed` with persisted `DetectionResult` rows.
+- [ ] Add and keep the fail-closed unit tests (these are not the acceptance
+      proof, only regression guards):
 
 ```python
 from app.analysis.local_executor import build_local_providers
 
 def test_local_cpu_absent_when_interpreter_and_ref_unset(settings):
-    # Default Windows control-plane Settings have no local interpreter configured.
     assert "local_cpu" not in build_local_providers(settings)
 
 def test_local_cpu_registered_when_interpreter_and_ref_configured(settings, tmp_path):
@@ -175,31 +210,12 @@ def test_local_cpu_registered_when_interpreter_and_ref_configured(settings, tmp_
     assert "local_cpu" in build_local_providers(settings)
 ```
 
+- [ ] If any authority/probe step cannot complete legitimately, STOP and report
+      the exact failed step. Do not fabricate a runtime identity or certificate.
+- [ ] No GPU; no Remote-GPU; no machine-specific interpreter path or operator
+      certificate is committed to Git.
 - [ ] Run `pytest backend/tests/test_local_cpu_diagnosis.py -v`.
-- [ ] Apply the outcome branch exactly as determined by evidence:
-
-```text
-Outcome A — configuration/setup issue (expected when configured == false):
-    Document the required environment variables in the deployment notes:
-        WSP_LOCAL_CPU_PYTHON_PATH
-        WSP_LOCAL_CPU_RUNTIME_REF
-        WSP_RUNTIME_FAMILY            (when the operator authority is enabled)
-    Do not change application logic. Keep the two diagnosis tests as the
-    durable outcome record. Commit: "fix(ux-c): document local_cpu runtime config".
-
-Outcome B — backend logic defect (only if configured/certified are true but a
-    wrong predicate excludes local_cpu):
-    Add a failing test that reproduces the wrong exclusion in
-    backend/tests/test_execution_selection_resolver.py, then fix
-    collect_candidates / resolve_auto_execution in TDD order.
-    Commit: "fix(ux-c): correct local_cpu runnable predicate".
-
-Outcome C — pipeline genuinely CPU-incompatible (technical == false):
-    Add a test asserting the candidate stays technical=false, and rely on the
-    C2 UX to explain the state. Commit: "test(ux-c): pin local_cpu inapplicable".
-```
-
-- [ ] Confirm no Remote-GPU path is introduced in any branch.
+- [ ] Commit: `fix(ux-c): qualify Windows local_cpu execution`
 
 ---
 
@@ -213,10 +229,9 @@ Outcome C — pipeline genuinely CPU-incompatible (technical == false):
   `frontend/src/localization/messages.zh-CN.ts`
 
 **Interfaces:**
-- Consumes: `optionsFromSelection(selection)` from
-  `features/execution-environment/executionEnvironment.ts`.
-- Produces: `NoRunnableExecutorPanel` and two message keys
-  `executionEnv.noRunnableTitle`, `executionEnv.noRunnableHint`.
+- Consumes: `optionsFromSelection(selection)`.
+- Produces: `NoRunnableExecutorPanel` and keys `executionEnv.noRunnableTitle`,
+  `executionEnv.noRunnableHint`.
 
 - [ ] Add message keys:
 
@@ -256,13 +271,11 @@ test("returns null when an executor is runnable", () => {
 });
 ```
 
-- [ ] Implement the panel using `optionsFromSelection` and the existing
-      `executionEnv.*` state labels; show each option's label, state, and
-      `reasonMessage`. Never render paths, secrets, certificate contents, SSH
-      details, or telemetry.
-- [ ] In `SpectrumAnalysisPage.tsx`, render `NoRunnableExecutorPanel` when
-      `boundSelection` exists and no option is enabled. Do **not** enable the
-      Run button.
+- [ ] Implement the panel using `optionsFromSelection` and existing
+      `executionEnv.*` labels; never render paths, secrets, certificate
+      contents, SSH details, or telemetry.
+- [ ] Render `NoRunnableExecutorPanel` in `SpectrumAnalysisPage.tsx` when a
+      selection exists but no option is enabled; do NOT enable Run.
 - [ ] Run `npx vitest run src/features/execution-environment`; observe pass.
 - [ ] Commit: `feat(ux-c): explain non-runnable executor candidates`
 
@@ -271,36 +284,21 @@ test("returns null when an executor is runnable", () => {
 ## C3 (dependent): Data Library sample → one pipeline
 
 **Files:**
-- Modify: `frontend/src/features/data-library/StandaloneSampleList.tsx` and
+- Modify: `frontend/src/features/data-library/StandaloneSampleList.tsx`,
   `frontend/src/pages/StandaloneSampleDetailPage.tsx` (UX-B files; additive
   "Analyze" action)
 - Test: `frontend/src/pages/WorkflowNavigation.test.tsx`
 
 **Interfaces:**
-- Consumes: `listStandaloneSamples`, `getRecording`, existing
-  `SpectrumAnalysisPage` Auto default.
-- Produces: an "Analyze" action routing to `/spectrum/:recordingId`.
+- Consumes: UX-B standalone list, existing `SpectrumAnalysisPage` Auto default.
+- Produces: an "Analyze" primary action routing to `/spectrum/:recordingId`.
 
-- [ ] Apply after UX-B is accepted.
-- [ ] Add the "Analyze" action to the standalone sample row and detail page,
-      routing to `/spectrum/<recordingId>`. (B's "Open Analysis Workspace"
-      already routes there; "Analyze" is the task-model label and must be the
-      primary action.)
-- [ ] Write a failing workflow test:
-
-```tsx
-test("Analyze from a standalone sample opens the spectrum workspace at Auto", async () => {
-  mockFetch.standaloneSamples([{ id: "rec_1", name: "sample-a", ... }]);
-  mockFetch.executorSelection({ requestedMode: "auto", resolvedExecutor: "local_cpu",
-    reasonCode: "AUTO_LOCAL_CPU_PREFERRED", reason: "Local CPU preferred.", workloadClass: "small",
-    candidates: [candidate("local_cpu", true)] });
-  render(<App />, { route: "/data-library" });
-  await user.click(await screen.findByRole("button", { name: "Analyze" }));
-  expect(await screen.findByText("Spectrum Analysis")).toBeInTheDocument();
-  expect(screen.getByText("Auto")).toBeInTheDocument();
-});
-```
-
+- [ ] Apply after UX-A and UX-B are merged into the UX-C branch.
+- [ ] Ensure "Analyze" is the primary standalone-sample action routing to
+      `/spectrum/<recordingId>`.
+- [ ] Write a failing workflow test asserting the workspace opens with Auto and
+      the Run action available (mock fetch for recording/spectrogram/pipelines/
+      executor-selection).
 - [ ] Run focused test; observe pass.
 - [ ] Commit: `feat(ux-c): analyze from a Data Library sample`
 
@@ -312,63 +310,78 @@ test("Analyze from a standalone sample opens the spectrum workspace at Auto", as
 - Create: `frontend/src/features/algorithm-lab/CompareShortcut.tsx`,
   `CompareShortcut.test.tsx`
 - Modify: `frontend/src/pages/StandaloneSampleDetailPage.tsx` (one additive
-  import/render of `CompareShortcut`)
+  render of `CompareShortcut`, passing `hasGroundTruth`)
 - Test: `frontend/src/features/algorithm-lab/CompareShortcut.test.tsx`
 
 **Interfaces:**
-- Consumes: `listAnalysisRuns(recordingId)`.
-- Produces: `CompareShortcut`, routing to
+- Consumes: `listAnalysisRuns(recordingId)`, `getRecording(recordingId)` for
+  `hasGroundTruth`.
+- Produces: `CompareShortcut`; routes to
   `/algorithm-lab?recording=<id>&runA=<a>&runB=<b>`.
 
-- [ ] Define compatibility precisely (from existing behavior):
+- [ ] Define compatibility precisely:
 
 ```text
-A run is selectable for comparison when:
-  run.status === "completed"
-  AND run.recordingId === the current recording
-Exactly two selectable runs must be chosen; the Compare action is disabled
-otherwise. No manual run-id entry is permitted.
+Compare is enabled only when:
+  exactly two runs are selected
+  AND both status === "completed"
+  AND both belong to the current recording
+  AND the recording has Ground Truth (hasGroundTruth === true)
+Otherwise Compare is disabled with a concise localized reason.
+No manual run-id entry is permitted.
 ```
 
-- [ ] Write the failing test:
+- [ ] Add the message key:
+
+```ts
+"algorithmLab.compareRequiresGroundTruth": "Comparison requires Ground Truth for this recording.",
+  // zh: "该信号记录需要真值标注（GT）才能进行对比。"
+```
+
+- [ ] Write the failing tests:
 
 ```tsx
 test("routes to Algorithm Lab with recording and both completed runs", async () => {
   const onCompare = vi.fn();
-  render(renderWithLocalization(<CompareShortcut recordingId="rec_1" runs={[
-    run({ id: "a", status: "completed" }),
-    run({ id: "b", status: "completed" }),
-    run({ id: "c", status: "running" }),
-  ]} onCompare={onCompare} />));
+  render(renderWithLocalization(<CompareShortcut recordingId="rec_1" hasGroundTruth
+    runs={[run({ id: "a", status: "completed" }), run({ id: "b", status: "completed" })]}
+    onCompare={onCompare} />));
   await user.click(screen.getByRole("checkbox", { name: "a" }));
   await user.click(screen.getByRole("checkbox", { name: "b" }));
   await user.click(screen.getByRole("button", { name: "Compare" }));
   expect(onCompare).toHaveBeenCalledWith("a", "b");
 });
 
-test("running runs cannot be selected and Compare stays disabled", () => {
-  render(renderWithLocalization(<CompareShortcut recordingId="rec_1" runs={[
-    run({ id: "a", status: "completed" }),
-    run({ id: "c", status: "running" }),
-  ]} onCompare={vi.fn()} />));
-  expect(screen.getByRole("checkbox", { name: "c" })).toBeDisabled();
+test("no Ground Truth disables Compare with a reason", () => {
+  render(renderWithLocalization(<CompareShortcut recordingId="rec_1" hasGroundTruth={false}
+    runs={[run({ id: "a", status: "completed" }), run({ id: "b", status: "completed" })]}
+    onCompare={vi.fn()} />));
   expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
+  expect(screen.getByTestId("compare-gt-required")).toHaveTextContent(/Ground Truth/);
+});
+
+test("running runs cannot be selected", () => {
+  render(renderWithLocalization(<CompareShortcut recordingId="rec_1" hasGroundTruth
+    runs={[run({ id: "a", status: "completed" }), run({ id: "c", status: "running" })]}
+    onCompare={vi.fn()} />));
+  expect(screen.getByRole("checkbox", { name: "c" })).toBeDisabled();
 });
 ```
 
-- [ ] Implement `CompareShortcut` and have `StandaloneSampleDetailPage` pass
-      `onCompare={(a, b) => navigate(\`/algorithm-lab?recording=${recordingId}&runA=${a}&runB=${b}\`)}`.
-- [ ] Add an integration assertion that the Algorithm Lab workspace hydrates
-      from those query params (reuse the existing Algorithm Lab behavior).
-- [ ] Run `npx vitest run src/features/algorithm-lab src/pages`; observe pass.
-- [ ] Commit: `feat(ux-c): two-run comparison shortcut`
+- [ ] Implement `CompareShortcut`; in `StandaloneSampleDetailPage`, load the
+      recording via `getRecording` and pass `hasGroundTruth`.
+- [ ] Never navigate into a comparison guaranteed to return
+      `INVALID_COMPARISON` (422).
+- [ ] Run focused tests; observe pass.
+- [ ] Commit: `feat(ux-c): two-run comparison shortcut with Ground Truth gate`
 
 ---
 
-## C5 (dependent): Dataset → one pipeline with contextual prefill
+## C5 (dependent): Dataset → one pipeline with projection prefill
 
 **Files:**
 - Modify: `frontend/src/features/dataset-experiment/ExperimentCreateForm.tsx`,
+  `frontend/src/features/dataset-experiment/types.ts`,
   `frontend/src/pages/ExperimentsPage.tsx`,
   `frontend/src/localization/messages.en-US.ts`,
   `frontend/src/localization/messages.zh-CN.ts`
@@ -376,42 +389,52 @@ test("running runs cannot be selected and Compare stays disabled", () => {
   `frontend/src/pages/WorkflowNavigation.test.tsx`
 
 **Interfaces:**
-- Consumes: `getDatasetProjection(datasetProjectionId)` (UX-B),
-  `DatasetIdentityInput`.
-- Produces: `ExperimentCreateFormProps.initialDataset`; `ExperimentsPage`
-  support for `?datasetProjectionId=<id>`.
+- Consumes: `getDatasetProjection(datasetProjectionId)` (UX-B);
+  the UX-B client `dataset_projection` executor-selection scope.
+- Produces: `ExperimentCreateFormProps.initialDataset` incl.
+  `datasetProjectionId`; requests carrying `datasetProjectionId`.
 
-- [ ] Add message keys:
+- [ ] Add the message key:
 
 ```ts
 "experiment.datasetIdentityLocked": "Dataset identity from the selected dataset",
   // zh: "数据集标识来自所选数据集"
 ```
 
+- [ ] Extend `DatasetIdentityInput` with `datasetProjectionId`; when
+      `initialDataset` is present, render dataset identity read-only and use the
+      projection for both the executor selection and the create request.
+- [ ] `toCreateRequest` includes `datasetProjectionId` when present. When
+      `initialDataset.datasetProjectionId` is present, the executor selection
+      call uses:
+
+```ts
+getExecutorSelection({ scope: { kind: "dataset_projection", datasetProjectionId }, pipelineId })
+```
+
 - [ ] Write the failing form test:
 
 ```tsx
-test("prefills dataset identity and never requires retyping", async () => {
+test("prefills projection identity and sends dataset_projection_id", async () => {
+  mockFetch.executorSelection(datasetProjectionSelection("dsproj_1", { resolvedExecutor: "local_cpu" }));
   render(renderWithLocalization(<ExperimentCreateForm
-    initialDataset={{ datasetName: "SpaceNet", datasetSplit: "test", datasetLabelSpace: "spacenet_14" }}
+    initialDataset={{ datasetProjectionId: "dsproj_1", datasetName: "SpaceNet",
+                      datasetSplit: "test", datasetLabelSpace: "spacenet_14" }}
     onCreated={vi.fn()} />));
   expect(screen.getByDisplayValue("SpaceNet")).toBeInTheDocument();
   expect(screen.getByDisplayValue("test")).toBeInTheDocument();
   expect(screen.getByDisplayValue("spacenet_14")).toBeInTheDocument();
+  expect(mockFetch.lastExecutorSelectionQuery()).toContain("dataset_projection_id=dsproj_1");
 });
 ```
 
-- [ ] Extend `ExperimentCreateForm` props to `ExperimentCreateFormProps` and
-      when `initialDataset` is present render the identity fields as read-only
-      and seed their state from it.
-- [ ] In `ExperimentsPage`, read `searchParams.get("datasetProjectionId")`;
-      when present, call `getDatasetProjection(id)`, open the create modal, and
-      pass `initialDataset` derived from the projection
-      (`datasetName`, `datasetSplit`, `labelSpace ?? ""`).
+- [ ] In `ExperimentsPage`, read `searchParams.get("datasetProjectionId")`; when
+      present, call `getDatasetProjection(id)`, open the create modal, and pass
+      `initialDataset` from the projection.
 - [ ] Write the failing page test:
 
 ```tsx
-test("dataset page prefill opens experiment creation with identity filled", async () => {
+test("dataset page prefill opens creation with projection identity", async () => {
   mockFetch.datasetProjection({ datasetProjectionId: "dsproj_1", datasetName: "SpaceNet",
     datasetSplit: "test", labelSpace: "spacenet_14", ... });
   render(<App />, { route: "/experiments?datasetProjectionId=dsproj_1" });
@@ -420,7 +443,7 @@ test("dataset page prefill opens experiment creation with identity filled", asyn
 ```
 
 - [ ] Run focused tests; observe pass.
-- [ ] Commit: `feat(ux-c): dataset-contextual experiment creation`
+- [ ] Commit: `feat(ux-c): projection-scoped experiment creation`
 
 ---
 
@@ -434,9 +457,10 @@ test("dataset page prefill opens experiment creation with identity filled", asyn
   `frontend/src/pages/WorkflowNavigation.test.tsx`
 
 **Interfaces:**
-- Consumes: `listDatasetAnalysisHistory` (UX-B), existing
-  `compareDatasetBenchmarks`, existing `EvaluationMetricsView`.
-- Produces: navigation contract
+- Consumes: `listDatasetAnalysisHistory` (UX-B; items include
+  `kind: "imported_batch"`), existing `compareDatasetBenchmarks`,
+  `EvaluationMetricsView`.
+- Produces: navigation
   `/experiments?tab=compare&a=<evaluationAId>&b=<evaluationBId>` and
   `/experiments?tab=benchmarks&benchmark=<evaluationId>`.
 
@@ -456,13 +480,11 @@ test("single evaluation entry opens the evaluation surface", async () => {
 });
 ```
 
-- [ ] In `ExperimentComparePanel`, read `a`/`b` from `useSearchParams` and, when
-      both are valid completed experiment evaluations, preselect and run the
-      comparison once.
-- [ ] In the dataset Analysis History surface (UX-B's
-      `DatasetAnalysisHistory.tsx`), add an additive compare entry for exactly
-      two selected evaluation-kind items → navigate to the compare URL above.
-      Do not invent a new comparison engine; reuse `compareDatasetBenchmarks`.
+- [ ] In `ExperimentComparePanel`, read `a`/`b` from `useSearchParams` and
+      preselect and compare once when both are valid completed evaluations.
+- [ ] In `DatasetAnalysisCompareEntry`, allow selecting exactly two
+      evaluation-kind history items and navigate to the compare URL; reuse
+      `compareDatasetBenchmarks` (no new engine).
 - [ ] Run focused tests; observe pass.
 - [ ] Commit: `feat(ux-c): dataset evaluation and compare entry`
 
@@ -470,7 +492,7 @@ test("single evaluation entry opens the evaluation surface", async () => {
 
 ## C7: Track boundary
 
-- [ ] Focused backend (only if C1 made a backend change):
+- [ ] Focused backend (only if C1 changed backend code):
       `pytest backend/tests/test_local_cpu_diagnosis.py backend/tests/test_execution_selection_resolver.py backend/tests/test_executor_selection_api.py -v`
 - [ ] Focused frontend:
       `npx vitest run src/features/execution-environment`
@@ -483,19 +505,30 @@ test("single evaluation entry opens the evaluation surface", async () => {
 
 ---
 
-## Local CPU Diagnosis Outcome Record
+## Local CPU Acceptance Checklist
 
-This section is completed during task C1 with the actual finding:
+Completed during C1; all items must be true, otherwise STOP and report the
+exact failed step:
 
 ```text
-Deployment: Windows control plane, no GPU
-Pipeline probed: <pipeline_id@version>
-Observed candidate: technical=<bool> configured=<bool> certified=<bool> available=<bool> reason_code=<code>
-First false predicate: <predicate>
-Outcome branch: <A configuration | B backend defect | C genuinely inapplicable>
-Action taken: <description>
-Durable record: backend/tests/test_local_cpu_diagnosis.py + commit message
-Remote-GPU reintroduced: no
+[ ] Current candidate matrix recorded before changes.
+[ ] runtime doctor executed; observed provider/identity state recorded.
+[ ] Separate Windows CPU inference interpreter configured (not the control plane).
+[ ] Windows-owned runtime family configured.
+[ ] Legitimate Windows runtime_ref derived for the real interpreter identity.
+[ ] AutoDL runtime_ref local:autodl_primary:cpu:a1237f8faae7 not reused.
+[ ] qualification completed for stft_energy_detector @ local_cpu.
+[ ] operator certificate installed and listed.
+[ ] control-plane registry rebuilt/restarted.
+[ ] technical = true for local_cpu.
+[ ] configured = true for local_cpu.
+[ ] certified = true for local_cpu.
+[ ] available = true for local_cpu.
+[ ] resolved_executor = local_cpu where policy selects it.
+[ ] one CPU-only STFT Energy AnalysisRun reached completed with DetectionResults.
+[ ] no GPU used.
+[ ] no Remote-GPU path introduced.
+[ ] no machine-specific interpreter path or certificate committed to Git.
 ```
 
 ---
@@ -506,10 +539,11 @@ Remote-GPU reintroduced: no
 [ ] Auto remains the default execution environment.
 [ ] No frontend force-enable of the Run button.
 [ ] No secrets/paths/certificate/SSH/telemetry exposed by the candidate panel.
-[ ] Local CPU handled by evidence; Remote-GPU not reintroduced.
-[ ] Comparison uses existing backend compare; no invented comparisons.
-[ ] Dataset identity is prefilled from UX-B projection; no retyping required.
+[ ] Dataset-contextual flows carry dataset_projection_id end to end.
+[ ] Dataset identity is prefilled from the UX-B projection; no retyping.
+[ ] Comparison is disabled when the recording has no Ground Truth.
+[ ] Local CPU acceptance includes real qualification + a CPU-only smoke.
 [ ] UX-C consumes UX-B contracts; no duplicate dataset representation.
-[ ] Business state remains in the URL.
-[ ] No GPU; no sealed-baseline changes.
+[ ] Accepted SHAs are integrated by merge ancestry, never rebase.
+[ ] No GPU; no Remote-GPU; no sealed-baseline changes; no new artifact format.
 ```

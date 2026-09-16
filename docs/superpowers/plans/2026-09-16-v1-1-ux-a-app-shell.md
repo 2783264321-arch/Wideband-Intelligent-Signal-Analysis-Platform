@@ -34,7 +34,13 @@ Sidebar destinations: Data Library, Dataset Experiments, Algorithm Lab,
 Theme supports system / light / dark and the preference is persisted.
 Use Ant Design theme infrastructure (ConfigProvider theme algorithm) rather
     than two unrelated manual style systems.
+The shell MUST NOT hard-code light colors. The existing MainLayout literals
+    (`Sider theme="light"`, `Header background="#fff"`,
+    `Content background="#fff"`, `border "1px solid #f0f0f0"`) MUST be replaced
+    by resolved-theme state and Ant Design tokens so dark mode actually applies.
 Preserve bilingual zh-CN / en-US support; default locale is zh-CN.
+Keep `nav.recordings` as an unused compatibility key; do not delete baseline
+    localization keys.
 Business state (recording/runA/runB) stays in the URL.
 User preferences (locale, theme, sidebar collapsed, last workspace route) are
     persistent client preferences.
@@ -82,9 +88,10 @@ Modify:
 
 ```text
 frontend/package.json                               (add "marked": "latest")
+frontend/package-lock.json                          (install writes the lockfile)
 frontend/src/main.tsx                               (wrap ThemeProvider)
 frontend/src/app/App.tsx                            (/guide, /settings routes)
-frontend/src/app/MainLayout.tsx                     (5-item nav, collapse, header)
+frontend/src/app/MainLayout.tsx                     (5-item nav, collapse, theme tokens, header)
 frontend/src/app/App.test.tsx                       (5 nav labels)
 frontend/src/app/navigation.test.tsx                (5 nav items, workspace restore)
 frontend/src/localization/messages.en-US.ts         (nav/theme/settings/guide/sidebar keys)
@@ -200,8 +207,9 @@ export function renderMarkdown(source: string): string;
 "sidebar.expand": "Expand sidebar",       // zh: "展开侧边栏"
 ```
 
-- [ ] Remove the now-unused `nav.recordings` key from both files (the Data
-      Library rename replaces it). Do not remove any other baseline key.
+- [ ] Do NOT remove the now-unused `nav.recordings` key from either file. Keep
+      it as an unused compatibility key for V1.1; do not delete or rename it. Do
+      not remove any other baseline key either.
 - [ ] Add glossary entries to `DOMAIN_GLOSSARY`:
 
 ```ts
@@ -389,7 +397,8 @@ test("sidebar collapse persists across remount", () => {
   trigger={null}
   width={220}
   collapsedWidth={64}
-  theme="light"
+  theme={resolved === "dark" ? "dark" : "light"}
+  style={{ background: token.colorBgContainer, borderRight: `1px solid ${token.colorBorderSecondary}` }}
   ...
 />
 <Button
@@ -401,6 +410,10 @@ test("sidebar collapse persists across remount", () => {
 />
 ```
 
+- [ ] Take `const { token } = theme.useToken();` from `antd` and
+      `const { resolved } = useTheme();` from the theme provider; the Sider
+      background/border must come from `token.colorBgContainer` /
+      `token.colorBorderSecondary`, never from a literal.
 - [ ] Run focused test; observe pass.
 - [ ] Commit: `feat(ux-a): collapsible persisted sidebar`
 
@@ -551,8 +564,10 @@ test("Algorithm Lab workspace is restored after leaving via the sidebar", () => 
 - Produces: `renderMarkdown(source): string`, `guideMarkdownFor(locale): string`,
   `UserGuideContent()`, `UserGuidePage()`.
 
-- [ ] Add the dependency: `npm install marked` from `frontend/` (writes
-      `"marked": "latest"`, consistent with every other dependency).
+- [ ] Add the dependency: `npm install marked` from `frontend/`. This updates
+      both `frontend/package.json` (`"marked": "latest"`, consistent with the
+      other dependencies) and `frontend/package-lock.json`; commit both files
+      together in this task.
 - [ ] Write failing tests:
 
 ```ts
@@ -650,6 +665,30 @@ right  : Theme Segmented (System/Light/Dark)      (data-testid="header-theme")
 
 - [ ] Remove the duplicate `{t("app.title")} · V1` header text (sidebar keeps
       the brand).
+- [ ] Replace every fixed light literal in the shell with Ant Design tokens:
+
+```text
+Header background        -> token.colorBgContainer
+Content background       -> token.colorBgContainer
+shell borders            -> token.colorBorderSecondary
+secondary/muted text     -> token.colorTextSecondary
+brand text               -> token.colorText
+```
+
+  No `#fff`, `#f0f0f0`, or `theme="light"` literal may remain in
+  `MainLayout.tsx`.
+- [ ] Add the dark-shell test:
+
+```tsx
+test("dark resolved theme is not forced to a light shell", () => {
+  setSystemPrefersDark(true);            // theme resolves to "dark"
+  render(<AppWithRouter initialEntries={["/recordings"]} />);
+  expect(document.documentElement.dataset.theme).toBe("dark");
+  const sider = screen.getByTestId("sidebar");
+  expect(sider.getAttribute("style") ?? "").not.toContain("rgb(255, 255, 255)");
+});
+```
+
 - [ ] Run `npx vitest run src/app`; observe pass.
 - [ ] Commit: `feat(ux-a): consolidated context header with theme and guide controls`
 
@@ -676,6 +715,9 @@ right  : Theme Segmented (System/Light/Dark)      (data-testid="header-theme")
 [ ] Spectrum page is not a nav item.
 [ ] Exactly 5 primary nav destinations in both locales.
 [ ] Sidebar collapse, theme, and workspace route persist in localStorage.
+[ ] No fixed light shell literal remains in MainLayout.
+[ ] `marked` is committed with package.json and package-lock.json together.
+[ ] `nav.recordings` is retained as a compatibility key.
 [ ] Guide renders from Markdown with no custom parser.
 [ ] Existing locale parity and verbiage tests pass.
 [ ] No Remote-GPU, no GPU, no sealed-baseline modification.
