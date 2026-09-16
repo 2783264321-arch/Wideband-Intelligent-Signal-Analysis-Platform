@@ -1,8 +1,8 @@
 import { Alert, Button, Select, Space } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { compareDatasetBenchmarks, listDatasetExperiments, PlatformApiError } from "../../api/client";
-import type { DatasetBenchmarkCompareResult, DatasetExperiment } from "../../api/types";
+import { compareDatasetBenchmarks, listDatasetBenchmarks, PlatformApiError } from "../../api/client";
+import type { DatasetBenchmarkCompareResult, DatasetEvaluation } from "../../api/types";
 import { CompareDeltaTable } from "./CompareDeltaTable";
 import { useLocalization } from "../../localization/useLocalization";
 
@@ -12,31 +12,38 @@ function toErrorText(reason: unknown): string {
   return String(reason);
 }
 
+/**
+ * Dataset comparison surface.
+ *
+ * Comparison identity is the DatasetEvaluation itself, because
+ * `compareDatasetBenchmarks(evaluationAId, evaluationBId)` accepts evaluation
+ * IDs directly. Evaluations may come from imported (BAPv1) batches and need no
+ * linked DatasetExperiment. Backend remains the authority for coverage,
+ * manifest, label-space and protocol compatibility.
+ */
 export function ExperimentComparePanel() {
   const { t } = useLocalization();
   const [searchParams] = useSearchParams();
-  const [experiments, setExperiments] = useState<DatasetExperiment[]>([]);
+  const [evaluations, setEvaluations] = useState<DatasetEvaluation[]>([]);
   const [aId, setAId] = useState<string | null>(null);
   const [bId, setBId] = useState<string | null>(null);
   const [result, setResult] = useState<DatasetBenchmarkCompareResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Only the request that owns the current generation may set result/error.
-  // Selector changes invalidate outstanding work synchronously.
   const compareGenerationRef = useRef(0);
-  const autoRanRef = useRef(false);
+  // Identity of the URL pair already auto-hydrated (business state is URL-authoritative).
+  const lastAutoPairRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    listDatasetExperiments()
-      .then((items) => { if (active) setExperiments(items); })
+    listDatasetBenchmarks()
+      .then((items) => { if (active) setEvaluations(items); })
       .catch((reason: unknown) => { if (active) setError(toErrorText(reason)); });
     return () => { active = false; };
   }, []);
 
-  const eligible = experiments.filter(
-    (experiment) => experiment.datasetEvaluationId !== null && experiment.status === "completed",
-  );
-  const options = eligible.map((experiment) => ({ value: experiment.id, label: experiment.name }));
+  const eligible = evaluations.filter((evaluation) => evaluation.status === "completed");
+  const options = eligible.map((evaluation) => ({ value: evaluation.id, label: evaluation.name }));
 
   const compareEvaluations = async (evaluationAId: string, evaluationBId: string) => {
     const generation = ++compareGenerationRef.current;
@@ -50,20 +57,6 @@ export function ExperimentComparePanel() {
       setError(toErrorText(reason));
     }
   };
-
-  // URL-preselected comparison: ?a=<evaluationAId>&b=<evaluationBId>.
-  const preselectA = searchParams.get("a");
-  const preselectB = searchParams.get("b");
-  useEffect(() => {
-    if (autoRanRef.current || !preselectA || !preselectB || experiments.length === 0) return;
-    const a = eligible.find((experiment) => experiment.datasetEvaluationId === preselectA);
-    const b = eligible.find((experiment) => experiment.datasetEvaluationId === preselectB);
-    if (!a || !b || a.id === b.id || a.datasetEvaluationId === null || b.datasetEvaluationId === null) return;
-    autoRanRef.current = true;
-    setAId(a.id);
-    setBId(b.id);
-    void compareEvaluations(a.datasetEvaluationId, b.datasetEvaluationId);
-  }, [preselectA, preselectB, experiments]);
 
   const invalidateComparison = () => {
     compareGenerationRef.current += 1;
@@ -81,23 +74,30 @@ export function ExperimentComparePanel() {
     setBId(id);
   };
 
-  const run = async () => {
-    const a = eligible.find((experiment) => experiment.id === aId);
-    const b = eligible.find((experiment) => experiment.id === bId);
-    if (!a || !b || a.datasetEvaluationId === null || b.datasetEvaluationId === null) return;
-    // Starting a newer compare invalidates any older compare still in flight.
-    const generation = ++compareGenerationRef.current;
-    setError(null);
-    try {
-      // Compare the experiments' linked evaluations (backend authority).
-      const next = await compareDatasetBenchmarks(a.datasetEvaluationId, b.datasetEvaluationId);
-      if (generation !== compareGenerationRef.current) return;
-      setResult(next);
-    } catch (reason) {
-      if (generation !== compareGenerationRef.current) return;
-      setError(toErrorText(reason));
-    }
+  const run = () => {
+    if (aId === null || bId === null || aId === bId) return;
+    if (!eligible.some((evaluation) => evaluation.id === aId)) return;
+    if (!eligible.some((evaluation) => evaluation.id === bId)) return;
+    void compareEvaluations(aId, bId);
   };
+
+  // URL-preselected comparison: ?a=<evaluationAId>&b=<evaluationBId>.
+  const preselectA = searchParams.get("a");
+  const preselectB = searchParams.get("b");
+  useEffect(() => {
+    if (!preselectA || !preselectB || evaluations.length === 0) return;
+    const pairKey = `${preselectA}\u0000${preselectB}`;
+    if (lastAutoPairRef.current === pairKey) return;
+    const a = eligible.find((evaluation) => evaluation.id === preselectA);
+    const b = eligible.find((evaluation) => evaluation.id === preselectB);
+    if (!a || !b || a.id === b.id) return;
+    lastAutoPairRef.current = pairKey;
+    setResult(null);
+    setError(null);
+    setAId(a.id);
+    setBId(b.id);
+    void compareEvaluations(a.id, b.id);
+  }, [preselectA, preselectB, evaluations]);
 
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>

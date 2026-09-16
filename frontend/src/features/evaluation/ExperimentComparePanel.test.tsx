@@ -1,227 +1,143 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { ExperimentComparePanel } from "./ExperimentComparePanel";
 import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 
-function experimentWire(id: string, name: string, evaluationId: string | null) {
+function evaluationWire(id: string, name: string, status = "completed") {
+  return { id, name, status };
+}
+
+function compareResult(comparable: boolean, reason: string, a = "eval_a", b = "eval_b") {
   return {
-    id,
-    name,
-    dataset_name: "spacenet",
-    dataset_split: "test",
-    dataset_label_space: "spacenet_14",
-    recording_manifest_hash: "a".repeat(64),
-    plugin_id: "dummy",
-    plugin_version: "1.0",
-    model_release_id: null,
-    asset_manifest_sha256: null,
-    parameters_json: {},
-    executor: "local_cpu",
-    evaluation_protocol: "physical_tf_detection_ap_v2",
-    max_concurrency: 1,
-    status: "completed",
-    dataset_evaluation_id: evaluationId,
-    error_type: null,
-    error_message: null,
-    created_at: null,
-    started_at: null,
-    completed_at: null,
-    requested_execution_mode: "auto",
-    auto_reason_code: null,
-    auto_reason: null,
-    workload_class: null,
-    expected_items: 3,
-    queued_items: 0,
-    running_items: 0,
-    completed_items: 3,
-    failed_items: 0,
-    attempt_count: 3,
+    comparable,
+    reasons: comparable ? [] : [reason],
+    evaluation_a_id: a,
+    evaluation_b_id: b,
+    aggregate_a: null,
+    aggregate_b: null,
+    deltas: comparable ? { localization_ap50: 0.1 } : {},
   };
+}
+
+async function choose(label: string, name: string) {
+  fireEvent.mouseDown(screen.getByLabelText(label));
+  const options = await screen.findAllByTitle(name);
+  fireEvent.click(options[options.length - 1]);
+}
+
+function NavButton({ to, label }: { to: string; label: string }) {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(to)}>{label}</button>;
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
-test("compares the linked evaluations and renders all reasons when not comparable", async () => {
-  const urls: string[] = [];
-  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
-    urls.push(`${options?.method ?? "GET"} ${url}`);
-    if (url.endsWith("/api/dataset-experiments")) {
-      return new Response(JSON.stringify([experimentWire("exp_a", "Exp A", "eval_a"), experimentWire("exp_b", "Exp B", "eval_b")]));
+test("manual comparison of two completed evaluations renders not-comparable reasons", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/dataset-benchmarks")) {
+      return new Response(JSON.stringify([evaluationWire("eval_a", "Eval A"), evaluationWire("eval_b", "Eval B")]));
     }
     if (url.includes("/api/dataset-benchmarks/compare")) {
-      return new Response(JSON.stringify({
-        comparable: false,
-        reasons: ["label_space_mismatch", "evaluation_protocol_mismatch"],
-        evaluation_a_id: "eval_a",
-        evaluation_b_id: "eval_b",
-        aggregate_a: null,
-        aggregate_b: null,
-        deltas: {},
-      }));
+      return new Response(JSON.stringify(compareResult(false, "label_space_mismatch")));
     }
     throw new Error(`Unexpected request: ${url}`);
   }));
-
-  render(
-    renderWithLocalization(
-      <MemoryRouter>
-        <ExperimentComparePanel />
-      </MemoryRouter>,
-    ),
-  );
+  render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
 
   await screen.findByLabelText("Experiment A");
-  fireEvent.mouseDown(screen.getByLabelText("Experiment A"));
-  const aOptions = await screen.findAllByTitle("Exp A");
-  fireEvent.click(aOptions[aOptions.length - 1]);
-  fireEvent.mouseDown(screen.getByLabelText("Experiment B"));
-  const bOptions = await screen.findAllByTitle("Exp B");
-  fireEvent.click(bOptions[bOptions.length - 1]);
-
+  await choose("Experiment A", "Eval A");
+  await choose("Experiment B", "Eval B");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
-
-  await waitFor(() => expect(screen.getByText("label_space_mismatch")).toBeInTheDocument());
-  expect(screen.getByText("evaluation_protocol_mismatch")).toBeInTheDocument();
-  expect(urls.some((u) => u.includes("/api/dataset-benchmarks/compare"))).toBe(true);
+  expect(await screen.findByText("label_space_mismatch")).toBeInTheDocument();
 });
 
-// ---------------------------------------------------------------------------
-// Review corrective A3 — bind comparison result to the A/B identity
-// ---------------------------------------------------------------------------
-
-function threeExperiments() {
-  return [
-    experimentWire("exp_a", "Exp A", "eval_a"),
-    experimentWire("exp_b", "Exp B", "eval_b"),
-    experimentWire("exp_c", "Exp C", "eval_c"),
-  ];
-}
-
-test("changing a selected experiment clears the previous comparison result", async () => {
-  vi.stubGlobal("fetch", vi.fn(async (url: string, options?: RequestInit) => {
-    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify(threeExperiments()));
-    if (url.includes("/api/dataset-benchmarks/compare")) {
-      return new Response(JSON.stringify({
-        comparable: true, reasons: [], evaluation_a_id: "eval_a", evaluation_b_id: "eval_b",
-        aggregate_a: null, aggregate_b: null, deltas: { localization_ap50: 0.07 },
-      }));
+test("changing a selected evaluation clears the previous result", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/dataset-benchmarks")) {
+      return new Response(JSON.stringify([
+        evaluationWire("eval_a", "Eval A"), evaluationWire("eval_b", "Eval B"), evaluationWire("eval_c", "Eval C"),
+      ]));
     }
-    if (url.includes("/items")) return new Response(JSON.stringify([]));
+    if (url.includes("/api/dataset-benchmarks/compare")) {
+      return new Response(JSON.stringify(compareResult(true, "")));
+    }
     throw new Error(`Unexpected request: ${url}`);
   }));
-
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   await screen.findByLabelText("Experiment A");
-  fireEvent.mouseDown(screen.getByLabelText("Experiment A"));
-  const aOpts = await screen.findAllByTitle("Exp A");
-  fireEvent.click(aOpts[aOpts.length - 1]);
-  fireEvent.mouseDown(screen.getByLabelText("Experiment B"));
-  const bOpts = await screen.findAllByTitle("Exp B");
-  fireEvent.click(bOpts[bOpts.length - 1]);
+  await choose("Experiment A", "Eval A");
+  await choose("Experiment B", "Eval B");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
   expect(await screen.findByTestId("compare-delta-table")).toBeInTheDocument();
 
-  // Change A -> the previous A/B result must disappear immediately.
-  fireEvent.mouseDown(screen.getByLabelText("Experiment A"));
-  const cOpts = await screen.findAllByTitle("Exp C");
-  fireEvent.click(cOpts[cOpts.length - 1]);
+  await choose("Experiment A", "Eval C");
   expect(screen.queryByTestId("compare-delta-table")).toBeNull();
 });
 
-// ---------------------------------------------------------------------------
-// F6.3 — explicit empty state
-// ---------------------------------------------------------------------------
-
 test("shows an explicit empty state when no comparison is possible", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify([]));
+    if (url.endsWith("/api/dataset-benchmarks")) return new Response(JSON.stringify([]));
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   expect(await screen.findByText(/No completed experiments with linked evaluations to compare/i)).toBeInTheDocument();
 });
 
-// ---------------------------------------------------------------------------
-// Pre-freeze fix — in-flight compare results must be bound to A/B identity
-// ---------------------------------------------------------------------------
-
-const comparisonsWire = (comparable: boolean, reason: string) => ({
-  comparable,
-  reasons: comparable ? [] : [reason],
-  evaluation_a_id: "eval_a",
-  evaluation_b_id: "eval_b",
-  aggregate_a: null,
-  aggregate_b: null,
-  deltas: comparable ? { localization_ap50: 0.1 } : {},
-});
-
-function threeNamedExperiments() {
-  return [
-    experimentWire("exp_a1", "Exp A1", "eval_a1"),
-    experimentWire("exp_a2", "Exp A2", "eval_a2"),
-    experimentWire("exp_b1", "Exp B1", "eval_b1"),
-  ];
-}
-
-async function choose(name: string) {
-  fireEvent.mouseDown(screen.getByLabelText(name.startsWith("Exp A") ? "Experiment A" : "Experiment B"));
-  const opts = await screen.findAllByTitle(name);
-  fireEvent.click(opts[opts.length - 1]);
-}
-
-test("a stale compare success cannot render against a changed A/B identity", async () => {
+test("a stale compare success cannot render against a changed identity", async () => {
   let resolveR1: ((value: Response) => void) | undefined;
   const r1 = new Promise<Response>((resolve) => { resolveR1 = resolve; });
   let compareCalls = 0;
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify(threeNamedExperiments()));
+    if (url.endsWith("/api/dataset-benchmarks")) {
+      return new Response(JSON.stringify([
+        evaluationWire("eval_a1", "Eval A1"), evaluationWire("eval_a2", "Eval A2"), evaluationWire("eval_b1", "Eval B1"),
+      ]));
+    }
     if (url.includes("/api/dataset-benchmarks/compare")) {
       compareCalls += 1;
       if (compareCalls === 1) return r1;
-      return new Response(JSON.stringify(comparisonsWire(false, "R2_ONLY")));
+      return new Response(JSON.stringify(compareResult(false, "R2_ONLY")));
     }
-    if (url.includes("/items")) return new Response(JSON.stringify([]));
     throw new Error(`Unexpected request: ${url}`);
   }));
-
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   await screen.findByLabelText("Experiment A");
-  await choose("Exp A1");
-  await choose("Exp B1");
+  await choose("Experiment A", "Eval A1");
+  await choose("Experiment B", "Eval B1");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
 
-  // Change A1 -> A2 while R1 is in flight.
-  await choose("Exp A2");
-  await act(async () => { resolveR1?.(new Response(JSON.stringify(comparisonsWire(false, "STALE_A1B1")))); await Promise.resolve(); });
+  await choose("Experiment A", "Eval A2");
+  await act(async () => { resolveR1?.(new Response(JSON.stringify(compareResult(false, "STALE_A1B1")))); await Promise.resolve(); });
   expect(screen.queryByText("STALE_A1B1")).toBeNull();
 
-  // New compare for A2/B1 resolves and renders.
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
   await waitFor(() => expect(screen.getByText("R2_ONLY")).toBeInTheDocument());
 });
 
-test("a stale compare error cannot render against a changed A/B identity", async () => {
+test("a stale compare error cannot render against a changed identity", async () => {
   let resolveR1: ((value: Response) => void) | undefined;
   const r1 = new Promise<Response>((resolve) => { resolveR1 = resolve; });
   let compareCalls = 0;
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-    if (url.endsWith("/api/dataset-experiments")) return new Response(JSON.stringify(threeNamedExperiments()));
+    if (url.endsWith("/api/dataset-benchmarks")) {
+      return new Response(JSON.stringify([
+        evaluationWire("eval_a1", "Eval A1"), evaluationWire("eval_a2", "Eval A2"), evaluationWire("eval_b1", "Eval B1"),
+      ]));
+    }
     if (url.includes("/api/dataset-benchmarks/compare")) {
       compareCalls += 1;
       if (compareCalls === 1) return r1;
-      return new Response(JSON.stringify(comparisonsWire(true, "")));
+      return new Response(JSON.stringify(compareResult(true, "")));
     }
-    if (url.includes("/items")) return new Response(JSON.stringify([]));
     throw new Error(`Unexpected request: ${url}`);
   }));
-
   render(renderWithLocalization(<MemoryRouter><ExperimentComparePanel /></MemoryRouter>));
   await screen.findByLabelText("Experiment A");
-  await choose("Exp A1");
-  await choose("Exp B1");
+  await choose("Experiment A", "Eval A1");
+  await choose("Experiment B", "Eval B1");
   fireEvent.click(screen.getByRole("button", { name: "Compare" }));
 
-  await choose("Exp A2");
+  await choose("Experiment A", "Eval A2");
   await act(async () => {
     resolveR1?.(new Response(JSON.stringify({ error: { code: "STALE_ERR", message: "old pair failed", details: {} } }), { status: 409 }));
     await Promise.resolve();
@@ -229,33 +145,75 @@ test("a stale compare error cannot render against a changed A/B identity", async
   expect(screen.queryByText(/STALE_ERR/)).toBeNull();
 });
 
-test("URL a/b preselection runs the comparison once", async () => {
-  const compareCalls: string[] = [];
+test("unlinked imported evaluations compare independently of DatasetExperiment", async () => {
+  const compareBodies: Record<string, unknown>[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
     if (u.includes("/api/dataset-benchmarks/compare")) {
-      compareCalls.push(u);
-      return new Response(JSON.stringify({
-        comparable: true, reasons: [], evaluation_a_id: "eval_a", evaluation_b_id: "eval_b",
-        aggregate_a: null, aggregate_b: null, deltas: {},
-      }), { status: 200 });
+      compareBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(compareResult(true, "", "eval_import_a", "eval_import_b")));
     }
-    if (u.includes("/api/dataset-experiments")) {
+    if (u.endsWith("/api/dataset-benchmarks")) {
       return new Response(JSON.stringify([
-        { id: "exp_a", name: "A", status: "completed", dataset_evaluation_id: "eval_a" },
-        { id: "exp_b", name: "B", status: "completed", dataset_evaluation_id: "eval_b" },
-      ]), { status: 200 });
+        evaluationWire("eval_import_a", "Imported A"), evaluationWire("eval_import_b", "Imported B"),
+      ]));
     }
-    return new Response("{}", { status: 200 });
+    // The compare path must not consult DatasetExperiment at all.
+    if (u.includes("/api/dataset-experiments")) throw new Error("compare must not load experiments");
+    throw new Error(`Unexpected request: ${u}`);
+  }));
+
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/experiments?tab=compare&a=eval_import_a&b=eval_import_b"]}>
+        <ExperimentComparePanel />
+      </MemoryRouter>,
+    ),
+  );
+  expect(await screen.findByTestId("compare-delta-table")).toBeInTheDocument();
+  expect(compareBodies).toHaveLength(1);
+  expect(compareBodies[0]).toMatchObject({
+    evaluation_a_id: "eval_import_a",
+    evaluation_b_id: "eval_import_b",
+  });
+});
+
+test("URL pair change rehydrates once and does not duplicate requests", async () => {
+  const compareBodies: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("/api/dataset-benchmarks/compare")) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      compareBodies.push(body);
+      return new Response(JSON.stringify(compareResult(true, "", String(body.evaluation_a_id), String(body.evaluation_b_id))));
+    }
+    if (u.endsWith("/api/dataset-benchmarks")) {
+      return new Response(JSON.stringify([
+        evaluationWire("eval_a", "Eval A"), evaluationWire("eval_b", "Eval B"),
+        evaluationWire("eval_c", "Eval C"), evaluationWire("eval_d", "Eval D"),
+      ]));
+    }
+    throw new Error(`Unexpected request: ${u}`);
   }));
 
   render(
     renderWithLocalization(
       <MemoryRouter initialEntries={["/experiments?tab=compare&a=eval_a&b=eval_b"]}>
         <ExperimentComparePanel />
+        <NavButton to="/experiments?tab=compare&a=eval_c&b=eval_d" label="go-cd" />
       </MemoryRouter>,
     ),
   );
   expect(await screen.findByTestId("compare-delta-table")).toBeInTheDocument();
-  expect(compareCalls).toHaveLength(1);
+  await waitFor(() => expect(compareBodies).toHaveLength(1));
+  expect(compareBodies[0]).toMatchObject({ evaluation_a_id: "eval_a", evaluation_b_id: "eval_b" });
+
+  fireEvent.click(screen.getByRole("button", { name: "go-cd" }));
+  await waitFor(() => expect(compareBodies).toHaveLength(2));
+  expect(compareBodies[1]).toMatchObject({ evaluation_a_id: "eval_c", evaluation_b_id: "eval_d" });
+
+  // Re-navigating to the same pair must not duplicate the request.
+  fireEvent.click(screen.getByRole("button", { name: "go-cd" }));
+  await act(async () => { await Promise.resolve(); });
+  expect(compareBodies).toHaveLength(2);
 });

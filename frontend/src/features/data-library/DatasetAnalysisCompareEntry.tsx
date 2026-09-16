@@ -19,7 +19,9 @@ export function DatasetAnalysisCompareEntry({ items }: DatasetAnalysisCompareEnt
   const navigate = useNavigate();
   const [selected, setSelected] = useState<string[]>([]);
 
-  const evaluations = items.filter((item) => item.kind === "evaluation");
+  const evaluations = items.filter(
+    (item) => item.kind === "evaluation" && item.status === "completed",
+  );
 
   const toggle = (evaluationId: string, checked: boolean) => {
     setSelected((current) => {

@@ -187,6 +187,8 @@ test("dataset history compare entry selects only evaluations and navigates with 
     items: [
       { kind: "evaluation", resource_id: "eval_a", name: "Eval A", pipeline_id: "p", pipeline_version: "1.0", status: "completed", executor: null, expected_items: 1, completed_items: 1, failed_items: 0, coverage: 1.0, created_at: null, dataset_evaluation_id: "eval_a", batch_id: null, archive_sha256: null },
       { kind: "evaluation", resource_id: "eval_b", name: "Eval B", pipeline_id: "p", pipeline_version: "1.0", status: "completed", executor: null, expected_items: 1, completed_items: 1, failed_items: 0, coverage: 1.0, created_at: null, dataset_evaluation_id: "eval_b", batch_id: null, archive_sha256: null },
+      { kind: "evaluation", resource_id: "eval_c", name: "Eval C", pipeline_id: "p", pipeline_version: "1.0", status: "pending", executor: null, expected_items: 1, completed_items: 0, failed_items: 0, coverage: 0.0, created_at: null, dataset_evaluation_id: "eval_c", batch_id: null, archive_sha256: null },
+      { kind: "evaluation", resource_id: "eval_d", name: "Eval D", pipeline_id: "p", pipeline_version: "1.0", status: "failed", executor: null, expected_items: 1, completed_items: 0, failed_items: 1, coverage: 0.0, created_at: null, dataset_evaluation_id: "eval_d", batch_id: null, archive_sha256: null },
       { kind: "imported_batch", resource_id: "fp1", name: "zoom 1.0", pipeline_id: "zoom", pipeline_version: "1.0", status: "completed", executor: "imported", expected_items: 1, completed_items: 1, failed_items: 0, coverage: 1.0, created_at: null, dataset_evaluation_id: null, batch_id: "b", archive_sha256: null },
     ],
   };
@@ -201,6 +203,9 @@ test("dataset history compare entry selects only evaluations and navigates with 
   const entry = await screen.findByTestId("dataset-analysis-compare-entry");
   const checkboxes = within(entry).getAllByRole("checkbox");
   expect(checkboxes).toHaveLength(2);
+  expect(within(entry).queryByRole("checkbox", { name: "eval_c" })).toBeNull();
+  expect(within(entry).queryByRole("checkbox", { name: "eval_d" })).toBeNull();
+  expect(within(entry).queryByRole("checkbox", { name: "fp1" })).toBeNull();
   fireEvent.click(within(entry).getByRole("checkbox", { name: "eval_a" }));
   fireEvent.click(within(entry).getByRole("checkbox", { name: "eval_b" }));
   fireEvent.click(within(entry).getByRole("button", { name: "Compare" }));
