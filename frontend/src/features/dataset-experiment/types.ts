@@ -3,6 +3,7 @@ import type { ExecutionEnvironmentValue } from "../execution-environment/types";
 
 export interface ExperimentFormValue {
   name: string;
+  datasetProjectionId?: string | null;
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
@@ -31,11 +32,15 @@ export function toCreateRequest(value: ExperimentFormValue): DatasetExperimentCr
     parameters: {},
     maxConcurrency: value.maxConcurrency,
   };
+  const withProjection: DatasetExperimentCreateRequest =
+    value.datasetProjectionId != null
+      ? { ...base, datasetProjectionId: value.datasetProjectionId }
+      : base;
   if (value.environment.mode === "auto") {
-    return { ...base, executionMode: "auto" };
+    return { ...withProjection, executionMode: "auto" };
   }
   if (value.environment.executor === null) {
     throw new Error("Manual execution mode requires a concrete executor.");
   }
-  return { ...base, executionMode: "manual", executor: value.environment.executor };
+  return { ...withProjection, executionMode: "manual", executor: value.environment.executor };
 }

@@ -2,7 +2,7 @@ import { Alert, Button, Input, InputNumber, Select, Space, Typography } from "an
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createDatasetExperiment, getExecutorSelection, listPipelines, PlatformApiError } from "../../api/client";
-import type { PipelineDefinition } from "../../api/types";
+import type { ExecutionSelectionScope, PipelineDefinition } from "../../api/types";
 import { useLocalization } from "../../localization/useLocalization";
 import { ExecutionEnvironmentSelector } from "../execution-environment/ExecutionEnvironmentSelector";
 import { effectiveSelectionForScope, optionsFromSelection, type BoundExecutorSelection } from "../execution-environment/executionEnvironment";
@@ -15,23 +15,35 @@ function toErrorText(reason: unknown): string {
   return String(reason);
 }
 
+export interface DatasetIdentityInput {
+  datasetProjectionId: string;
+  datasetName: string;
+  datasetSplit: string;
+  datasetLabelSpace: string;
+}
+
+export interface ExperimentCreateFormProps {
+  onCreated?: (id: string) => void;
+  initialDataset?: DatasetIdentityInput;
+}
+
 /**
  * DatasetExperiment create form.
  *
- * - Dataset identity is the exact triple (no generic dataset catalog).
- * - Pipeline id/version come from the `/api/pipelines` projection.
- * - Execution environment uses dataset-scoped `/api/executor-selection` only
- *   (never the recording-scoped `/api/executor-availability`).
+ * - When entered from a dataset projection, identity is prefilled and read-only,
+ *   and execution selection uses the projection scope (`dataset_projection_id`),
+ *   never the legacy name/split/label-space scope.
  * - No evaluation-protocol picker (backend default), `parameters: {}`.
  */
-export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) => void }) {
+export function ExperimentCreateForm({ onCreated, initialDataset }: ExperimentCreateFormProps) {
   const { t } = useLocalization();
   const navigate = useNavigate();
+  const projectionId = initialDataset?.datasetProjectionId ?? null;
   const [pipelines, setPipelines] = useState<PipelineDefinition[]>([]);
   const [name, setName] = useState("");
-  const [datasetName, setDatasetName] = useState("");
-  const [datasetSplit, setDatasetSplit] = useState("");
-  const [datasetLabelSpace, setDatasetLabelSpace] = useState("");
+  const [datasetName, setDatasetName] = useState(initialDataset?.datasetName ?? "");
+  const [datasetSplit, setDatasetSplit] = useState(initialDataset?.datasetSplit ?? "");
+  const [datasetLabelSpace, setDatasetLabelSpace] = useState(initialDataset?.datasetLabelSpace ?? "");
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [maxConcurrency, setMaxConcurrency] = useState(1);
   const [environment, setEnvironment] = useState<ExecutionEnvironmentValue>({ mode: "auto", executor: null });
@@ -40,7 +52,8 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const datasetScopeKey = JSON.stringify([datasetName, datasetSplit, datasetLabelSpace, pipelineId]);
+  const identityLocked = projectionId !== null;
+  const datasetScopeKey = JSON.stringify([projectionId, datasetName, datasetSplit, datasetLabelSpace, pipelineId]);
   const effectiveSelection = effectiveSelectionForScope(boundSelection, datasetScopeKey);
 
   useEffect(() => {
@@ -53,27 +66,23 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
 
   useEffect(() => {
     setBoundSelection(null);
-    // A scope identity change resets the user execution value to Auto; a stale
-    // manual executor can never authorize a different dataset/pipeline scope.
     setEnvironment({ mode: "auto", executor: null });
-    if (pipelineId === null || datasetName === "" || datasetSplit === "" || datasetLabelSpace === "") return undefined;
-    const scopeKey = JSON.stringify([datasetName, datasetSplit, datasetLabelSpace, pipelineId]);
+    const identityReady =
+      projectionId !== null || (datasetName !== "" && datasetSplit !== "" && datasetLabelSpace !== "");
+    if (pipelineId === null || !identityReady) return undefined;
+    const scopeKey = JSON.stringify([projectionId, datasetName, datasetSplit, datasetLabelSpace, pipelineId]);
+    const scope: ExecutionSelectionScope =
+      projectionId !== null
+        ? { kind: "dataset_projection", datasetProjectionId: projectionId }
+        : { kind: "dataset", datasetName, datasetSplit, datasetLabelSpace };
     let active = true;
     setLoading(true);
-    void getExecutorSelection({
-      scope: {
-        kind: "dataset",
-        datasetName,
-        datasetSplit,
-        datasetLabelSpace,
-      },
-      pipelineId,
-    })
+    void getExecutorSelection({ scope, pipelineId })
       .then((result) => { if (active) setBoundSelection({ scopeKey, value: result }); })
       .catch((reason: unknown) => { if (active) setError(toErrorText(reason)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [pipelineId, datasetName, datasetSplit, datasetLabelSpace]);
+  }, [pipelineId, projectionId, datasetName, datasetSplit, datasetLabelSpace]);
 
   const selectedPipeline = useMemo(
     () => pipelines.find((item) => item.id === pipelineId) ?? null,
@@ -88,9 +97,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
   const identityValid =
     selectedPipeline !== null &&
     name.trim() !== "" &&
-    datasetName.trim() !== "" &&
-    datasetSplit.trim() !== "" &&
-    datasetLabelSpace.trim() !== "";
+    (identityLocked || (datasetName.trim() !== "" && datasetSplit.trim() !== "" && datasetLabelSpace.trim() !== ""));
   const canCreate = identityValid && selectedEnvironmentOption?.enabled === true && !submitting;
 
   const submit = async () => {
@@ -104,6 +111,7 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
     try {
       const request = toCreateRequest({
         name,
+        datasetProjectionId: projectionId,
         datasetName,
         datasetSplit,
         datasetLabelSpace,
@@ -126,14 +134,17 @@ export function ExperimentCreateForm({ onCreated }: { onCreated?: (id: string) =
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error !== null ? <Alert type="error" showIcon message={t("experiment.createError")} description={error} /> : null}
       <Space direction="vertical" size={4} style={{ width: "100%" }}>
+        {identityLocked ? (
+          <Typography.Text type="secondary">{t("experiment.datasetIdentityLocked")}</Typography.Text>
+        ) : null}
         <Typography.Text>{t("form.name")}</Typography.Text>
         <Input aria-label={t("form.name")} value={name} onChange={(event) => setName(event.target.value)} />
         <Typography.Text>{t("form.datasetName")}</Typography.Text>
-        <Input aria-label={t("form.datasetName")} value={datasetName} onChange={(event) => setDatasetName(event.target.value)} />
+        <Input aria-label={t("form.datasetName")} readOnly={identityLocked} value={datasetName} onChange={(event) => setDatasetName(event.target.value)} />
         <Typography.Text>{t("form.datasetSplit")}</Typography.Text>
-        <Input aria-label={t("form.datasetSplit")} value={datasetSplit} onChange={(event) => setDatasetSplit(event.target.value)} />
+        <Input aria-label={t("form.datasetSplit")} readOnly={identityLocked} value={datasetSplit} onChange={(event) => setDatasetSplit(event.target.value)} />
         <Typography.Text>{t("form.labelSpace")}</Typography.Text>
-        <Input aria-label={t("form.labelSpace")} value={datasetLabelSpace} onChange={(event) => setDatasetLabelSpace(event.target.value)} />
+        <Input aria-label={t("form.labelSpace")} readOnly={identityLocked} value={datasetLabelSpace} onChange={(event) => setDatasetLabelSpace(event.target.value)} />
         <Typography.Text>{t("form.pipeline")}</Typography.Text>
         <Select
           aria-label={t("form.pipeline")}

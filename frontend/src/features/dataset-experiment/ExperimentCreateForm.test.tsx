@@ -281,3 +281,66 @@ test("localizes the create-form shell and submit control in zh-CN without changi
     execution_mode: "auto",
   });
 });
+
+import { Route, Routes } from "react-router-dom";
+
+test("projection prefill is read-only, uses projection scope, and sends datasetProjectionId", async () => {
+  const calls: { url: string; body?: unknown }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("/api/pipelines")) {
+      return new Response(JSON.stringify([{
+        id: "p", name: "P", version: "1.0", label_space: "spacenet_14",
+        recommended_device: "cpu", cpu_supported: true, stages: [], inspectable_stages: [],
+        task_capability: "detection", executors_supported: ["local_cpu"], recommended_executor: "local_cpu",
+        technical_execution_capabilities: [{ executor: "local_cpu", deviceType: "cpu", precision: "float32" }],
+      }]), { status: 200 });
+    }
+    if (u.includes("/api/executor-selection")) {
+      calls.push({ url: u });
+      return new Response(JSON.stringify({
+        requested_mode: "auto", resolved_executor: "local_cpu",
+        reason_code: "AUTO_ONLY_RUNNABLE_EXECUTOR", reason: "ok", workload_class: "SMALL",
+        candidates: [{ executor: "local_cpu", technical: true, configured: true, certified: true, available: true, reason_code: null, reason_message: null }],
+      }), { status: 200 });
+    }
+    if (u.includes("/api/dataset-experiments")) {
+      calls.push({ url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return new Response(JSON.stringify({ id: "exp_1" }), { status: 201 });
+    }
+    return new Response("{}", { status: 200 });
+  }));
+
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/"]}>
+        <Routes>
+          <Route path="/" element={
+            <ExperimentCreateForm initialDataset={{
+              datasetProjectionId: "dsproj_A", datasetName: "SpaceNet",
+              datasetSplit: "test", datasetLabelSpace: "spacenet_14",
+            }} />
+          } />
+          <Route path="/experiments/:id" element={<div />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
+  );
+
+  expect(await screen.findByDisplayValue("SpaceNet")).toHaveAttribute("readonly");
+  expect(screen.getByDisplayValue("test")).toHaveAttribute("readonly");
+  expect(screen.getByDisplayValue("spacenet_14")).toHaveAttribute("readonly");
+
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Exp" } });
+  fireEvent.mouseDown(screen.getByLabelText("Pipeline"));
+  fireEvent.click(await screen.findByTitle(/P 1.0/));
+
+  await waitFor(() => {
+    expect(calls.some((call) => call.url.includes("dataset_projection_id=dsproj_A"))).toBe(true);
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "Create Experiment" }));
+  await waitFor(() => {
+    expect(calls.some((call) => (call.body as { dataset_projection_id?: string } | undefined)?.dataset_projection_id === "dsproj_A")).toBe(true);
+  });
+});
