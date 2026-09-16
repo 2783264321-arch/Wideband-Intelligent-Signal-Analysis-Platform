@@ -143,11 +143,73 @@ browsed inside that dataset.
 
 For V1.1, do **not** introduce a new datasets table unless implementation-time
 analysis proves it unavoidable. Instead, use the existing Recording metadata to
-form a **dataset projection** keyed by:
+form a **dataset projection** — a read model over existing recording metadata, not
+a new persistence entity.
+
+**Display identity is not stable identity.** `dataset_name` and `dataset_split`
+are user-facing/display components and are **not** sufficient as a globally unique
+projection key.
+
+Current SpaceNet registration (`backend/app/datasets/service.py`) writes, for each
+member sample:
 
 ```text
-(dataset_name, dataset_split)
+source         = "spacenet"
+dataset_name   = "SpaceNet"
+dataset_split  = <split>
+label_space    = "spacenet_14"
+external_path  = <resolved sample path>
 ```
+
+and duplicate-registration detection compares each exact `external_path`. Two
+independently registered dataset roots can therefore legitimately share the same
+`dataset_name` and `dataset_split` while referring to different physical dataset
+instances. For example:
+
+```text
+D:\SpaceNet-A\test
+E:\SpaceNet-B\test
+```
+
+Both would display as `SpaceNet / test`, but they are different datasets.
+
+The projection must therefore expose a stable, opaque **dataset projection
+identity**, conceptually:
+
+```text
+dataset_projection_id
+```
+
+The identity must distinguish independently registered dataset instances. Its
+deterministic inputs use already-available metadata and must include enough
+information to distinguish physical/logical datasets. For external SpaceNet
+registrations the inputs must distinguish at least:
+
+```text
+source
+dataset_name
+dataset_split
+label_space
+normalized dataset-root identity
+```
+
+The exact encoding/hash algorithm belongs to implementation planning. A raw
+filesystem path must **not** be exposed as the URL identity. The frontend uses the
+opaque `dataset_projection_id` for routing and API operations while still
+displaying friendly fields such as `SpaceNet` and `test`.
+
+Example:
+
+```text
+SpaceNet + test (root A)  → dataset projection P1
+SpaceNet + test (root B)  → dataset projection P2
+```
+
+Even though both display as `SpaceNet / test`, they never collapse into one
+visible dataset, and the platform never merges their members.
+
+`(dataset_name, dataset_split)` may still be used as a **display grouping hint**,
+but it is not a stable identity and must not be used as the sole routing/API key.
 
 Relevant existing fields on the recording read model include:
 
@@ -159,17 +221,8 @@ source
 external_path
 ```
 
-Example:
-
-```text
-SpaceNet + test
-→ one visible dataset object
-
-Internally it may still consist of 2500 RecordingModel rows.
-```
-
-The projection is a read model over existing recording metadata. It is not a new
-persistence entity.
+Each visible dataset object may internally still consist of 2500 `RecordingModel`
+rows.
 
 ### 4.2 Dataset List
 
@@ -392,22 +445,91 @@ Current V1 lacks sufficient delete/unregister lifecycle APIs. V1.1 introduces
 explicit lifecycle behavior. All destructive operations are explicit, scoped,
 and fail-safe.
 
-### 8.1 Standalone Sample Deletion
+### 8.1 Destructive Operation Dependency Guard
 
-Standalone WISA-managed IQ may be deleted. Deletion semantics may include:
+Before any destructive operation that would remove:
+
+```text
+a standalone Recording
+one or more dataset-member Recordings
+an AnalysisRun
+```
+
+the backend must perform a **dependency preflight**.
+
+```text
+DELETE Recording / Remove Dataset / DELETE AnalysisRun
+                    │
+                    ▼
+           Dependency preflight
+                    │
+            ┌───────┴───────┐
+            │               │
+     no retained       retained
+     dependency        dependency
+            │               │
+            ▼               ▼
+      execute deletion   409 Conflict
+                         + explicit blocker
+```
+
+Existing referential facts make this mandatory rather than optional:
+
+```text
+RecordingModel.analysis_runs   relationship cascade="all, delete-orphan"
+RecordingModel.ground_truth    relationship cascade="all, delete-orphan"
+DatasetEvaluationItemModel     FKs recording_id and analysis_run_id
+DatasetExperimentItemModel     FK recording_id
+DatasetExperimentAttemptModel  FK analysis_run_id
+```
+
+(`backend/app/recordings/model.py`, `backend/app/benchmarks/model.py`,
+`backend/app/dataset_experiments/model.py`.)
+
+Because owned children cascade while evaluation/experiment records hold their own
+foreign keys, a naive `session.delete(recording)` would let a parent deletion
+bypass the AnalysisRun dependency guard. That is forbidden: parent-resource
+deletion must not bypass the AnalysisRun guard.
+
+If the operation would invalidate a retained platform object such as:
+
+```text
+DatasetEvaluation
+benchmark result
+experiment/result provenance
+another retained resource defined by the dependency graph
+```
+
+the operation must **FAIL CLOSED** with a structured conflict response that gives
+the UI enough safe information to explain which dependent resource blocks
+deletion. The backend must not silently cascade through retained
+historical/evaluation objects.
+
+Only exclusively owned child resources that are not independently retained or
+referenced may be cascaded/deleted according to the lifecycle contract. The exact
+dependency graph and endpoint error schema belong to implementation planning;
+these guarantees are architectural design requirements.
+
+### 8.2 Standalone Sample Deletion
+
+Standalone WISA-managed IQ may be deleted, subject to the dependency preflight in
+Section 8.1.
+
+When the preflight passes, the operation may remove:
 
 ```text
 Recording database row
-owned AnalysisRuns
-owned DetectionResults
-WISA-managed IQ storage
+exclusively owned AnalysisRuns
+DetectionResults owned only by those runs
+GroundTruth owned by the Recording
+WISA-managed source IQ storage
 ```
 
 The user must receive an **explicit irreversible confirmation** that names what
 will be removed. The platform must **not** silently delete externally managed
 source files.
 
-### 8.2 Dataset Removal
+### 8.3 Dataset Removal
 
 Dataset members must **not** be casually deleted one-by-one from the dataset
 root workflow. The dataset-level action is:
@@ -416,10 +538,20 @@ root workflow. The dataset-level action is:
 Remove Dataset / 移除数据集
 ```
 
-For an externally registered dataset such as SpaceNet:
+Dataset removal is one logical operation over the dataset projection. The
+dependency preflight is performed across **all** members before any mutation:
 
 ```text
-unregister/remove the WISA database representation
+if any member is blocked by a retained dependency:
+    fail atomically with a conflict; do not partially unregister
+```
+
+Dataset removal must never partially unregister a dataset.
+
+For an externally registered dataset such as SpaceNet, when preflight passes:
+
+```text
+remove the WISA database representation atomically
 remove related platform-owned metadata according to defined referential rules
 DO NOT delete original .bin/.json files from the user's external dataset path
 ```
@@ -427,10 +559,10 @@ DO NOT delete original .bin/.json files from the user's external dataset path
 The confirmation UI must explicitly state that the external source files remain
 untouched.
 
-### 8.3 Analysis Run Deletion
+### 8.4 Analysis Run Deletion
 
 V1.1 adds user-facing deletion of an analysis result/run, with conservative
-referential-integrity behavior.
+referential-integrity behavior and the same Section 8.1 dependency preflight.
 
 If a run is referenced by a retained evaluation/benchmark/result that would be
 invalidated by the deletion:
@@ -875,7 +1007,7 @@ narrowly scoped backend APIs required by the approved UX.
 Expected categories include:
 
 ```text
-dataset projection/summary query
+dataset projection/summary query exposing a stable opaque dataset_projection_id
 filtered/paginated recording query
 analysis-history query/projection if existing APIs are insufficient
 standalone Recording deletion
@@ -883,6 +1015,17 @@ dataset unregister/remove
 AnalysisRun deletion
 safe dependency/conflict reporting
 ```
+
+Contracts for these additions:
+
+- The dataset projection query must return a stable, opaque
+  `dataset_projection_id` distinct from `dataset_name`/`dataset_split`. A raw
+  filesystem path must not be used as the URL/API identity.
+- Every destructive endpoint (Recording deletion, dataset removal, AnalysisRun
+  deletion) must implement the Section 8.1 dependency preflight and return a
+  structured fail-closed conflict when a retained dependent resource blocks the
+  operation. Dataset removal must be all-or-nothing.
+- These additions do not create or require a persisted dataset table.
 
 Constraints:
 
@@ -1040,6 +1183,18 @@ no wheel hijacking
 light/dark overlay readability where practical
 ```
 
+Deletion and dataset-identity acceptance coverage is required for:
+
+```text
+two independently registered dataset roots with identical display fields
+    remain two distinct dataset projections
+blocked standalone deletion when retained dependents exist
+blocked dataset removal when any member has retained dependents
+no partial dataset removal
+successful deletion after dependencies permit it
+external dataset source files unchanged after removal
+```
+
 ---
 
 ## 24. Success Criteria
@@ -1070,6 +1225,12 @@ Specifically:
 14. Light/dark/system theme works coherently.
 15. A first-time user can use the in-app guide to understand the major
     workflows.
+16. Independently registered dataset roots that share display fields
+    (`dataset_name`, `dataset_split`) never collapse into one dataset; dataset
+    routing uses a stable opaque projection identity rather than display fields.
+17. Destructive operations fail closed with an explicit blocker when retained
+    dependents exist, dataset removal is all-or-nothing, and external source
+    files are never deleted.
 ```
 
 ---
@@ -1090,10 +1251,15 @@ B. Diagnose the current local_cpu non-runnable state in the Windows deployment
    defective.
 
 C. During implementation planning, determine whether existing list APIs are
-   sufficient or require server-side dataset/analysis-history projections.
+   sufficient or require server-side dataset/analysis-history projections, and
+   define the deterministic inputs and exact encoding of the opaque
+   dataset_projection_id, including how the normalized dataset-root identity is
+   derived from existing metadata without adding a persisted dataset table.
 
-D. Define the exact dependency graph for safe AnalysisRun deletion, including
-   which dependent evaluations/benchmarks cause a conflict.
+D. Define the exact dependency graph for safe deletion across standalone
+   Recordings, dataset-member Recordings, and AnalysisRuns, including which
+   retained dependents (DatasetEvaluation, benchmark, experiment provenance)
+   cause a conflict and how the structured conflict response is shaped.
 
 E. Determine whether spectrogram metadata should expose source raster width /
    height or another display-aspect hint so the viewer can honor real geometry.
@@ -1126,6 +1292,9 @@ no wheel hijacking
 improved GT/prediction overlays
 no forced 640x640 display
 four-track implementation structure
+dataset projection identity is opaque and stable; display grouping is not identity
+all destructive operations share one fail-closed dependency preflight; dataset
+    removal is all-or-nothing and external files are never deleted
 sealed V1 baseline remains immutable
 ```
 
@@ -1166,3 +1335,14 @@ Performed before commit:
 9. **Contradictions with immutable V1 baseline** — none. This document is created
    from the sealed baseline SHA `067c6c02` and preserves its contracts; the
    baseline is neither moved nor modified.
+10. **Dataset identity vs display grouping** — resolved: Section 4.1 separates
+    friendly display fields from a stable opaque `dataset_projection_id`;
+    `(dataset_name, dataset_split)` is no longer claimed to be a globally unique
+    identity, and independently registered roots cannot collapse.
+11. **Parent-resource deletion bypass** — resolved: Section 8.1 unifies the
+    fail-closed dependency preflight across standalone Recording deletion,
+    dataset removal, and AnalysisRun deletion; dataset removal is all-or-nothing
+    and external source files are never deleted.
+12. **Mandatory Dataset table** — still excluded. The identity amendment adds no
+    persisted dataset table; the projection remains a read model over existing
+    recording metadata.
