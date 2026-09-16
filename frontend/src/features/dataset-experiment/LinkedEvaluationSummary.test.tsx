@@ -11,6 +11,7 @@ function experiment(overrides: Partial<DatasetExperiment> = {}): DatasetExperime
     datasetName: "spacenet",
     datasetSplit: "test",
     datasetLabelSpace: "spacenet_14",
+    datasetProjectionId: null,
     recordingManifestHash: "a".repeat(64),
     pluginId: "dummy",
     pluginVersion: "1.0",

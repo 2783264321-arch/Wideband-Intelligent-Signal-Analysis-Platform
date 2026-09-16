@@ -67,6 +67,7 @@ def create_evaluation(payload: DatasetEvaluationCreate, request: Request):
             recording_manifest_hash=payload.recording_manifest_hash,
             items=[item.model_dump() for item in payload.items],
             allow_incomplete=payload.allow_incomplete,
+            dataset_projection_id=payload.dataset_projection_id,
         )
 
 

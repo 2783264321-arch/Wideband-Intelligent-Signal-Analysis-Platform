@@ -5,6 +5,8 @@
  */
 export const DOMAIN_GLOSSARY = {
   recordings: { en: "Recordings", zh: "信号记录" },
+  dataLibrary: { en: "Data Library", zh: "数据管理" },
+  userGuide: { en: "User Guide", zh: "使用指南" },
   spectrumAnalysis: { en: "Spectrum Analysis", zh: "频谱分析" },
   spectrogram: { en: "Spectrogram", zh: "时频图" },
   signals: { en: "Signals", zh: "信号检测结果" },

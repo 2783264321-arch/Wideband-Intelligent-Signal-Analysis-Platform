@@ -266,6 +266,7 @@ export interface DatasetEvaluation {
   datasetName: string;
   datasetSplit: string;
   labelSpace: string;
+  datasetProjectionId: string | null;
   pipelineId: string;
   pipelineVersion: string;
   status: DatasetEvaluationStatus;
@@ -323,6 +324,7 @@ export interface ImportedBatchResolution {
   datasetName: string;
   datasetSplit: string;
   labelSpace: string;
+  datasetProjectionId: string | null;
   pipelineId: string;
   pipelineVersion: string;
   recordingManifestHash: string;
@@ -380,7 +382,8 @@ export interface ExecutorSelection {
 
 export type ExecutionSelectionScope =
   | { kind: "recording"; recordingId: string }
-  | { kind: "dataset"; datasetName: string; datasetSplit: string; datasetLabelSpace: string };
+  | { kind: "dataset"; datasetName: string; datasetSplit: string; datasetLabelSpace: string }
+  | { kind: "dataset_projection"; datasetProjectionId: string };
 
 export interface AnalysisRunCreateRequest {
   recordingId: string;
@@ -420,6 +423,7 @@ export interface DatasetExperiment {
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
+  datasetProjectionId: string | null;
   recordingManifestHash: string;
   pluginId: string;
   pluginVersion: string;
@@ -453,6 +457,7 @@ export interface DatasetExperimentCreateRequest {
   datasetName: string;
   datasetSplit: string;
   datasetLabelSpace: string;
+  datasetProjectionId?: string | null;
   pluginId: string;
   pluginVersion: string;
   executionMode: ExecutionMode;
@@ -493,4 +498,94 @@ export interface BatchImportSummary {
   ambiguousRecordings: number;
   fingerprintMismatches: number;
   recordingRunMapping: BatchRunMapping[];
+}
+
+// ---------------------------------------------------------------------------
+// V1.1 Data Library read + lifecycle contract
+// ---------------------------------------------------------------------------
+
+export interface DatasetProjectionSummary {
+  datasetProjectionId: string;
+  source: string;
+  datasetName: string;
+  datasetSplit: string;
+  labelSpace: string | null;
+  sampleCount: number;
+  groundTruthSampleCount: number;
+  external: boolean;
+  sourceLocation: string | null;
+}
+
+export interface DatasetProjectionListPage {
+  items: DatasetProjectionSummary[];
+  total: number;
+}
+
+export interface DatasetSample {
+  id: string;
+  name: string;
+  sampleRateHz: number;
+  centerFrequencyHz: number;
+  frequencyLowHz: number;
+  frequencyHighHz: number;
+  durationS: number;
+  hasGroundTruth: boolean;
+  analysisCount: number;
+  sampleRateDerived: boolean;
+  centerFrequencyDerived: boolean;
+}
+
+export interface DatasetSamplePage {
+  datasetProjectionId: string;
+  items: DatasetSample[];
+  total: number;
+}
+
+export interface StandaloneSample {
+  id: string;
+  name: string;
+  source: string;
+  sampleRateHz: number;
+  centerFrequencyHz: number;
+  frequencyLowHz: number;
+  frequencyHighHz: number;
+  durationS: number;
+  dataFormat: string;
+  hasGroundTruth: boolean;
+  analysisCount: number;
+}
+
+export interface StandaloneSamplePage {
+  items: StandaloneSample[];
+  total: number;
+}
+
+export interface DatasetAnalysisHistoryItem {
+  kind: "experiment" | "evaluation" | "imported_batch";
+  resourceId: string;
+  name: string;
+  pipelineId: string;
+  pipelineVersion: string;
+  status: string;
+  executor: string | null;
+  expectedItems: number;
+  completedItems: number;
+  failedItems: number;
+  coverage: number | null;
+  createdAt: string | null;
+  datasetEvaluationId: string | null;
+  batchId: string | null;
+  archiveSha256: string | null;
+}
+
+export interface DatasetAnalysisHistoryPage {
+  datasetProjectionId: string;
+  items: DatasetAnalysisHistoryItem[];
+  total: number;
+}
+
+export interface DeleteBlocker {
+  kind: "dataset_evaluation" | "dataset_experiment" | "dataset_experiment_attempt" | "imported_batch" | "active_analysis_run";
+  resourceId: string;
+  reference: "recording" | "analysis_run";
 }

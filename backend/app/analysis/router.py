@@ -10,6 +10,7 @@ from app.analysis.schema import (
 )
 from app.analysis.service import AnalysisService
 from app.core.errors import PlatformError
+from app.lifecycle.service import delete_analysis_run
 from app.pipelines.base import PipelineDefinition
 
 router = APIRouter(tags=["analysis"])
@@ -119,6 +120,12 @@ def list_analysis_runs(
 def get_analysis_run(run_id: str, request: Request):
     with request.app.state.database.session_factory() as session:
         return _service(request, session).get(run_id)
+
+
+@router.delete("/api/analysis-runs/{run_id}", status_code=204)
+def delete_analysis_run_endpoint(run_id: str, request: Request):
+    with request.app.state.database.session_factory() as session:
+        delete_analysis_run(session, request.app.state.storage, run_id)
 
 
 @router.get("/api/executor-availability", response_model=ExecutorAvailabilityRead)

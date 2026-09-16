@@ -61,6 +61,7 @@ def executor_selection(
     pipeline_id: str = Query(...),
     model_release_id: str | None = Query(None),
     recording_id: str | None = Query(None),
+    dataset_projection_id: str | None = Query(None),
     dataset_name: str | None = Query(None),
     dataset_split: str | None = Query(None),
     dataset_label_space: str | None = Query(None),
@@ -73,10 +74,14 @@ def executor_selection(
             _SCOPE_INVALID,
             "Dataset scope requires dataset_name, dataset_split and dataset_label_space.",
         )
-    if (recording_id is not None) == has_dataset_scope:
+    scope_count = sum(
+        [recording_id is not None, dataset_projection_id is not None, has_dataset_scope]
+    )
+    if scope_count != 1:
         raise PlatformError(
             _SCOPE_INVALID,
-            "Provide exactly one scope: recording_id OR the dataset name/split/label_space triple.",
+            "Provide exactly one scope: recording_id, dataset_projection_id, or the "
+            "dataset name/split/label_space triple.",
         )
 
     state = request.app.state
@@ -100,6 +105,24 @@ def executor_selection(
                 model_release=resolved_release,
                 probe_recording=probe_recording,
                 executor_registry=executor_registry,
+            )
+        elif dataset_projection_id is not None:
+            manifest = DatasetBenchmarkService(session).prepare_projection_manifest(
+                dataset_projection_id
+            )
+            if not manifest.entries:
+                raise PlatformError(
+                    _SCOPE_INVALID, "Dataset scope requires at least one recording."
+                )
+            probe_recording = session.get(RecordingModel, manifest.entries[0].recording_id)
+            if probe_recording is None:
+                raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+            selection = resolve_auto_execution(
+                definition=definition,
+                model_release=resolved_release,
+                probe_recording=probe_recording,
+                executor_registry=executor_registry,
+                dataset_item_count=manifest.expected_recordings,
             )
         else:
             manifest = DatasetBenchmarkService(session).prepare_manifest(

@@ -1,8 +1,9 @@
 import { Tabs } from "antd";
 import { useLocalization } from "../localization/useLocalization";
 import { useEffect } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import { CaseAnalysisView } from "../features/algorithm-lab/CaseAnalysisView";
+import { rememberAlgorithmLabRoute } from "../app/workspaceMemory";
 
 /**
  * Algorithm Lab is the per-recording deep A/B comparison workspace.
@@ -14,6 +15,7 @@ export function AlgorithmLabPage() {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
+  const location = useLocation();
   const recordingId = params.get("recording") ?? undefined;
   const runAId = params.get("runA") ?? undefined;
   const runBId = params.get("runB") ?? undefined;
@@ -26,6 +28,10 @@ export function AlgorithmLabPage() {
     if (benchmarkId) next.set("benchmark", benchmarkId);
     navigate(`/experiments?${next.toString()}`, { replace: true });
   }, [tab, params, navigate]);
+
+  useEffect(() => {
+    rememberAlgorithmLabRoute(location.search);
+  }, [location.search]);
 
   const patch = (changes: Record<string, string | undefined>) => {
     const next = new URLSearchParams(params);

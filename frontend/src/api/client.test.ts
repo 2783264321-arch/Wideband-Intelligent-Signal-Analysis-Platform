@@ -667,3 +667,103 @@ test("importBatchRun preserves the structured backend error", async () => {
   expect(err.code).toBe("BATCH_RECORDING_NOT_FOUND");
   expect(err.display).toContain("Recording not found.");
 });
+
+import { deleteBlockersFromError, deleteRecording, listDatasetProjections } from "./client";
+
+test("listDatasetProjections maps wire snake_case to domain camelCase", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    items: [{
+      dataset_projection_id: "dsproj_1", source: "spacenet", dataset_name: "SpaceNet",
+      dataset_split: "test", label_space: "spacenet_14", sample_count: 2500,
+      ground_truth_sample_count: 2500, external: true, source_location: "D:\\SpaceNet\\test",
+    }],
+    total: 1,
+  }), { status: 200 })));
+  const page = await listDatasetProjections();
+  expect(page.total).toBe(1);
+  expect(page.items[0].datasetProjectionId).toBe("dsproj_1");
+  expect(page.items[0].sampleCount).toBe(2500);
+  expect(page.items[0].sourceLocation).toBe("D:\\SpaceNet\\test");
+});
+
+test("deleteRecording resolves on 204 and surfaces structured blockers on 409", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+  await expect(deleteRecording("rec_1")).resolves.toBeUndefined();
+
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    error: {
+      code: "RECORDING_DELETE_BLOCKED", message: "blocked",
+      details: { blockers: [{ kind: "dataset_evaluation", resource_id: "eval_1", reference: "recording" }] },
+    },
+  }), { status: 409 })));
+  const error = await deleteRecording("rec_1").catch((e) => e);
+  expect(deleteBlockersFromError(error)).toEqual([
+    { kind: "dataset_evaluation", resourceId: "eval_1", reference: "recording" },
+  ]);
+});
+
+test("dataset_projection executor-selection scope serializes the projection id", async () => {
+  const fetchMock = vi.fn(async (url: string) => {
+    expect(String(url)).toContain("dataset_projection_id=dsproj_1");
+    expect(String(url)).not.toContain("recording_id=");
+    return new Response(JSON.stringify({
+      requested_mode: "auto", resolved_executor: null, reason_code: "AUTO_NO_RUNNABLE_EXECUTOR",
+      reason: "none", workload_class: "small", candidates: [],
+    }), { status: 200 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  await getExecutorSelection({ scope: { kind: "dataset_projection", datasetProjectionId: "dsproj_1" }, pipelineId: "p" });
+  expect(fetchMock).toHaveBeenCalled();
+});
+
+import { createDatasetBenchmark, resolveImportedBenchmarkBatch } from "./client";
+
+test("createDatasetExperiment sends and maps dataset_projection_id", async () => {
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(body.dataset_projection_id).toBe("dsproj_A");
+    return new Response(JSON.stringify({ dataset_projection_id: "dsproj_A" }), { status: 201 });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const experiment = await createDatasetExperiment({
+    name: "e", datasetName: "SpaceNet", datasetSplit: "test", datasetLabelSpace: "spacenet_14",
+    datasetProjectionId: "dsproj_A", pluginId: "p", pluginVersion: "1.0",
+    executionMode: "manual", executor: "local_cpu", parameters: {}, maxConcurrency: 1,
+  });
+  expect(experiment.datasetProjectionId).toBe("dsproj_A");
+});
+
+test("resolved imported batch keeps projection identity and posts it on create", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    import_fingerprint: "f".repeat(64), dataset_name: "SpaceNet", dataset_split: "test",
+    label_space: "spacenet_14", dataset_projection_id: "dsproj_A", pipeline_id: "z",
+    pipeline_version: "1.0", recording_manifest_hash: "0".repeat(64), expected_recordings: 1,
+    resolved_recordings: 1, missing_recordings: 0, conflict_count: 0,
+    entries: [{ manifest_order: 0, recording_id: "rec_1", recording_name: "n",
+      analysis_run_id: "run_1", item_key: "k" }],
+  }), { status: 200 })));
+  const resolution = await resolveImportedBenchmarkBatch("f".repeat(64));
+  expect(resolution.datasetProjectionId).toBe("dsproj_A");
+
+  let posted: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    posted = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ dataset_projection_id: "dsproj_A" }), { status: 201 });
+  }));
+  await createDatasetBenchmark({ name: "e", resolution });
+  expect(posted!.dataset_projection_id).toBe("dsproj_A");
+});
+
+import { listAnalysisRuns } from "./client";
+
+test("listAnalysisRuns defaults to completed and omits status when null", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    urls.push(String(url));
+    return new Response(JSON.stringify([]), { status: 200 });
+  }));
+  await listAnalysisRuns("rec_1");
+  await listAnalysisRuns("rec_1", null);
+  expect(urls[0]).toContain("status=completed");
+  expect(urls[1]).not.toContain("status=");
+});

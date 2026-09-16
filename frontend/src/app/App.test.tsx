@@ -2,11 +2,14 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
 import { LocalizationProvider } from "../localization/LocalizationProvider";
+import { ThemeProvider } from "../theme/ThemeProvider";
 
 function AppWithLocale({ locale = "en-US" }: { locale?: "zh-CN" | "en-US" }) {
   return (
     <LocalizationProvider initialLocale={locale}>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </LocalizationProvider>
   );
 }
@@ -16,15 +19,17 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-test("renders the V1 navigation and defaults to the Recording Library", async () => {
+test("renders the task-oriented navigation and defaults to the Data Library", async () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <AppWithLocale />
     </MemoryRouter>,
   );
 
-  expect(screen.getByText("Recordings")).toBeInTheDocument();
-  expect(screen.getByText("Experiments")).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
+  expect(screen.getByText("Dataset Experiments")).toBeInTheDocument();
   expect(screen.getByText("Algorithm Lab")).toBeInTheDocument();
-  expect(await screen.findByRole("heading", { name: "Recording Library" })).toBeInTheDocument();
+  expect(screen.getByText("User Guide")).toBeInTheDocument();
+  expect(screen.getByText("Settings")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Data Library" })).toBeInTheDocument();
 });

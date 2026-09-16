@@ -12,6 +12,14 @@ import type {
   OperatingMetrics,
 } from "./types";
 import type { ExecutionMode, ExecutionSelectionScope, ExecutorSelection, AnalysisRunCreateRequest } from "./types";
+import type {
+  DatasetAnalysisHistoryPage,
+  DatasetProjectionListPage,
+  DatasetProjectionSummary,
+  DatasetSamplePage,
+  DeleteBlocker,
+  StandaloneSamplePage,
+} from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -90,6 +98,13 @@ export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function apiDelete(path: string): Promise<void> {
+  const response = await fetch(apiUrl(path), { method: "DELETE" });
+  if (!response.ok) {
+    throw await structuredErrorFromResponse(response);
+  }
 }
 
 interface RecordingWire {
@@ -425,6 +440,15 @@ function assertSelectionScope(scope: ExecutionSelectionScope): void {
     }
     return;
   }
+  if (scope.kind === "dataset_projection") {
+    if ("recordingId" in scope) {
+      throw new Error("Execution selection scope is invalid (mixed recording/dataset-projection scope).");
+    }
+    if (typeof scope.datasetProjectionId !== "string" || scope.datasetProjectionId.length === 0) {
+      throw new Error("Dataset projection scope requires a non-empty datasetProjectionId.");
+    }
+    return;
+  }
   throw new Error("Execution selection scope is invalid (mixed or unknown scope).");
 }
 
@@ -437,6 +461,8 @@ export async function getExecutorSelection(params: {
   const query = new URLSearchParams();
   if (params.scope.kind === "recording") {
     query.set("recording_id", params.scope.recordingId);
+  } else if (params.scope.kind === "dataset_projection") {
+    query.set("dataset_projection_id", params.scope.datasetProjectionId);
   } else {
     query.set("dataset_name", params.scope.datasetName);
     query.set("dataset_split", params.scope.datasetSplit);
@@ -492,10 +518,13 @@ export async function getAnalysisRun(runId: string): Promise<import("./types").A
   return mapAnalysisRun(await apiGet<AnalysisRunWire>(`/api/analysis-runs/${runId}`));
 }
 
-export async function listAnalysisRuns(recordingId: string): Promise<import("./types").AnalysisRun[]> {
-  const items = await apiGet<AnalysisRunWire[]>(
-    `/api/analysis-runs?recording_id=${encodeURIComponent(recordingId)}&status=completed`,
-  );
+export async function listAnalysisRuns(
+  recordingId: string,
+  status: import("./types").AnalysisRunStatus | null = "completed",
+): Promise<import("./types").AnalysisRun[]> {
+  const base = `/api/analysis-runs?recording_id=${encodeURIComponent(recordingId)}`;
+  const query = status === null ? base : `${base}&status=${encodeURIComponent(status)}`;
+  const items = await apiGet<AnalysisRunWire[]>(query);
   return items.map(mapAnalysisRun);
 }
 
@@ -505,6 +534,7 @@ interface DatasetExperimentWire {
   dataset_name: string;
   dataset_split: string;
   dataset_label_space: string;
+  dataset_projection_id: string | null;
   recording_manifest_hash: string;
   plugin_id: string;
   plugin_version: string;
@@ -561,6 +591,7 @@ interface DatasetExperimentCreateWire {
   dataset_name: string;
   dataset_split: string;
   dataset_label_space: string;
+  dataset_projection_id?: string | null;
   plugin_id: string;
   plugin_version: string;
   execution_mode: ExecutionMode;
@@ -578,6 +609,7 @@ function mapDatasetExperiment(item: DatasetExperimentWire): import("./types").Da
     datasetName: item.dataset_name,
     datasetSplit: item.dataset_split,
     datasetLabelSpace: item.dataset_label_space,
+    datasetProjectionId: item.dataset_projection_id,
     recordingManifestHash: item.recording_manifest_hash,
     pluginId: item.plugin_id,
     pluginVersion: item.plugin_version,
@@ -657,6 +689,7 @@ export async function createDatasetExperiment(
     parameters: request.parameters,
     max_concurrency: request.maxConcurrency,
   };
+  if (request.datasetProjectionId != null) wire.dataset_projection_id = request.datasetProjectionId;
   if (request.executor !== undefined) wire.executor = request.executor;
   if (request.modelReleaseId !== undefined) wire.model_release_id = request.modelReleaseId;
   if (request.evaluationProtocol !== undefined) wire.evaluation_protocol = request.evaluationProtocol;
@@ -985,6 +1018,7 @@ interface DatasetEvaluationWire {
   dataset_name: string;
   dataset_split: string;
   label_space: string;
+  dataset_projection_id: string | null;
   pipeline_id: string;
   pipeline_version: string;
   status: DatasetEvaluationStatus;
@@ -1043,6 +1077,7 @@ interface ImportedBatchResolutionWire {
   dataset_name: string;
   dataset_split: string;
   label_space: string;
+  dataset_projection_id: string | null;
   pipeline_id: string;
   pipeline_version: string;
   recording_manifest_hash: string;
@@ -1132,6 +1167,7 @@ function mapDatasetEvaluation(item: DatasetEvaluationWire): DatasetEvaluation {
     datasetName: item.dataset_name,
     datasetSplit: item.dataset_split,
     labelSpace: item.label_space,
+    datasetProjectionId: item.dataset_projection_id,
     pipelineId: item.pipeline_id,
     pipelineVersion: item.pipeline_version,
     status: item.status,
@@ -1190,6 +1226,7 @@ const mapImportedResolution = (item: ImportedBatchResolutionWire): ImportedBatch
   datasetName: item.dataset_name,
   datasetSplit: item.dataset_split,
   labelSpace: item.label_space,
+  datasetProjectionId: item.dataset_projection_id,
   pipelineId: item.pipeline_id,
   pipelineVersion: item.pipeline_version,
   recordingManifestHash: item.recording_manifest_hash,
@@ -1236,7 +1273,7 @@ export async function createDatasetBenchmark(payload: {
   name: string;
   resolution: ImportedBatchResolution;
 }): Promise<DatasetEvaluation> {
-  return mapDatasetEvaluation(await apiPostJson<DatasetEvaluationWire>("/api/dataset-benchmarks", {
+  const body: Record<string, unknown> = {
     name: payload.name,
     dataset_name: payload.resolution.datasetName,
     dataset_split: payload.resolution.datasetSplit,
@@ -1247,7 +1284,13 @@ export async function createDatasetBenchmark(payload: {
       recording_id: entry.recordingId,
       analysis_run_id: entry.analysisRunId,
     })),
-  }));
+  };
+  if (payload.resolution.datasetProjectionId != null) {
+    body.dataset_projection_id = payload.resolution.datasetProjectionId;
+  }
+  return mapDatasetEvaluation(
+    await apiPostJson<DatasetEvaluationWire>("/api/dataset-benchmarks", body),
+  );
 }
 
 export async function runDatasetBenchmark(id: string): Promise<DatasetEvaluation> {
@@ -1272,4 +1315,241 @@ export async function compareDatasetBenchmarks(a: string, b: string): Promise<Da
     aggregateB: mapAggregate(wire.aggregate_b),
     deltas: wire.deltas,
   };
+}
+
+// ---------------------------------------------------------------------------
+// V1.1 Data Library read + lifecycle contract
+// ---------------------------------------------------------------------------
+
+interface DatasetProjectionSummaryWire {
+  dataset_projection_id: string;
+  source: string;
+  dataset_name: string;
+  dataset_split: string;
+  label_space: string | null;
+  sample_count: number;
+  ground_truth_sample_count: number;
+  external: boolean;
+  source_location: string | null;
+}
+
+interface DatasetProjectionListWire {
+  items: DatasetProjectionSummaryWire[];
+  total: number;
+}
+
+function mapDatasetProjection(wire: DatasetProjectionSummaryWire): DatasetProjectionSummary {
+  return {
+    datasetProjectionId: wire.dataset_projection_id,
+    source: wire.source,
+    datasetName: wire.dataset_name,
+    datasetSplit: wire.dataset_split,
+    labelSpace: wire.label_space,
+    sampleCount: wire.sample_count,
+    groundTruthSampleCount: wire.ground_truth_sample_count,
+    external: wire.external,
+    sourceLocation: wire.source_location,
+  };
+}
+
+export async function listDatasetProjections(limit = 50, offset = 0): Promise<DatasetProjectionListPage> {
+  const wire = await apiGet<DatasetProjectionListWire>(
+    `/api/data-library/datasets?limit=${limit}&offset=${offset}`,
+  );
+  return { items: wire.items.map(mapDatasetProjection), total: wire.total };
+}
+
+export async function getDatasetProjection(datasetProjectionId: string): Promise<DatasetProjectionSummary> {
+  const wire = await apiGet<DatasetProjectionSummaryWire>(
+    `/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}`,
+  );
+  return mapDatasetProjection(wire);
+}
+
+interface DatasetSampleWire {
+  id: string;
+  name: string;
+  sample_rate_hz: number;
+  center_frequency_hz: number;
+  frequency_low_hz: number;
+  frequency_high_hz: number;
+  duration_s: number;
+  has_ground_truth: boolean;
+  analysis_count: number;
+  sample_rate_derived: boolean;
+  center_frequency_derived: boolean;
+}
+
+interface DatasetSampleListWire {
+  dataset_projection_id: string;
+  items: DatasetSampleWire[];
+  total: number;
+}
+
+export async function listDatasetSamples(
+  datasetProjectionId: string,
+  params: { limit?: number; offset?: number; search?: string } = {},
+): Promise<DatasetSamplePage> {
+  const query = new URLSearchParams({
+    limit: String(params.limit ?? 50),
+    offset: String(params.offset ?? 0),
+  });
+  if (params.search) query.set("search", params.search);
+  const wire = await apiGet<DatasetSampleListWire>(
+    `/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}/samples?${query.toString()}`,
+  );
+  return {
+    datasetProjectionId: wire.dataset_projection_id,
+    total: wire.total,
+    items: wire.items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      sampleRateHz: item.sample_rate_hz,
+      centerFrequencyHz: item.center_frequency_hz,
+      frequencyLowHz: item.frequency_low_hz,
+      frequencyHighHz: item.frequency_high_hz,
+      durationS: item.duration_s,
+      hasGroundTruth: item.has_ground_truth,
+      analysisCount: item.analysis_count,
+      sampleRateDerived: item.sample_rate_derived,
+      centerFrequencyDerived: item.center_frequency_derived,
+    })),
+  };
+}
+
+interface StandaloneSampleWire {
+  id: string;
+  name: string;
+  source: string;
+  sample_rate_hz: number;
+  center_frequency_hz: number;
+  frequency_low_hz: number;
+  frequency_high_hz: number;
+  duration_s: number;
+  data_format: string;
+  has_ground_truth: boolean;
+  analysis_count: number;
+}
+
+interface StandaloneSampleListWire {
+  items: StandaloneSampleWire[];
+  total: number;
+}
+
+export async function listStandaloneSamples(
+  params: { limit?: number; offset?: number; search?: string } = {},
+): Promise<StandaloneSamplePage> {
+  const query = new URLSearchParams({
+    limit: String(params.limit ?? 50),
+    offset: String(params.offset ?? 0),
+  });
+  if (params.search) query.set("search", params.search);
+  const wire = await apiGet<StandaloneSampleListWire>(
+    `/api/data-library/standalone-samples?${query.toString()}`,
+  );
+  return {
+    total: wire.total,
+    items: wire.items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      source: item.source,
+      sampleRateHz: item.sample_rate_hz,
+      centerFrequencyHz: item.center_frequency_hz,
+      frequencyLowHz: item.frequency_low_hz,
+      frequencyHighHz: item.frequency_high_hz,
+      durationS: item.duration_s,
+      dataFormat: item.data_format,
+      hasGroundTruth: item.has_ground_truth,
+      analysisCount: item.analysis_count,
+    })),
+  };
+}
+
+interface DatasetAnalysisHistoryItemWire {
+  kind: "experiment" | "evaluation" | "imported_batch";
+  resource_id: string;
+  name: string;
+  pipeline_id: string;
+  pipeline_version: string;
+  status: string;
+  executor: string | null;
+  expected_items: number;
+  completed_items: number;
+  failed_items: number;
+  coverage: number | null;
+  created_at: string | null;
+  dataset_evaluation_id: string | null;
+  batch_id: string | null;
+  archive_sha256: string | null;
+}
+
+interface DatasetAnalysisHistoryWire {
+  dataset_projection_id: string;
+  items: DatasetAnalysisHistoryItemWire[];
+  total: number;
+}
+
+export async function listDatasetAnalysisHistory(
+  datasetProjectionId: string,
+): Promise<DatasetAnalysisHistoryPage> {
+  const wire = await apiGet<DatasetAnalysisHistoryWire>(
+    `/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}/analysis-history`,
+  );
+  return {
+    datasetProjectionId: wire.dataset_projection_id,
+    total: wire.total,
+    items: wire.items.map((item) => ({
+      kind: item.kind,
+      resourceId: item.resource_id,
+      name: item.name,
+      pipelineId: item.pipeline_id,
+      pipelineVersion: item.pipeline_version,
+      status: item.status,
+      executor: item.executor,
+      expectedItems: item.expected_items,
+      completedItems: item.completed_items,
+      failedItems: item.failed_items,
+      coverage: item.coverage,
+      createdAt: item.created_at,
+      datasetEvaluationId: item.dataset_evaluation_id,
+      batchId: item.batch_id,
+      archiveSha256: item.archive_sha256,
+    })),
+  };
+}
+
+export async function deleteRecording(recordingId: string): Promise<void> {
+  await apiDelete(`/api/recordings/${encodeURIComponent(recordingId)}`);
+}
+
+export async function deleteDatasetProjection(datasetProjectionId: string): Promise<void> {
+  await apiDelete(`/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}`);
+}
+
+export async function deleteAnalysisRun(runId: string): Promise<void> {
+  await apiDelete(`/api/analysis-runs/${encodeURIComponent(runId)}`);
+}
+
+export function deleteBlockersFromError(error: unknown): DeleteBlocker[] {
+  if (!(error instanceof PlatformApiError)) {
+    return [];
+  }
+  const raw = (error.details as { blockers?: unknown }).blockers;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const blockers: DeleteBlocker[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const { kind, resource_id, reference } = entry as Record<string, unknown>;
+    if (typeof kind !== "string" || typeof resource_id !== "string" || typeof reference !== "string") {
+      continue;
+    }
+    blockers.push({
+      kind: kind as DeleteBlocker["kind"],
+      resourceId: resource_id,
+      reference: reference as DeleteBlocker["reference"],
+    });
+  }
+  return blockers;
 }

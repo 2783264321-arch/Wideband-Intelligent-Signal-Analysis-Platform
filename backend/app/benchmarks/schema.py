@@ -60,6 +60,7 @@ class FrozenRunItemInput(BaseModel):
 
 class DatasetEvaluationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    dataset_projection_id: str | None = None
     dataset_name: str
     dataset_split: str
     label_space: str
@@ -125,6 +126,7 @@ class DatasetEvaluationRead(BaseModel):
     dataset_name: str
     dataset_split: str
     label_space: str
+    dataset_projection_id: str | None = None
     pipeline_id: str
     pipeline_version: str
     status: str
@@ -198,6 +200,7 @@ class ImportedBatchResolutionPreviewRead(BaseModel):
     dataset_name: str
     dataset_split: str
     label_space: str
+    dataset_projection_id: str | None = None
     pipeline_id: str
     pipeline_version: str
     recording_manifest_hash: str
