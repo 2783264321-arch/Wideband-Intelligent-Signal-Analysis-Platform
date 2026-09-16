@@ -45,3 +45,31 @@ def run_additive_migrations(engine) -> None:
     upgrade_dataset_benchmarks(engine)
     upgrade_m9_1_provenance(engine)
     upgrade_dataset_experiments(engine)
+    upgrade_v1_1_dataset_projection(engine)
+
+
+def upgrade_v1_1_dataset_projection(engine) -> None:
+    """V1.1: optional opaque dataset projection identity on experiments/evaluations."""
+    with engine.begin() as connection:
+        experiments = {column["name"] for column in inspect(connection).get_columns("dataset_experiments")}
+        if "dataset_projection_id" not in experiments:
+            connection.execute(
+                text("ALTER TABLE dataset_experiments ADD COLUMN dataset_projection_id VARCHAR(64)")
+            )
+        evaluations = {column["name"] for column in inspect(connection).get_columns("dataset_evaluations")}
+        if "dataset_projection_id" not in evaluations:
+            connection.execute(
+                text("ALTER TABLE dataset_evaluations ADD COLUMN dataset_projection_id VARCHAR(64)")
+            )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_dataset_experiments_dataset_projection_id "
+                "ON dataset_experiments (dataset_projection_id)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_dataset_evaluations_dataset_projection_id "
+                "ON dataset_evaluations (dataset_projection_id)"
+            )
+        )

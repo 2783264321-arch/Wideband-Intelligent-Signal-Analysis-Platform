@@ -17,6 +17,7 @@ class DatasetEvaluationModel(Base):
     dataset_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     dataset_split: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     label_space: Mapped[str] = mapped_column(String(128), nullable=False)
+    dataset_projection_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     pipeline_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     pipeline_version: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)

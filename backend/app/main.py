@@ -13,6 +13,7 @@ from app.db.migrations import run_additive_migrations
 from app.db.session import Database
 from app.storage.service import StorageService
 from app.datasets.router import router as datasets_router
+from app.data_library.router import router as data_library_router
 from app.evaluation.router import router as evaluation_router
 from app.recordings.router import router as recordings_router
 from app.dsp.router import router as dsp_router
@@ -178,6 +179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     app.include_router(recordings_router)
+    app.include_router(data_library_router)
     app.include_router(datasets_router)
     app.include_router(dsp_router)
     app.include_router(ground_truth_router)

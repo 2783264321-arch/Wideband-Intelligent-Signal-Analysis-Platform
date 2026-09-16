@@ -12,13 +12,13 @@ from app.analysis.model import AnalysisRunModel
 from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
 from app.benchmarks.service import DatasetBenchmarkService, resolve_protocol_config
 from app.core.errors import PlatformError
+from app.datasets.projection import DatasetProjectionResolver
 from app.dataset_experiments.model import (
     DatasetExperimentAttemptModel,
     DatasetExperimentItemModel,
     DatasetExperimentModel,
 )
-from app.dataset_experiments.schema import (
-    DatasetExperimentAttemptRead,
+from app.dataset_experiments.schema import (    DatasetExperimentAttemptRead,
     DatasetExperimentItemRead,
     DatasetExperimentRead,
 )
@@ -207,6 +207,7 @@ class DatasetExperimentService:
             dataset_name=experiment.dataset_name,
             dataset_split=experiment.dataset_split,
             dataset_label_space=experiment.dataset_label_space,
+            dataset_projection_id=experiment.dataset_projection_id,
             recording_manifest_hash=experiment.recording_manifest_hash,
             plugin_id=experiment.plugin_id,
             plugin_version=experiment.plugin_version,
@@ -307,6 +308,7 @@ class DatasetExperimentService:
         max_concurrency,
         model_release_id=None,
         execution_mode="manual",
+        dataset_projection_id=None,
     ):
         if max_concurrency < 1:
             raise PlatformError(
@@ -319,7 +321,37 @@ class DatasetExperimentService:
                 "EXECUTION_REQUEST_INVALID", "execution_mode must be 'manual' or 'auto'."
             )
 
-        manifest = self._manifest_preview(dataset_name, dataset_split, dataset_label_space)
+        if dataset_projection_id is not None:
+            projection = DatasetProjectionResolver(self.session).get(dataset_projection_id)
+            if dataset_name is not None and dataset_name != projection.dataset_name:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_name does not match the dataset projection.",
+                )
+            if dataset_split is not None and dataset_split != projection.dataset_split:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_split does not match the dataset projection.",
+                )
+            if dataset_label_space is not None and dataset_label_space != (projection.label_space or ""):
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_label_space does not match the dataset projection.",
+                )
+            dataset_name = projection.dataset_name
+            dataset_split = projection.dataset_split
+            dataset_label_space = projection.label_space or ""
+            manifest = DatasetBenchmarkService(self.session).prepare_projection_manifest(
+                dataset_projection_id
+            )
+        else:
+            if dataset_name is None or dataset_split is None or dataset_label_space is None:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Dataset identity requires dataset_projection_id or the "
+                    "dataset_name/split/label_space triple.",
+                )
+            manifest = self._manifest_preview(dataset_name, dataset_split, dataset_label_space)
         definition = self._resolve_definition(plugin_id, plugin_version)
         validate_plugin_parameters(definition, parameters)
         resolved_release = self._resolve_release(definition, model_release_id)
@@ -393,6 +425,7 @@ class DatasetExperimentService:
             dataset_name=dataset_name,
             dataset_split=dataset_split,
             dataset_label_space=dataset_label_space,
+            dataset_projection_id=dataset_projection_id,
             recording_manifest_hash=manifest.recording_manifest_hash,
             plugin_id=definition.plugin_id,
             plugin_version=definition.plugin_version,
@@ -444,9 +477,14 @@ class DatasetExperimentService:
 
         # 1. Frozen dataset membership hash.
         try:
-            manifest = self._manifest_preview(
-                experiment.dataset_name, experiment.dataset_split, experiment.dataset_label_space
-            )
+            if experiment.dataset_projection_id is not None:
+                manifest = DatasetBenchmarkService(self.session).prepare_projection_manifest(
+                    experiment.dataset_projection_id
+                )
+            else:
+                manifest = self._manifest_preview(
+                    experiment.dataset_name, experiment.dataset_split, experiment.dataset_label_space
+                )
         except PlatformError as exc:
             raise PlatformError(
                 "DATASET_EXPERIMENT_EXECUTION_IDENTITY_CHANGED",

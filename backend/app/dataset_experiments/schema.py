@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.analysis.schema import MODEL_RELEASE_ID_PATTERN
 from app.benchmarks.schema import DEFAULT_PHYSICAL_TF_PROTOCOL
@@ -21,9 +21,10 @@ class DatasetExperimentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=255)
-    dataset_name: str = Field(min_length=1)
-    dataset_split: str = Field(min_length=1)
-    dataset_label_space: str = Field(min_length=1)
+    dataset_projection_id: str | None = Field(default=None, min_length=1, max_length=64)
+    dataset_name: str | None = Field(default=None, min_length=1)
+    dataset_split: str | None = Field(default=None, min_length=1)
+    dataset_label_space: str | None = Field(default=None, min_length=1)
 
     plugin_id: str = Field(min_length=1)
     plugin_version: str = Field(min_length=1)
@@ -35,6 +36,20 @@ class DatasetExperimentCreate(BaseModel):
 
     evaluation_protocol: str = Field(default=DEFAULT_PHYSICAL_TF_PROTOCOL, min_length=1)
     max_concurrency: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _require_identity_scope(self) -> "DatasetExperimentCreate":
+        has_projection = self.dataset_projection_id is not None
+        has_triple = all(
+            value is not None
+            for value in (self.dataset_name, self.dataset_split, self.dataset_label_space)
+        )
+        if not has_projection and not has_triple:
+            raise ValueError(
+                "Dataset identity requires dataset_projection_id or the "
+                "dataset_name/split/label_space triple."
+            )
+        return self
 
 
 class DatasetExperimentItemRead(BaseModel):
@@ -75,6 +90,7 @@ class DatasetExperimentRead(BaseModel):
     dataset_name: str
     dataset_split: str
     dataset_label_space: str
+    dataset_projection_id: str | None = None
     recording_manifest_hash: str
 
     plugin_id: str

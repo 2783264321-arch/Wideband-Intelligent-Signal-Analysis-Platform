@@ -26,6 +26,7 @@ from app.benchmarks.schema import (
     PROTOCOL_CONFIG_V2,
 )
 from app.core.errors import PlatformError
+from app.datasets.projection import DatasetProjectionResolver
 from app.detections.model import DetectionResultModel
 from app.ground_truth.model import GroundTruthModel
 from app.recordings.model import RecordingModel
@@ -148,6 +149,7 @@ class ImportedBatchResolutionPreview:
     missing_recordings: int
     conflict_count: int
     entries: tuple[ImportedBatchResolutionEntry, ...]
+    dataset_projection_id: str | None = None
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -182,6 +184,11 @@ class DatasetBenchmarkService:
                 .order_by(RecordingModel.name)
             ).all()
         )
+        if not recordings:
+            raise PlatformError("DATASET_SNAPSHOT_EMPTY", "No Ground-Truth-bearing Recordings match the dataset selection.", 422)
+        return self._to_manifest_recordings(recordings)
+
+    def _to_manifest_recordings(self, recordings: list[RecordingModel]) -> list[ManifestRecording]:
         if not recordings:
             raise PlatformError("DATASET_SNAPSHOT_EMPTY", "No Ground-Truth-bearing Recordings match the dataset selection.", 422)
         recording_ids = [recording.id for recording in recordings]
@@ -296,18 +303,29 @@ class DatasetBenchmarkService:
                 409,
             )
 
-        dataset_keys = {
-            (recording.dataset_name, recording.dataset_split, recording.label_space)
-            for recording in recordings.values()
-        }
-        if len(dataset_keys) != 1 or any(value is None for value in next(iter(dataset_keys))):
+        resolver = DatasetProjectionResolver(self.session)
+        projection_ids = set()
+        for recording in recordings.values():
+            projection = resolver.find_for_recording(recording)
+            if projection is None:
+                raise PlatformError(
+                    "IMPORTED_BATCH_STATE_INCONSISTENT",
+                    "Imported batch references a Recording without a dataset identity.",
+                    409,
+                )
+            projection_ids.add(projection.dataset_projection_id)
+        if len(projection_ids) != 1:
             raise PlatformError(
                 "IMPORTED_BATCH_STATE_INCONSISTENT",
-                "Imported batch Recordings do not share one dataset/split/label-space identity.",
+                "Imported batch Recordings do not share one dataset projection identity.",
                 409,
             )
-        dataset_name, dataset_split, label_space = next(iter(dataset_keys))
-        frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
+        dataset_projection_id = next(iter(projection_ids))
+        projection = resolver.get(dataset_projection_id)
+        dataset_name = projection.dataset_name
+        dataset_split = projection.dataset_split
+        label_space = projection.label_space or ""
+        frozen = self._build_projection_frozen_manifest(dataset_projection_id)
         frozen_ids = {entry.recording_id for entry in frozen.entries}
         if set(recording_ids) != frozen_ids:
             raise PlatformError(
@@ -347,6 +365,7 @@ class DatasetBenchmarkService:
             dataset_name=dataset_name,
             dataset_split=dataset_split,
             label_space=label_space,
+            dataset_projection_id=dataset_projection_id,
             pipeline_id=next(iter(pipeline_ids)),
             pipeline_version=next(iter(pipeline_versions)),
             recording_manifest_hash=frozen.sha256,
@@ -430,8 +449,7 @@ class DatasetBenchmarkService:
             ),
         )
 
-    def prepare_manifest(self, dataset_name: str, dataset_split: str, label_space: str) -> ManifestPreview:
-        frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
+    def _preview_from_frozen(self, frozen: FrozenRecordingManifest) -> ManifestPreview:
         gt_counts = {entry.recording_id: len(entry.ground_truth) for entry in frozen.entries}
         entries = tuple(
             ManifestEntry(
@@ -446,6 +464,28 @@ class DatasetBenchmarkService:
             recording_manifest_hash=frozen.sha256,
             expected_recordings=len(frozen.entries),
             entries=entries,
+        )
+
+    def prepare_manifest(self, dataset_name: str, dataset_split: str, label_space: str) -> ManifestPreview:
+        return self._preview_from_frozen(
+            self._build_frozen_manifest(dataset_name, dataset_split, label_space)
+        )
+
+    def _build_projection_frozen_manifest(self, dataset_projection_id: str) -> FrozenRecordingManifest:
+        resolver = DatasetProjectionResolver(self.session)
+        projection = resolver.get(dataset_projection_id)
+        members = resolver.members(dataset_projection_id, require_ground_truth=True)
+        manifests = self._to_manifest_recordings(members)
+        return build_recording_manifest(
+            projection.dataset_name,
+            projection.dataset_split,
+            projection.label_space or "",
+            manifests,
+        )
+
+    def prepare_projection_manifest(self, dataset_projection_id: str) -> ManifestPreview:
+        return self._preview_from_frozen(
+            self._build_projection_frozen_manifest(dataset_projection_id)
         )
 
     # ---------- pipeline snapshot resolution ----------
@@ -504,8 +544,12 @@ class DatasetBenchmarkService:
         items: list[dict],
         allow_incomplete: bool = False,
         evaluation_protocol: str = DEFAULT_PHYSICAL_TF_PROTOCOL,
+        dataset_projection_id: str | None = None,
     ) -> DatasetEvaluationModel:
-        frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
+        if dataset_projection_id is not None:
+            frozen = self._build_projection_frozen_manifest(dataset_projection_id)
+        else:
+            frozen = self._build_frozen_manifest(dataset_name, dataset_split, label_space)
         if frozen.sha256 != recording_manifest_hash:
             raise PlatformError("DATASET_MANIFEST_CHANGED", "Recording manifest changed since preview.", 409)
 
@@ -574,6 +618,7 @@ class DatasetBenchmarkService:
             coverage=0.0,
             comparable=False,
             recording_manifest_hash=frozen.sha256,
+            dataset_projection_id=dataset_projection_id,
             evaluation_protocol=evaluation_protocol,
             protocol_config_json=_protocol_config_for(evaluation_protocol),
         )

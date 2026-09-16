@@ -114,6 +114,10 @@ class DatasetProjectionResolver:
             grouped.setdefault(projection.dataset_projection_id, []).append(recording)
         return grouped
 
+    def grouped(self) -> dict[str, list[RecordingModel]]:
+        """Public single-pass grouping accessor for read services."""
+        return self._grouped()
+
     def list(self, limit: int, offset: int) -> tuple[list[DatasetProjection], int]:
         grouped = self._grouped()
         projections = sorted(

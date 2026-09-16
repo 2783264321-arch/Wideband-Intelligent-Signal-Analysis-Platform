@@ -29,6 +29,7 @@ def create_experiment(payload: DatasetExperimentCreate, request: Request):
             dataset_name=payload.dataset_name,
             dataset_split=payload.dataset_split,
             dataset_label_space=payload.dataset_label_space,
+            dataset_projection_id=payload.dataset_projection_id,
             plugin_id=payload.plugin_id,
             plugin_version=payload.plugin_version,
             executor=payload.executor,
