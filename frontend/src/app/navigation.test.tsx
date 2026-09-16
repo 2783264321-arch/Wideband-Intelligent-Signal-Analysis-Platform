@@ -16,6 +16,14 @@ function AppWithLocale({ locale = "en-US" }: { locale?: "zh-CN" | "en-US" }) {
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.includes("/api/recordings/rec_1")) {
+      return new Response(JSON.stringify({
+        id: "rec_1", name: "sample-a", data_format: "complex64_le", source: "custom",
+        external_path: null, sample_rate_hz: 1e6, center_frequency_hz: 0,
+        frequency_low_hz: -5e5, frequency_high_hz: 5e5, num_samples: 1000, duration_s: 0.001,
+        dataset_name: null, dataset_split: null, label_space: null, has_ground_truth: false,
+      }));
+    }
     if (url.includes("/api/recordings?")) return new Response(JSON.stringify({ items: [], total: 0 }));
     return new Response(JSON.stringify([]));
   }));
@@ -132,4 +140,45 @@ test("Algorithm Lab workspace is restored after leaving via the sidebar", async 
   expect(window.localStorage.getItem("wisa.algorithmLab.lastRoute")).toBe(
     "/algorithm-lab?recording=rec1&runA=run_a&runB=run_b",
   );
+});
+
+test("/ and /recordings redirect to the Data Library", async () => {
+  const { unmount } = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <AppWithLocale />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByTestId("sidebar")).toBeInTheDocument();
+  unmount();
+  render(
+    <MemoryRouter initialEntries={["/recordings"]}>
+      <AppWithLocale />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByTestId("sidebar")).toBeInTheDocument();
+});
+
+test("data library routes render under the shell", async () => {
+  render(
+    <MemoryRouter initialEntries={["/data-library"]}>
+      <AppWithLocale />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByRole("heading", { name: "Data Library" })).toBeInTheDocument();
+});
+
+test("dataset detail and standalone sample routes render under the shell", async () => {
+  const { unmount } = render(
+    <MemoryRouter initialEntries={["/data-library/datasets/dsproj_1"]}>
+      <AppWithLocale />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByTestId("sidebar")).toBeInTheDocument();
+  unmount();
+  render(
+    <MemoryRouter initialEntries={["/data-library/samples/rec_1"]}>
+      <AppWithLocale />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByTestId("sidebar")).toBeInTheDocument();
 });

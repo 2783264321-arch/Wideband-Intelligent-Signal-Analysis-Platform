@@ -19,17 +19,17 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-test("renders the task-oriented navigation and defaults to the Recording Library", async () => {
+test("renders the task-oriented navigation and defaults to the Data Library", async () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <AppWithLocale />
     </MemoryRouter>,
   );
 
-  expect(screen.getByText("Data Library")).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
   expect(screen.getByText("Dataset Experiments")).toBeInTheDocument();
   expect(screen.getByText("Algorithm Lab")).toBeInTheDocument();
   expect(screen.getByText("User Guide")).toBeInTheDocument();
   expect(screen.getByText("Settings")).toBeInTheDocument();
-  expect(await screen.findByRole("heading", { name: "Recording Library" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Data Library" })).toBeInTheDocument();
 });
