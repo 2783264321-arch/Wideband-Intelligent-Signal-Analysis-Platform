@@ -1,16 +1,18 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { App } from "./App";
 import { LocalizationProvider } from "../localization/LocalizationProvider";
+import { ThemeProvider } from "../theme/ThemeProvider";
 
 function AppWithLocale({ locale = "en-US" }: { locale?: "zh-CN" | "en-US" }) {
   return (
     <LocalizationProvider initialLocale={locale}>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </LocalizationProvider>
   );
 }
-
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
@@ -20,18 +22,19 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-test("primary navigation is exactly Recordings | Experiments | Algorithm Lab", () => {
+test("primary navigation is exactly Data Library | Dataset Experiments | Algorithm Lab | User Guide | Settings", () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <AppWithLocale />
     </MemoryRouter>,
   );
   const items = screen.getAllByRole("menuitem");
-  expect(items).toHaveLength(3);
-  expect(screen.getByRole("menuitem", { name: /Recordings/ })).toBeInTheDocument();
-  expect(screen.getByRole("menuitem", { name: /Experiments/ })).toBeInTheDocument();
+  expect(items).toHaveLength(5);
+  expect(screen.getByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Dataset Experiments/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /Algorithm Lab/ })).toBeInTheDocument();
-  expect(screen.queryByText("Settings")).toBeNull();
+  expect(screen.getByRole("menuitem", { name: /User Guide/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Settings/ })).toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: /Compare/ })).toBeNull();
   expect(screen.queryByRole("menuitem", { name: /Benchmarks/ })).toBeNull();
   expect(screen.queryByText("Spectrum Analysis")).toBeNull();
@@ -43,7 +46,7 @@ test("the Experiments route renders the Experiments tab shell", async () => {
       <AppWithLocale />
     </MemoryRouter>,
   );
-  expect(await screen.findByRole("tab", { name: "Experiments" })).toBeInTheDocument();
+  expect(await screen.findByRole("tab", { name: "Dataset Experiments" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Compare" })).toBeInTheDocument();
 });
 
@@ -92,20 +95,18 @@ test("algorithm-lab query drilldown still loads the case comparison workspace", 
   expect((await screen.findAllByText("Algorithm Lab")).length).toBeGreaterThan(0);
 });
 
-// ---------------------------------------------------------------------------
-// L2 — default language and switch
-// ---------------------------------------------------------------------------
-
 test("fresh UI defaults to Simplified Chinese primary navigation", async () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <AppWithLocale locale="zh-CN" />
     </MemoryRouter>,
   );
-  expect(await screen.findByRole("menuitem", { name: /信号记录/ })).toBeInTheDocument();
+  expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /数据集实验/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /算法评测实验室/ })).toBeInTheDocument();
-  expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+  expect(screen.getByRole("menuitem", { name: /使用指南/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /设置/ })).toBeInTheDocument();
+  expect(screen.getAllByRole("menuitem")).toHaveLength(5);
 });
 
 test("the header language switch is present and accessible", async () => {
@@ -117,4 +118,18 @@ test("the header language switch is present and accessible", async () => {
   expect(await screen.findByLabelText("语言")).toBeInTheDocument();
   expect(screen.getByText("中文")).toBeInTheDocument();
   expect(screen.getByText("EN")).toBeInTheDocument();
+});
+
+test("Algorithm Lab workspace is restored after leaving via the sidebar", async () => {
+  window.localStorage.clear();
+  render(
+    <MemoryRouter initialEntries={["/algorithm-lab?recording=rec1&runA=run_a&runB=run_b"]}>
+      <AppWithLocale locale="zh-CN" />
+    </MemoryRouter>,
+  );
+  fireEvent.click(await screen.findByRole("menuitem", { name: /数据管理/ }));
+  fireEvent.click(await screen.findByRole("menuitem", { name: /算法评测实验室/ }));
+  expect(window.localStorage.getItem("wisa.algorithmLab.lastRoute")).toBe(
+    "/algorithm-lab?recording=rec1&runA=run_a&runB=run_b",
+  );
 });

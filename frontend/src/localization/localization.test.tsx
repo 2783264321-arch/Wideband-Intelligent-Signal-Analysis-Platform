@@ -44,7 +44,7 @@ test("setLocale rerenders immediately and persists", () => {
   const { result } = renderHook(() => useLocalization(), { wrapper });
   act(() => { result.current.setLocale("en-US"); });
   expect(result.current.locale).toBe("en-US");
-  expect(result.current.t("nav.experiments")).toBe("Experiments");
+  expect(result.current.t("nav.experiments")).toBe("Dataset Experiments");
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("en-US");
   act(() => { result.current.setLocale("zh-CN"); });
   expect(result.current.locale).toBe("zh-CN");

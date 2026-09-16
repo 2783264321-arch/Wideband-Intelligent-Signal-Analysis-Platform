@@ -17,11 +17,31 @@ export const zhCN: Record<MessageKey, string> = {
   "language.en": "EN",
 
   "nav.recordings": "信号记录",
+  "nav.dataLibrary": "数据管理",
   "nav.experiments": "数据集实验",
   "nav.algorithmLab": "算法评测实验室",
+  "nav.guide": "使用指南",
+  "nav.settings": "设置",
+
+  "theme.title": "主题",
+  "theme.system": "跟随系统",
+  "theme.light": "浅色",
+  "theme.dark": "深色",
+
+  "sidebar.collapse": "收起侧边栏",
+  "sidebar.expand": "展开侧边栏",
+
+  "guide.title": "使用指南",
+  "guide.subtitle": "面向任务的 WISA 主要工作流程指南。",
+  "guide.open": "指南",
 
   "settings.title": "设置",
   "settings.subtitle": "V1 有意保持运行时配置最小化。",
+  "settings.appearance": "外观",
+  "settings.language": "语言",
+  "settings.sidebar": "侧边栏",
+  "settings.sidebarCollapsed": "默认收起",
+  "settings.openGuide": "打开使用指南",
 
   "common.loading": "加载中",
   "common.loadingRecording": "正在加载信号记录与时频图…",
