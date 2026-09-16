@@ -84,7 +84,7 @@ export function StandaloneSampleList() {
           extra={<Tag>{sample.source}</Tag>}
           actions={[
             <Button key="open" type="link" onClick={() => navigate(`/spectrum/${sample.id}`)}>
-              {t("dataLibrary.openWorkspace")}
+              {t("dataLibrary.analyze")}
             </Button>,
             <Button
               key="history"

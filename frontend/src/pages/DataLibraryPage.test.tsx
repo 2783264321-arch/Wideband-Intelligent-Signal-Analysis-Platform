@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { DataLibraryPage } from "./DataLibraryPage";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
@@ -56,12 +56,18 @@ function route(url: string, init?: RequestInit): Response {
   return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
 function renderPage() {
   return render(
     renderWithLocalization(
       <MemoryRouter initialEntries={["/data-library"]}>
         <Routes>
           <Route path="/data-library" element={<DataLibraryPage />} />
+          <Route path="/spectrum/:recordingId" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
     ),
@@ -117,4 +123,13 @@ test("card import results opens the batch import modal", async () => {
   const card = await screen.findByTestId("dataset-card");
   fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
   expect(await screen.findByText("Import Batch Analysis Package")).toBeInTheDocument();
+});
+
+test("sample Analyze opens the spectrum workspace", async () => {
+  renderPage();
+  await screen.findAllByTestId("dataset-card");
+  fireEvent.click(screen.getByRole("tab", { name: "Standalone Samples" }));
+  const card = await screen.findByTestId("standalone-card");
+  fireEvent.click(within(card).getByRole("button", { name: "Analyze" }));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_s1");
 });
