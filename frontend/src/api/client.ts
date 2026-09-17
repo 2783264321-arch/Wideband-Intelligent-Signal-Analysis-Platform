@@ -1075,6 +1075,7 @@ interface DatasetEvaluationWire {
   dataset_split: string;
   label_space: string;
   dataset_projection_id: string | null;
+  dataset_id?: string | null;
   pipeline_id: string;
   pipeline_version: string;
   status: DatasetEvaluationStatus;
@@ -1224,6 +1225,7 @@ function mapDatasetEvaluation(item: DatasetEvaluationWire): DatasetEvaluation {
     datasetSplit: item.dataset_split,
     labelSpace: item.label_space,
     datasetProjectionId: item.dataset_projection_id,
+    datasetId: item.dataset_id ?? null,
     pipelineId: item.pipeline_id,
     pipelineVersion: item.pipeline_version,
     status: item.status,

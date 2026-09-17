@@ -23,7 +23,7 @@ def _plugins_root() -> Path:
 
 
 def build_control_plane_dependencies(settings: Settings) -> ControlPlaneDependencies:
-    from app.analysis.local_executor import build_local_providers
+    from app.analysis.local_executor import build_deployment_local_providers
     from app.pipelines.registry import create_pipeline_registry
     from app.remote_execution.identity import (
         resolve_local_orchestrator_commit,
@@ -74,7 +74,11 @@ def build_control_plane_dependencies(settings: Settings) -> ControlPlaneDependen
         runtime_commit_config = None
         identity_resolver = None
 
-    providers = dict(build_local_providers(settings))
+    # Deployment provider set (includes the Standard-Mode built-in local CPU when
+    # no explicit local_cpu provider is configured). The Dataset Experiment
+    # coordinator worker must expose the same approved Standard CPU capability as
+    # the control plane, otherwise the frozen-authority check rejects it.
+    providers = dict(build_deployment_local_providers(settings))
     if remote_provider is not None:
         providers[remote_provider.name] = remote_provider
     certificates = ExecutionCertificateStore(

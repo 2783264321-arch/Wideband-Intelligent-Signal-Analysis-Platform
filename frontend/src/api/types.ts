@@ -276,6 +276,7 @@ export interface DatasetEvaluation {
   datasetSplit: string;
   labelSpace: string;
   datasetProjectionId: string | null;
+  datasetId: string | null;
   pipelineId: string;
   pipelineVersion: string;
   status: DatasetEvaluationStatus;

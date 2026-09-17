@@ -127,6 +127,7 @@ class DatasetEvaluationRead(BaseModel):
     dataset_split: str
     label_space: str
     dataset_projection_id: str | None = None
+    dataset_id: str | None = None
     pipeline_id: str
     pipeline_version: str
     status: str
