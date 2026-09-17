@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from app.core.errors import PlatformError
 from app.dsp.iq import read_iq
+from app.dsp.spectrum import compute_spectrum_preview
 from app.dsp.stft import get_or_create_stft_preview
 from app.recordings.service import RecordingService
 
@@ -43,6 +44,40 @@ def get_spectrogram(
             data_root=request.app.state.settings.data_root,
             storage=request.app.state.storage,
         )
+
+
+class SpectrumRead(BaseModel):
+    frequency_hz: list[float]
+    power_db: list[float]
+    fft_size: int
+    segment_count: int
+
+
+@router.get("/{recording_id}/spectrum", response_model=SpectrumRead)
+def get_spectrum(
+    recording_id: str,
+    request: Request,
+    fft_size: int = Query(4096, ge=256, le=16384),
+    segments: int = Query(8, ge=1, le=32),
+):
+    with request.app.state.database.session_factory() as session:
+        recording = RecordingService(
+            session,
+            request.app.state.storage,
+            request.app.state.settings.data_root,
+        ).get(recording_id)
+        preview = compute_spectrum_preview(
+            recording,
+            data_root=request.app.state.settings.data_root,
+            fft_size=fft_size,
+            segments=segments,
+        )
+    return SpectrumRead(
+        frequency_hz=preview.frequency_hz,
+        power_db=preview.power_db,
+        fft_size=preview.fft_size,
+        segment_count=preview.segment_count,
+    )
 
 
 class WaveformRead(BaseModel):

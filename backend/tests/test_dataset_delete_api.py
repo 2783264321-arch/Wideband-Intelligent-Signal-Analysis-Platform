@@ -76,6 +76,24 @@ def test_delete_dataset_is_atomic_when_blocked(client, session, tmp_path):
     assert session.query(RecordingModel).filter(RecordingModel.dataset_id == dataset_id).count() == 2
 
 
+def test_dataset_member_without_legacy_name_cannot_be_deleted_as_standalone(client, session, tmp_path):
+    # P2 hardening: dataset_id is authoritative even when legacy dataset_name is null.
+    data_path = tmp_path / "onlyid.bin"
+    data_path.write_bytes(b"\x00" * 8)
+    session.add(RecordingModel(
+        id="rec_onlyid", name="onlyid", data_path=str(data_path), data_format="float16_interleaved_le",
+        source="spacenet", external_path=str(data_path), sample_rate_hz=1.0, center_frequency_hz=2.0,
+        frequency_low_hz=1.5, frequency_high_hz=2.5, num_samples=2, duration_s=2.0,
+        dataset_name=None, dataset_split=None, label_space=None, has_ground_truth=False,
+        dataset_id="ds_only", sample_key="onlyid",
+    ))
+    session.commit()
+
+    response = client.delete("/api/recordings/rec_onlyid")
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "RECORDING_IS_DATASET_MEMBER"
+
+
 def test_legacy_projection_delete_endpoint_still_exists(client, session, tmp_path):
     from app.datasets.projection import DatasetProjectionResolver
 

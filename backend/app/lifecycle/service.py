@@ -85,12 +85,17 @@ def delete_standalone_recording(session, storage, recording_id: str) -> None:
     recording = session.get(RecordingModel, recording_id)
     if recording is None:
         raise PlatformError("RECORDING_NOT_FOUND", "Recording not found.", 404)
-    if recording.dataset_name is not None:
+    # Membership authority is dataset_id; legacy dataset_name is still honored.
+    if recording.dataset_id is not None or recording.dataset_name is not None:
         raise PlatformError(
             "RECORDING_IS_DATASET_MEMBER",
             "Dataset members are removed through the dataset; use Remove Dataset.",
             409,
-            {"dataset_name": recording.dataset_name, "dataset_split": recording.dataset_split},
+            {
+                "dataset_id": recording.dataset_id,
+                "dataset_name": recording.dataset_name,
+                "dataset_split": recording.dataset_split,
+            },
         )
     blockers = find_recording_blockers(session, [recording_id])
     if blockers:
