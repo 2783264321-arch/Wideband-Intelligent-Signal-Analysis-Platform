@@ -36,6 +36,8 @@ export interface RecordingSummary {
   id: string;
   name: string;
   datasetName: string | null;
+  datasetId: string | null;
+  sampleKey: string | null;
   sampleRateHz: number;
   centerFrequencyHz: number;
   durationS: number;
@@ -521,22 +523,41 @@ export interface DatasetProjectionListPage {
   total: number;
 }
 
+export interface DatasetSummary {
+  id: string;
+  name: string;
+  split: string;
+  adapterId: string;
+  labelSpace: string | null;
+  localRoot: string;
+  portableFingerprint: string | null;
+  sampleCount: number;
+  groundTruthSampleCount: number;
+  createdAt: string;
+}
+
+export interface DatasetPage {
+  items: DatasetSummary[];
+  total: number;
+}
+
 export interface DatasetSample {
   id: string;
   name: string;
+  sampleKey: string | null;
+  dataFormat: string;
   sampleRateHz: number;
   centerFrequencyHz: number;
   frequencyLowHz: number;
   frequencyHighHz: number;
+  numSamples: number;
   durationS: number;
   hasGroundTruth: boolean;
   analysisCount: number;
-  sampleRateDerived: boolean;
-  centerFrequencyDerived: boolean;
 }
 
 export interface DatasetSamplePage {
-  datasetProjectionId: string;
+  datasetId: string;
   items: DatasetSample[];
   total: number;
 }
@@ -579,7 +600,7 @@ export interface DatasetAnalysisHistoryItem {
 }
 
 export interface DatasetAnalysisHistoryPage {
-  datasetProjectionId: string;
+  datasetId: string;
   items: DatasetAnalysisHistoryItem[];
   total: number;
 }

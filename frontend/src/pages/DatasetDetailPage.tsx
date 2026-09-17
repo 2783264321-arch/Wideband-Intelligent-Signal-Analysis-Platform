@@ -1,13 +1,9 @@
 import { Button, Descriptions, Space, Tabs, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import {
-  deleteBlockersFromError,
-  deleteDatasetProjection,
-  getDatasetProjection,
-} from "../api/client";
+import { deleteBlockersFromError, deleteDataset, getDataset } from "../api/client";
 import { useLocalization } from "../localization/useLocalization";
-import type { DatasetProjectionSummary, DeleteBlocker } from "../api/types";
+import type { DatasetSummary, DeleteBlocker } from "../api/types";
 import { BatchImportModal } from "../features/imports/BatchImportModal";
 import { DatasetAnalysisHistory } from "../features/data-library/DatasetAnalysisHistory";
 import { DatasetSamplesTable } from "../features/data-library/DatasetSamplesTable";
@@ -15,10 +11,10 @@ import { DeleteConfirmModal } from "../features/data-library/DeleteConfirmModal"
 import { DeleteConflictAlert } from "../features/data-library/DeleteConflictAlert";
 
 export function DatasetDetailPage() {
-  const { datasetProjectionId = "" } = useParams();
+  const { datasetId = "" } = useParams();
   const { t } = useLocalization();
   const navigate = useNavigate();
-  const [dataset, setDataset] = useState<DatasetProjectionSummary | null>(null);
+  const [dataset, setDataset] = useState<DatasetSummary | null>(null);
   const [batchOpen, setBatchOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -26,7 +22,7 @@ export function DatasetDetailPage() {
 
   useEffect(() => {
     let active = true;
-    getDatasetProjection(datasetProjectionId)
+    getDataset(datasetId)
       .then((value) => {
         if (active) setDataset(value);
       })
@@ -36,13 +32,13 @@ export function DatasetDetailPage() {
     return () => {
       active = false;
     };
-  }, [datasetProjectionId]);
+  }, [datasetId]);
 
   const remove = async () => {
     setRemoving(true);
     setBlockers([]);
     try {
-      await deleteDatasetProjection(datasetProjectionId);
+      await deleteDataset(datasetId);
       navigate("/data-library");
     } catch (reason) {
       setBlockers(deleteBlockersFromError(reason));
@@ -56,7 +52,7 @@ export function DatasetDetailPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
         <Typography.Title level={3} style={{ marginBottom: 0 }}>
-          {dataset ? `${dataset.datasetName} · ${dataset.datasetSplit}` : t("dataLibrary.title")}
+          {dataset ? `${dataset.name} · ${dataset.split}` : t("dataLibrary.title")}
         </Typography.Title>
         <Button
           danger
@@ -81,23 +77,25 @@ export function DatasetDetailPage() {
                 column={2}
                 data-testid="dataset-overview"
                 items={[
-                  { key: "name", label: t("dataLibrary.title"), children: dataset.datasetName },
-                  { key: "split", label: t("dataLibrary.tabDatasets"), children: dataset.datasetSplit },
+                  { key: "name", label: t("dataLibrary.name"), children: dataset.name },
+                  { key: "split", label: t("dataLibrary.split"), children: dataset.split },
                   { key: "count", label: t("dataLibrary.sampleCount"), children: dataset.sampleCount },
                   {
                     key: "gt",
                     label: t("dataLibrary.groundTruth"),
                     children: dataset.groundTruthSampleCount,
                   },
-                  { key: "source", label: t("dataLibrary.source"), children: dataset.source },
                   {
-                    key: "scope",
-                    label: t("dataLibrary.external"),
-                    children: dataset.external ? t("dataLibrary.external") : t("dataLibrary.local"),
+                    key: "label",
+                    label: t("form.labelSpace"),
+                    children: dataset.labelSpace ?? "—",
                   },
-                  ...(dataset.labelSpace
-                    ? [{ key: "label", label: t("form.labelSpace"), children: dataset.labelSpace }]
-                    : []),
+                  { key: "adapter", label: t("dataLibrary.adapter"), children: dataset.adapterId },
+                  {
+                    key: "root",
+                    label: t("dataLibrary.localPath"),
+                    children: dataset.localRoot,
+                  },
                 ]}
               />
             ) : (
@@ -107,17 +105,14 @@ export function DatasetDetailPage() {
           {
             key: "samples",
             label: t("dataLibrary.samples"),
-            children: <DatasetSamplesTable datasetProjectionId={datasetProjectionId} />,
+            children: <DatasetSamplesTable datasetId={datasetId} />,
           },
           {
             key: "history",
             label: t("dataLibrary.analysisHistory"),
             children: (
               <DatasetAnalysisHistory
-                datasetProjectionId={datasetProjectionId}
-                onCreateExperiment={() =>
-                  navigate(`/experiments?datasetProjectionId=${datasetProjectionId}`)
-                }
+                datasetId={datasetId}
                 onImportBatchResults={() => setBatchOpen(true)}
               />
             ),

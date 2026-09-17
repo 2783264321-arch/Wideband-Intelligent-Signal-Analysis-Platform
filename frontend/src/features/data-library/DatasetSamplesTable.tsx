@@ -7,7 +7,7 @@ import type { DatasetSample } from "../../api/types";
 
 const PAGE_SIZE = 20;
 
-export function DatasetSamplesTable({ datasetProjectionId }: { datasetProjectionId: string }) {
+export function DatasetSamplesTable({ datasetId }: { datasetId: string }) {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [items, setItems] = useState<DatasetSample[]>([]);
@@ -19,7 +19,7 @@ export function DatasetSamplesTable({ datasetProjectionId }: { datasetProjection
   useEffect(() => {
     let active = true;
     setLoading(true);
-    listDatasetSamples(datasetProjectionId, {
+    listDatasetSamples(datasetId, {
       limit: PAGE_SIZE,
       offset: (page - 1) * PAGE_SIZE,
       search: search || undefined,
@@ -35,7 +35,7 @@ export function DatasetSamplesTable({ datasetProjectionId }: { datasetProjection
     return () => {
       active = false;
     };
-  }, [datasetProjectionId, page, search]);
+  }, [datasetId, page, search]);
 
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
@@ -58,8 +58,7 @@ export function DatasetSamplesTable({ datasetProjectionId }: { datasetProjection
             title: t("dataLibrary.samples"),
             key: "range",
             render: (_value, record) =>
-              `${(record.frequencyLowHz / 1e6).toFixed(3)}–${(record.frequencyHighHz / 1e6).toFixed(3)} MHz` +
-              (record.sampleRateDerived ? ` · ${t("dataLibrary.derived")}` : ""),
+              `${(record.frequencyLowHz / 1e6).toFixed(3)}–${(record.frequencyHighHz / 1e6).toFixed(3)} MHz`,
           },
           {
             title: "Duration",
@@ -80,8 +79,8 @@ export function DatasetSamplesTable({ datasetProjectionId }: { datasetProjection
             title: "",
             key: "actions",
             render: (_value, record) => (
-              <Button type="link" onClick={() => navigate(`/spectrum/${record.id}`)}>
-                {t("spectrum.open")}
+              <Button type="link" onClick={() => navigate(`/samples/${record.id}`)}>
+                {t("dataLibrary.openSample")}
               </Button>
             ),
           },

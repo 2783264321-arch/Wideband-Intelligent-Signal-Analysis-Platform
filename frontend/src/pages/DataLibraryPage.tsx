@@ -58,7 +58,7 @@ export function DataLibraryPage() {
           <Dropdown
             menu={{
               items: [
-                { key: "iq", label: t("dataLibrary.importStandaloneIq") },
+                { key: "iq", label: t("dataLibrary.addStandaloneIq") },
                 { key: "register", label: t("dataLibrary.registerDataset") },
               ],
               onClick: ({ key }) => {
@@ -101,7 +101,11 @@ export function DataLibraryPage() {
         ]}
       />
 
-      <ImportStandaloneIqModal open={iqOpen} onClose={() => setIqOpen(false)} />
+      <ImportStandaloneIqModal
+        open={iqOpen}
+        onClose={() => setIqOpen(false)}
+        onImported={() => navigate(0)}
+      />
       <ImportRunModal open={singleOpen} recordings={recordings} onClose={() => setSingleOpen(false)} />
       <BatchImportModal open={batchOpen} onClose={() => setBatchOpen(false)} />
 

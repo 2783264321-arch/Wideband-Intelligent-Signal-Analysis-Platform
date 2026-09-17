@@ -13,7 +13,11 @@ import { DeleteConfirmModal } from "../features/data-library/DeleteConfirmModal"
 import { DeleteConflictAlert } from "../features/data-library/DeleteConflictAlert";
 import { CompareShortcut } from "../features/algorithm-lab/CompareShortcut";
 
-export function StandaloneSampleDetailPage() {
+/**
+ * One product page for BOTH Dataset samples and Standalone samples.
+ * Dataset membership comes from ``recording.datasetId``.
+ */
+export function SampleDetailPage() {
   const { recordingId = "" } = useParams();
   const { t } = useLocalization();
   const navigate = useNavigate();
@@ -46,14 +50,18 @@ export function StandaloneSampleDetailPage() {
     }
   };
 
+  const isDatasetMember = recording?.datasetId != null;
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <Typography.Title level={3} style={{ marginBottom: 0 }}>
         {recording ? recording.name : t("common.loadingRecording")}
       </Typography.Title>
+
       {recording ? (
         <Descriptions
           column={2}
+          data-testid="sample-overview"
           items={[
             { key: "fs", label: "Fs", children: `${(recording.sampleRateHz / 1e6).toFixed(3)} MHz` },
             {
@@ -66,15 +74,44 @@ export function StandaloneSampleDetailPage() {
               label: t("dataLibrary.frequencyRange"),
               children: `${(recording.frequencyLowHz / 1e6).toFixed(3)}–${(recording.frequencyHighHz / 1e6).toFixed(3)} MHz`,
             },
-            {
-              key: "duration",
-              label: "Duration",
-              children: `${recording.durationS.toFixed(6)} s`,
-            },
+            { key: "duration", label: "Duration", children: `${recording.durationS.toFixed(6)} s` },
             { key: "format", label: "Format", children: recording.dataFormat },
-            { key: "source", label: t("dataLibrary.source"), children: recording.source },
+            {
+              key: "gt",
+              label: t("common.groundTruth"),
+              children: recording.hasGroundTruth ? "✓" : "—",
+            },
+            {
+              key: "count",
+              label: t("dataLibrary.analysisHistory"),
+              children: runs.length,
+            },
           ]}
         />
+      ) : null}
+
+      {recording ? (
+        <Space wrap data-testid="sample-context">
+          {isDatasetMember ? (
+            <>
+              <Tag color="geekblue">{t("dataLibrary.datasetSample")}</Tag>
+              {recording.datasetName ? (
+                <Tag>
+                  {recording.datasetName}
+                  {recording.datasetSplit ? ` · ${recording.datasetSplit}` : ""}
+                </Tag>
+              ) : null}
+              <Button
+                type="link"
+                onClick={() => navigate(`/data-library/datasets/${recording.datasetId}`)}
+              >
+                {t("dataLibrary.openDataset")}
+              </Button>
+            </>
+          ) : (
+            <Tag>{t("dataLibrary.standaloneSample")}</Tag>
+          )}
+        </Space>
       ) : null}
 
       <DeleteConflictAlert blockers={blockers} />
@@ -83,9 +120,17 @@ export function StandaloneSampleDetailPage() {
         <Button type="primary" onClick={() => navigate(`/spectrum/${recordingId}`)}>
           {t("dataLibrary.analyze")}
         </Button>
-        <Button danger onClick={() => { setBlockers([]); setConfirmOpen(true); }}>
-          {t("dataLibrary.delete")}
-        </Button>
+        {recording && !isDatasetMember ? (
+          <Button
+            danger
+            onClick={() => {
+              setBlockers([]);
+              setConfirmOpen(true);
+            }}
+          >
+            {t("dataLibrary.delete")}
+          </Button>
+        ) : null}
       </Space>
 
       <Card title={t("dataLibrary.analysisHistory")}>
@@ -93,11 +138,17 @@ export function StandaloneSampleDetailPage() {
           dataSource={runs}
           locale={{ emptyText: t("dataLibrary.empty") }}
           renderItem={(run) => (
-            <List.Item data-testid="run-history-item">
+            <List.Item
+              data-testid="run-history-item"
+              actions={[
+                <Button key="view" type="link" onClick={() => navigate(`/signals/${run.id}`)}>
+                  {t("dataLibrary.viewResults")}
+                </Button>,
+              ]}
+            >
               <Space wrap>
                 <Tag>{run.pipelineId}</Tag>
                 <Tag>{run.status}</Tag>
-                <Tag>{run.executor}</Tag>
                 <span>{run.id}</span>
               </Space>
             </List.Item>

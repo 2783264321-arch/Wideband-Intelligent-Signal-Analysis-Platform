@@ -14,9 +14,11 @@ import type {
 import type { ExecutionMode, ExecutionSelectionScope, ExecutorSelection, AnalysisRunCreateRequest } from "./types";
 import type {
   DatasetAnalysisHistoryPage,
+  DatasetPage,
   DatasetProjectionListPage,
   DatasetProjectionSummary,
   DatasetSamplePage,
+  DatasetSummary,
   DeleteBlocker,
   StandaloneSamplePage,
 } from "./types";
@@ -123,6 +125,8 @@ interface RecordingWire {
   dataset_split: string | null;
   label_space: string | null;
   has_ground_truth: boolean;
+  dataset_id?: string | null;
+  sample_key?: string | null;
 }
 
 interface SpectrogramWire {
@@ -175,6 +179,8 @@ const mapRecording = (item: RecordingWire): RecordingDetail => ({
   datasetSplit: item.dataset_split,
   labelSpace: item.label_space,
   hasGroundTruth: item.has_ground_truth,
+  datasetId: item.dataset_id ?? null,
+  sampleKey: item.sample_key ?? null,
 });
 
 const mapDetection = (item: DetectionWire): DetectionResult => ({
@@ -221,6 +227,30 @@ export async function importRecording(form: FormData): Promise<RecordingDetail> 
   const response = await fetch(apiUrl("/api/recordings"), { method: "POST", body: form });
   if (!response.ok) throw await structuredErrorFromResponse(response);
   return mapRecording(await response.json() as RecordingWire);
+}
+
+export interface RegisterRecordingPathRequest {
+  path: string;
+  name: string;
+  dataFormat: string;
+  sampleRateHz: number;
+  centerFrequencyHz: number;
+  labelSpace?: string | null;
+}
+
+/** Register an existing on-host IQ file WITHOUT copying it into WISA storage. */
+export async function registerRecordingPath(
+  request: RegisterRecordingPathRequest,
+): Promise<RecordingDetail> {
+  const wire: Record<string, unknown> = {
+    path: request.path,
+    name: request.name,
+    data_format: request.dataFormat,
+    sample_rate_hz: request.sampleRateHz,
+    center_frequency_hz: request.centerFrequencyHz,
+  };
+  if (request.labelSpace != null && request.labelSpace !== "") wire.label_space = request.labelSpace;
+  return mapRecording(await apiPostJson<RecordingWire>("/api/recordings/register-path", wire));
 }
 
 export async function getRecording(recordingId: string): Promise<RecordingDetail> {
@@ -1366,28 +1396,71 @@ export async function getDatasetProjection(datasetProjectionId: string): Promise
   return mapDatasetProjection(wire);
 }
 
+interface DatasetSummaryWire {
+  id: string;
+  name: string;
+  split: string;
+  adapter_id: string;
+  label_space: string | null;
+  local_root: string;
+  portable_fingerprint: string | null;
+  sample_count: number;
+  ground_truth_sample_count: number;
+  created_at: string;
+}
+
+interface DatasetListWire {
+  items: DatasetSummaryWire[];
+  total: number;
+}
+
+function mapDatasetSummary(wire: DatasetSummaryWire): DatasetSummary {
+  return {
+    id: wire.id,
+    name: wire.name,
+    split: wire.split,
+    adapterId: wire.adapter_id,
+    labelSpace: wire.label_space,
+    localRoot: wire.local_root,
+    portableFingerprint: wire.portable_fingerprint,
+    sampleCount: wire.sample_count,
+    groundTruthSampleCount: wire.ground_truth_sample_count,
+    createdAt: wire.created_at,
+  };
+}
+
+export async function listDatasets(limit = 50, offset = 0): Promise<DatasetPage> {
+  const wire = await apiGet<DatasetListWire>(`/api/datasets?limit=${limit}&offset=${offset}`);
+  return { items: wire.items.map(mapDatasetSummary), total: wire.total };
+}
+
+export async function getDataset(datasetId: string): Promise<DatasetSummary> {
+  return mapDatasetSummary(await apiGet<DatasetSummaryWire>(`/api/datasets/${encodeURIComponent(datasetId)}`));
+}
+
 interface DatasetSampleWire {
   id: string;
   name: string;
+  sample_key: string | null;
+  data_format: string;
   sample_rate_hz: number;
   center_frequency_hz: number;
   frequency_low_hz: number;
   frequency_high_hz: number;
+  num_samples: number;
   duration_s: number;
   has_ground_truth: boolean;
   analysis_count: number;
-  sample_rate_derived: boolean;
-  center_frequency_derived: boolean;
 }
 
 interface DatasetSampleListWire {
-  dataset_projection_id: string;
+  dataset_id: string;
   items: DatasetSampleWire[];
   total: number;
 }
 
 export async function listDatasetSamples(
-  datasetProjectionId: string,
+  datasetId: string,
   params: { limit?: number; offset?: number; search?: string } = {},
 ): Promise<DatasetSamplePage> {
   const query = new URLSearchParams({
@@ -1396,23 +1469,24 @@ export async function listDatasetSamples(
   });
   if (params.search) query.set("search", params.search);
   const wire = await apiGet<DatasetSampleListWire>(
-    `/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}/samples?${query.toString()}`,
+    `/api/datasets/${encodeURIComponent(datasetId)}/samples?${query.toString()}`,
   );
   return {
-    datasetProjectionId: wire.dataset_projection_id,
+    datasetId: wire.dataset_id,
     total: wire.total,
     items: wire.items.map((item) => ({
       id: item.id,
       name: item.name,
+      sampleKey: item.sample_key,
+      dataFormat: item.data_format,
       sampleRateHz: item.sample_rate_hz,
       centerFrequencyHz: item.center_frequency_hz,
       frequencyLowHz: item.frequency_low_hz,
       frequencyHighHz: item.frequency_high_hz,
+      numSamples: item.num_samples,
       durationS: item.duration_s,
       hasGroundTruth: item.has_ground_truth,
       analysisCount: item.analysis_count,
-      sampleRateDerived: item.sample_rate_derived,
-      centerFrequencyDerived: item.center_frequency_derived,
     })),
   };
 }
@@ -1484,19 +1558,19 @@ interface DatasetAnalysisHistoryItemWire {
 }
 
 interface DatasetAnalysisHistoryWire {
-  dataset_projection_id: string;
+  dataset_id: string;
   items: DatasetAnalysisHistoryItemWire[];
   total: number;
 }
 
 export async function listDatasetAnalysisHistory(
-  datasetProjectionId: string,
+  datasetId: string,
 ): Promise<DatasetAnalysisHistoryPage> {
   const wire = await apiGet<DatasetAnalysisHistoryWire>(
-    `/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}/analysis-history`,
+    `/api/datasets/${encodeURIComponent(datasetId)}/analysis-history`,
   );
   return {
-    datasetProjectionId: wire.dataset_projection_id,
+    datasetId: wire.dataset_id,
     total: wire.total,
     items: wire.items.map((item) => ({
       kind: item.kind,
@@ -1524,6 +1598,11 @@ export async function deleteRecording(recordingId: string): Promise<void> {
 
 export async function deleteDatasetProjection(datasetProjectionId: string): Promise<void> {
   await apiDelete(`/api/data-library/datasets/${encodeURIComponent(datasetProjectionId)}`);
+}
+
+/** First-class dataset removal by dataset_id (membership-based). */
+export async function deleteDataset(datasetId: string): Promise<void> {
+  await apiDelete(`/api/datasets/${encodeURIComponent(datasetId)}`);
 }
 
 export async function deleteAnalysisRun(runId: string): Promise<void> {

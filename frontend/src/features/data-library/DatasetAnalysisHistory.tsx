@@ -8,15 +8,13 @@ import type { DatasetAnalysisHistoryItem } from "../../api/types";
 import { DatasetAnalysisCompareEntry } from "./DatasetAnalysisCompareEntry";
 
 export interface DatasetAnalysisHistoryProps {
-  datasetProjectionId: string;
+  datasetId: string;
   onImportBatchResults?: () => void;
-  onCreateExperiment?: () => void;
 }
 
 export function DatasetAnalysisHistory({
-  datasetProjectionId,
+  datasetId,
   onImportBatchResults,
-  onCreateExperiment,
 }: DatasetAnalysisHistoryProps) {
   const { t } = useLocalization();
   const navigate = useNavigate();
@@ -25,7 +23,7 @@ export function DatasetAnalysisHistory({
 
   useEffect(() => {
     let active = true;
-    listDatasetAnalysisHistory(datasetProjectionId)
+    listDatasetAnalysisHistory(datasetId)
       .then((page) => {
         if (active) setItems(page.items);
       })
@@ -35,12 +33,11 @@ export function DatasetAnalysisHistory({
     return () => {
       active = false;
     };
-  }, [datasetProjectionId]);
+  }, [datasetId]);
 
   return (
     <Space direction="vertical" style={{ width: "100%" }}>
       <Space>
-        <Button onClick={() => onCreateExperiment?.()}>{t("dataLibrary.createExperiment")}</Button>
         <Button onClick={() => onImportBatchResults?.()}>{t("dataLibrary.importBatchResults")}</Button>
       </Space>
       {error ? <Typography.Text type="danger">{error}</Typography.Text> : null}
@@ -86,7 +83,7 @@ export function DatasetAnalysisHistory({
           </List.Item>
         )}
       />
-      <DatasetAnalysisCompareEntry datasetProjectionId={datasetProjectionId} items={items} />
+      <DatasetAnalysisCompareEntry items={items} />
     </Space>
   );
 }

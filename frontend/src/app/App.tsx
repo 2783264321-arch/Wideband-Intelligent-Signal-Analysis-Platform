@@ -2,7 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { MainLayout } from "./MainLayout";
 import { DataLibraryPage } from "../pages/DataLibraryPage";
 import { DatasetDetailPage } from "../pages/DatasetDetailPage";
-import { StandaloneSampleDetailPage } from "../pages/StandaloneSampleDetailPage";
+import { SampleDetailPage } from "../pages/SampleDetailPage";
 import { SpectrumAnalysisPage } from "../pages/SpectrumAnalysisPage";
 import { SignalsPage } from "../pages/SignalsPage";
 import { SignalDetailPage } from "../pages/SignalDetailPage";
@@ -19,8 +19,9 @@ export function App() {
         <Route index element={<Navigate to="/data-library" replace />} />
         <Route path="recordings" element={<Navigate to="/data-library" replace />} />
         <Route path="data-library" element={<DataLibraryPage />} />
-        <Route path="data-library/datasets/:datasetProjectionId" element={<DatasetDetailPage />} />
-        <Route path="data-library/samples/:recordingId" element={<StandaloneSampleDetailPage />} />
+        <Route path="data-library/datasets/:datasetId" element={<DatasetDetailPage />} />
+        <Route path="samples/:recordingId" element={<SampleDetailPage />} />
+        <Route path="data-library/samples/:recordingId" element={<SampleDetailPage />} />
         <Route path="spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
         <Route path="signals/:runId" element={<SignalsPage />} />
         <Route path="signals/:runId/:detectionId" element={<SignalDetailPage />} />

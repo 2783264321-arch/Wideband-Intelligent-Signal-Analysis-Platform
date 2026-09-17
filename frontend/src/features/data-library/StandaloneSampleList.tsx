@@ -83,15 +83,8 @@ export function StandaloneSampleList() {
           title={sample.name}
           extra={<Tag>{sample.source}</Tag>}
           actions={[
-            <Button key="open" type="link" onClick={() => navigate(`/spectrum/${sample.id}`)}>
-              {t("dataLibrary.analyze")}
-            </Button>,
-            <Button
-              key="history"
-              type="link"
-              onClick={() => navigate(`/data-library/samples/${sample.id}`)}
-            >
-              {t("dataLibrary.analysisHistory")}
+            <Button key="open" type="link" onClick={() => navigate(`/samples/${sample.id}`)}>
+              {t("dataLibrary.openSample")}
             </Button>,
             <Button
               key="delete"

@@ -1,28 +1,24 @@
 import { Button, Card, Empty, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  deleteBlockersFromError,
-  deleteDatasetProjection,
-  listDatasetProjections,
-} from "../../api/client";
+import { deleteBlockersFromError, deleteDataset, listDatasets } from "../../api/client";
 import { toErrorText } from "../../api/errors";
 import { useLocalization } from "../../localization/useLocalization";
-import type { DatasetProjectionSummary, DeleteBlocker } from "../../api/types";
+import type { DatasetSummary, DeleteBlocker } from "../../api/types";
 import { DeleteConfirmModal } from "./DeleteConfirmModal";
 import { DeleteConflictAlert } from "./DeleteConflictAlert";
 
 export interface DatasetListProps {
-  onImportResults?: (datasetProjectionId: string) => void;
+  onImportResults?: (datasetId: string) => void;
 }
 
 export function DatasetList({ onImportResults }: DatasetListProps) {
   const { t } = useLocalization();
   const navigate = useNavigate();
-  const [items, setItems] = useState<DatasetProjectionSummary[]>([]);
+  const [items, setItems] = useState<DatasetSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pendingRemove, setPendingRemove] = useState<DatasetProjectionSummary | null>(null);
+  const [pendingRemove, setPendingRemove] = useState<DatasetSummary | null>(null);
   const [removing, setRemoving] = useState(false);
   const [blockers, setBlockers] = useState<DeleteBlocker[]>([]);
 
@@ -30,7 +26,7 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
     setLoading(true);
     setError(null);
     try {
-      const page = await listDatasetProjections();
+      const page = await listDatasets();
       setItems(page.items);
     } catch (reason) {
       setError(toErrorText(reason, t("common.noData")));
@@ -48,7 +44,7 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
     setRemoving(true);
     setBlockers([]);
     try {
-      await deleteDatasetProjection(pendingRemove.datasetProjectionId);
+      await deleteDataset(pendingRemove.id);
       setPendingRemove(null);
       await refresh();
     } catch (reason) {
@@ -70,30 +66,19 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
       <DeleteConflictAlert blockers={blockers} />
       {items.map((dataset) => (
         <Card
-          key={dataset.datasetProjectionId}
+          key={dataset.id}
           data-testid="dataset-card"
-          title={`${dataset.datasetName} · ${dataset.datasetSplit}`}
-          extra={
-            <Tag color={dataset.external ? "geekblue" : "green"}>
-              {dataset.external ? t("dataLibrary.external") : t("dataLibrary.local")}
-            </Tag>
-          }
+          title={`${dataset.name} · ${dataset.split}`}
+          extra={<Tag color="geekblue">{dataset.adapterId}</Tag>}
           actions={[
             <Button
               key="browse"
               type="link"
-              onClick={() => navigate(`/data-library/datasets/${dataset.datasetProjectionId}`)}
+              onClick={() => navigate(`/data-library/datasets/${dataset.id}`)}
             >
               {t("dataLibrary.browseSamples")}
             </Button>,
-            <Button
-              key="create"
-              type="link"
-              onClick={() => navigate(`/experiments?datasetProjectionId=${dataset.datasetProjectionId}`)}
-            >
-              {t("dataLibrary.createExperiment")}
-            </Button>,
-            <Button key="import" type="link" onClick={() => onImportResults?.(dataset.datasetProjectionId)}>
+            <Button key="import" type="link" onClick={() => onImportResults?.(dataset.id)}>
               {t("dataLibrary.importResults")}
             </Button>,
             <Button
@@ -117,9 +102,6 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
               {t("dataLibrary.groundTruth")} {dataset.groundTruthSampleCount}
             </Tag>
             {dataset.labelSpace ? <Tag>{dataset.labelSpace}</Tag> : null}
-            <Tag>
-              {t("dataLibrary.source")}: {dataset.source}
-            </Tag>
           </Space>
         </Card>
       ))}

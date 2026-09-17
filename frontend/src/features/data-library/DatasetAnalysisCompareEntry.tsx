@@ -5,7 +5,6 @@ import { useLocalization } from "../../localization/useLocalization";
 import type { DatasetAnalysisHistoryItem } from "../../api/types";
 
 export interface DatasetAnalysisCompareEntryProps {
-  datasetProjectionId: string;
   items: DatasetAnalysisHistoryItem[];
 }
 

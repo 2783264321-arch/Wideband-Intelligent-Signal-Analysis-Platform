@@ -4,6 +4,8 @@ export const demoRecording: RecordingSummary = {
   id: "rec_demo",
   name: "SpaceNet Demo Recording",
   datasetName: "SpaceNet Advanced",
+  datasetId: null,
+  sampleKey: null,
   sampleRateHz: 83_500_000,
   centerFrequencyHz: 2_441_750_000,
   durationS: 0.1,
