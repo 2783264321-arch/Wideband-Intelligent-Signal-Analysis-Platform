@@ -16,6 +16,8 @@ interface SpectrogramViewerProps {
   groundTruth?: GroundTruthResult[];
   selectedDetectionId?: string;
   onSelectDetection?: (id: string) => void;
+  /** Pure representation hides the GT/Prediction/Selected overlay legend. */
+  showOverlayLegend?: boolean;
 }
 
 // Size concepts (do not conflate):
@@ -51,6 +53,7 @@ export function SpectrogramViewer({
   groundTruth = [],
   selectedDetectionId,
   onSelectDetection,
+  showOverlayLegend = true,
 }: SpectrogramViewerProps) {
   const { t } = useLocalization();
   const { token } = theme.useToken();
@@ -181,6 +184,7 @@ export function SpectrogramViewer({
           </svg>
         </div>
       </div>
+      {showOverlayLegend ? (
       <div
         data-testid="spectrogram-legend"
         style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 8, color: token.colorTextSecondary, fontSize: 12 }}
@@ -205,6 +209,7 @@ export function SpectrogramViewer({
           {t("spectrum.legendSelected")}
         </span>
       </div>
+      ) : null}
       <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>
         <span style={{ color: token.colorTextSecondary }}>{meta.tStartS.toFixed(6)} s</span>
         <span data-testid="cursor-readout" style={{ color: token.colorTextSecondary }}>

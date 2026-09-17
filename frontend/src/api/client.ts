@@ -297,6 +297,25 @@ export async function getWaveform(recordingId: string, tStartS: number, tEndS: n
   return { timeS: item.time_s, i: item.i, q: item.q };
 }
 
+export async function getSpectrum(
+  recordingId: string,
+  params: { fftSize?: number; segments?: number } = {},
+): Promise<import("./types").SpectrumData> {
+  const query = new URLSearchParams();
+  if (params.fftSize != null) query.set("fft_size", String(params.fftSize));
+  if (params.segments != null) query.set("segments", String(params.segments));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const item = await apiGet<{ frequency_hz: number[]; power_db: number[]; fft_size: number; segment_count: number }>(
+    `/api/recordings/${encodeURIComponent(recordingId)}/spectrum${suffix}`,
+  );
+  return {
+    frequencyHz: item.frequency_hz,
+    powerDb: item.power_db,
+    fftSize: item.fft_size,
+    segmentCount: item.segment_count,
+  };
+}
+
 export async function getFFT(detectionId: string, maxPoints = 2048): Promise<FFTData> {
   const item = await apiGet<{ frequency_hz: number[]; magnitude_db: number[] }>(`/api/detections/${detectionId}/fft?max_points=${maxPoints}`);
   return { frequencyHz: item.frequency_hz, magnitudeDb: item.magnitude_db };

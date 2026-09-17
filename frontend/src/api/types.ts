@@ -66,6 +66,13 @@ export interface FFTData {
   magnitudeDb: number[];
 }
 
+export interface SpectrumData {
+  frequencyHz: number[];
+  powerDb: number[];
+  fftSize: number;
+  segmentCount: number;
+}
+
 export interface PipelineDefinition {
   id: string;
   name: string;

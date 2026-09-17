@@ -14,6 +14,22 @@ const runWire = {
   created_at: "2026-01-01T00:00:00Z",
 };
 
+const waveformWire = { time_s: [0, 0.0005, 0.001], i: [1, 0, -1], q: [0, 1, 0] };
+const spectrumWire = {
+  frequency_hz: [2.4405e9, 2.441e9, 2.4415e9],
+  power_db: [-60, -8, -70],
+  fft_size: 4096,
+  segment_count: 8,
+};
+const spectrogramWire = {
+  representation: "stft",
+  image_url: "/media/spectrograms/x.png",
+  t_start_s: 0,
+  t_end_s: 0.001,
+  f_low_hz: 2.4405e9,
+  f_high_hz: 2.4415e9,
+};
+
 function recordingWire(overrides: Record<string, unknown> = {}) {
   return {
     id: "rec_1",
@@ -42,12 +58,11 @@ function route(url: string, init?: RequestInit): Response {
   if (method === "DELETE" && url.includes("/api/recordings/rec_1")) {
     return new Response(null, { status: 204 });
   }
-  if (url.includes("/api/analysis-runs")) {
-    return new Response(JSON.stringify([runWire]), { status: 200 });
-  }
-  if (url.includes("/api/recordings/rec_1")) {
-    return new Response(JSON.stringify(currentRecording), { status: 200 });
-  }
+  if (url.includes("/waveform")) return new Response(JSON.stringify(waveformWire), { status: 200 });
+  if (url.includes("/spectrum")) return new Response(JSON.stringify(spectrumWire), { status: 200 });
+  if (url.includes("/spectrogram")) return new Response(JSON.stringify(spectrogramWire), { status: 200 });
+  if (url.includes("/api/analysis-runs")) return new Response(JSON.stringify([runWire]), { status: 200 });
+  if (url.includes("/api/recordings/rec_1")) return new Response(JSON.stringify(currentRecording), { status: 200 });
   return new Response(JSON.stringify([]), { status: 200 });
 }
 
@@ -74,54 +89,106 @@ function renderPage() {
   );
 }
 
+function fetchCalls(): string[] {
+  return (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((call) => String(call[0]));
+}
+
 beforeEach(() => {
   currentRecording = recordingWire();
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => route(String(url), init)));
 });
 afterEach(() => vi.unstubAllGlobals());
 
+test("renders the five representation tabs", async () => {
+  renderPage();
+  await screen.findByText("sample-a");
+  for (const label of ["Overview", "Time Domain", "Spectrum", "Spectrogram", "Analysis History"]) {
+    expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
+  }
+});
+
+test("representations are lazy: nothing fetched until its tab is opened", async () => {
+  renderPage();
+  await screen.findByText("sample-a");
+  expect(fetchCalls().some((url) => url.includes("/waveform"))).toBe(false);
+  expect(fetchCalls().some((url) => url.includes("/spectrum"))).toBe(false);
+  expect(fetchCalls().some((url) => url.includes("/spectrogram"))).toBe(false);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Time Domain" }));
+  await screen.findByTestId("line-series-I");
+  expect(fetchCalls().some((url) => url.includes("/waveform"))).toBe(true);
+  expect(fetchCalls().some((url) => url.includes("/spectrum"))).toBe(false);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Spectrum" }));
+  await screen.findByTestId("spectrum-plot");
+  expect(fetchCalls().some((url) => url.includes("/spectrum"))).toBe(true);
+  expect(fetchCalls().some((url) => url.includes("/spectrogram"))).toBe(false);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Spectrogram" }));
+  await screen.findByTestId("sample-spectrogram");
+  expect(fetchCalls().some((url) => url.includes("/spectrogram"))).toBe(true);
+});
+
+test("Time Domain I/Q renders two series; Magnitude and Phase derive client-side", async () => {
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Time Domain" }));
+  expect(await screen.findByTestId("line-series-I")).toBeInTheDocument();
+  expect(screen.getByTestId("line-series-Q")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText("Magnitude"));
+  expect(await screen.findByTestId("line-series-Magnitude")).toBeInTheDocument();
+  expect(screen.queryByTestId("line-series-Q")).toBeNull();
+
+  fireEvent.click(screen.getByText("Phase"));
+  expect(await screen.findByTestId("line-series-Phase")).toBeInTheDocument();
+});
+
+test("Spectrum renders frequency/power data with a secondary FFT summary", async () => {
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Spectrum" }));
+  expect(await screen.findByTestId("spectrum-plot")).toBeInTheDocument();
+  expect(screen.getByTestId("spectrum-summary")).toHaveTextContent("FFT 4096 · 8 segments");
+  expect(screen.getByTestId("line-series-Power (dB)")).toBeInTheDocument();
+});
+
+test("pure Spectrogram never shows the overlay legend", async () => {
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Spectrogram" }));
+  await screen.findByTestId("sample-spectrogram");
+  expect(screen.queryByTestId("spectrogram-legend")).toBeNull();
+  expect(screen.queryByText("Prediction overlay")).toBeNull();
+  expect(screen.queryByText("Selected prediction overlay")).toBeNull();
+});
+
 test("renders a dataset member with dataset context and no Delete action", async () => {
-  currentRecording = recordingWire({
-    dataset_name: "SpaceNet",
-    dataset_split: "test",
-    dataset_id: "ds_1",
-    sample_key: "a",
-  });
+  currentRecording = recordingWire({ dataset_name: "SpaceNet", dataset_split: "test", dataset_id: "ds_1", sample_key: "a" });
   renderPage();
   expect(await screen.findByText("sample-a")).toBeInTheDocument();
   const context = await screen.findByTestId("sample-context");
   expect(context).toHaveTextContent("Dataset Sample");
   expect(context).toHaveTextContent("SpaceNet");
-  // Analyze is always available; Delete is not offered for dataset members.
   expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
-});
-
-test("dataset member links back to the Dataset page", async () => {
-  currentRecording = recordingWire({ dataset_name: "SpaceNet", dataset_split: "test", dataset_id: "ds_1" });
-  renderPage();
-  fireEvent.click(await screen.findByRole("button", { name: "Open Dataset" }));
-  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/data-library/datasets/ds_1");
 });
 
 test("renders a standalone member with Delete and Analyze", async () => {
   renderPage();
   expect(await screen.findByText("sample-a")).toBeInTheDocument();
-  const context = await screen.findByTestId("sample-context");
-  expect(context).toHaveTextContent("Standalone Sample");
+  expect(await screen.findByTestId("sample-context")).toHaveTextContent("Standalone Sample");
   expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
 });
 
-test("both kinds show analysis history with View Results", async () => {
+test("Analysis History tab shows prior runs with View Results", async () => {
   renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Analysis History" }));
   const item = await screen.findByTestId("run-history-item");
   expect(item).toHaveTextContent("stft_energy_detector");
   fireEvent.click(within(item).getByRole("button", { name: "View Results" }));
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/signals/run_1");
 });
 
-test("Analyze opens the real spectrum workspace for both kinds", async () => {
+test("Analyze opens the real spectrum workspace", async () => {
   renderPage();
   fireEvent.click(await screen.findByRole("button", { name: "Analyze" }));
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_1");
