@@ -35,7 +35,9 @@ def _safe_path(root: Path, name: str) -> Path:
         raise invalid_batch(exc.message) from exc
 
 
-def extract_batch_package(source: BinaryIO, destination: Path) -> Path:
+def extract_batch_package(
+    source: BinaryIO, destination: Path, *, manifest_filename: str = "batch_manifest.json"
+) -> Path:
     source.seek(0, 2)
     if source.tell() > MAX_BATCH_UPLOAD_BYTES:
         raise invalid_batch("ZIP exceeds the 256 MiB batch upload limit.")
@@ -66,9 +68,9 @@ def extract_batch_package(source: BinaryIO, destination: Path) -> Path:
                         shutil.copyfileobj(source_file, output, length=1024 * 1024)
     except (zipfile.BadZipFile, NotImplementedError, RuntimeError, OSError, EOFError) as exc:
         raise invalid_batch("ZIP is invalid, unreadable, or contains conflicting paths.") from exc
-    if (destination / "batch_manifest.json").is_file():
+    if (destination / manifest_filename).is_file():
         return destination
-    raise invalid_batch("Package must contain batch_manifest.json at its root.")
+    raise invalid_batch(f"Package must contain {manifest_filename} at its root.")
 
 
 def read_batch_json(path: Path):
