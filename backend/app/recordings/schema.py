@@ -20,6 +20,8 @@ class RecordingRead(BaseModel):
     label_space: str | None
     has_ground_truth: bool
     source_data_sha256: str | None
+    dataset_id: str | None = None
+    sample_key: str | None = None
 
 
 class RecordingListRead(BaseModel):

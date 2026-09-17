@@ -1,6 +1,11 @@
-"""Register SpaceNet samples as external Recordings without copying binaries."""
+"""Register SpaceNet samples as external Recordings without copying binaries.
+
+P1: registration also creates/reuses a first-class DatasetModel and links every
+member Recording via ``dataset_id`` / ``sample_key``.
+"""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -9,9 +14,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import PlatformError
+from app.datasets.repository import get_or_create_dataset, refresh_dataset_stats
 from app.datasets.spacenet import SpaceNetAdapter
 from app.ground_truth.model import GroundTruthModel
 from app.recordings.model import RecordingModel
+
+DATASET_NAME = "SpaceNet"
+ADAPTER_ID = "spacenet"
+LABEL_SPACE = "spacenet_14"
 
 
 @dataclass(frozen=True)
@@ -19,6 +29,7 @@ class RegistrationSummary:
     created: int
     skipped: int
     invalid: int
+    dataset_id: str | None = None
 
     @property
     def total(self) -> int:
@@ -39,8 +50,18 @@ class SpaceNetRegistrationService:
         if not split_root.is_dir():
             raise PlatformError("SPACENET_SPLIT_NOT_FOUND", f"SpaceNet split '{split}' was not found.", 404)
 
-        adapter = SpaceNetAdapter(root, self.label_space_root, "spacenet_14")
+        adapter = SpaceNetAdapter(root, self.label_space_root, LABEL_SPACE)
         stems = sorted({path.stem for path in split_root.glob("*.bin")} | {path.stem for path in split_root.glob("*.json")})
+
+        local_root = os.path.normcase(os.path.normpath(str(root)))
+        dataset = get_or_create_dataset(
+            self.session,
+            adapter_id=ADAPTER_ID,
+            split=split,
+            local_root=local_root,
+            name=DATASET_NAME,
+            label_space=LABEL_SPACE,
+        )
 
         created = 0
         skipped = 0
@@ -55,6 +76,7 @@ class SpaceNetRegistrationService:
             existing = self.session.scalar(
                 select(RecordingModel).where(RecordingModel.external_path == external_path))
             if existing is not None:
+                self._link_member(existing, dataset.id, stem, split)
                 skipped += 1
                 continue
 
@@ -64,7 +86,7 @@ class SpaceNetRegistrationService:
                 name=sample.id,
                 data_path=external_path,
                 data_format=sample.data_format,
-                source="spacenet",
+                source=ADAPTER_ID,
                 external_path=external_path,
                 sample_rate_hz=sample.sample_rate_hz,
                 center_frequency_hz=sample.center_frequency_hz,
@@ -72,10 +94,12 @@ class SpaceNetRegistrationService:
                 frequency_high_hz=sample.frequency_high_hz,
                 num_samples=sample.num_samples,
                 duration_s=sample.duration_s,
-                dataset_name="SpaceNet",
+                dataset_name=DATASET_NAME,
                 dataset_split=split,
-                label_space="spacenet_14",
+                label_space=LABEL_SPACE,
                 has_ground_truth=bool(sample.signals),
+                dataset_id=dataset.id,
+                sample_key=stem,
             )
             ground_truth = [
                 GroundTruthModel(
@@ -95,5 +119,29 @@ class SpaceNetRegistrationService:
                 self.session.add_all(ground_truth)
             created += 1
 
+        self.session.flush()
+        members = list(
+            self.session.scalars(
+                select(RecordingModel).where(RecordingModel.dataset_id == dataset.id)
+            ).all()
+        )
+        refresh_dataset_stats(self.session, dataset, members)
         self.session.commit()
-        return RegistrationSummary(created=created, skipped=skipped, invalid=invalid)
+        return RegistrationSummary(
+            created=created, skipped=skipped, invalid=invalid, dataset_id=dataset.id
+        )
+
+    @staticmethod
+    def _link_member(
+        recording: RecordingModel, dataset_id: str, sample_key: str, split: str
+    ) -> None:
+        recording.dataset_id = dataset_id
+        if not recording.sample_key:
+            recording.sample_key = sample_key
+        # Keep legacy display fields consistent during the transition.
+        if recording.dataset_name is None:
+            recording.dataset_name = DATASET_NAME
+        if recording.dataset_split is None:
+            recording.dataset_split = split
+        if recording.label_space is None:
+            recording.label_space = LABEL_SPACE
