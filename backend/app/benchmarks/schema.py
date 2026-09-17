@@ -158,6 +158,14 @@ class DatasetBenchmarkCompareRequest(BaseModel):
     evaluation_b_id: str
 
 
+class DatasetBenchmarkCompareRecordingRead(BaseModel):
+    recording_id: str
+    recording_name: str
+    evaluation_a_run_id: str | None
+    evaluation_b_run_id: str | None
+    comparison: Literal["both_detected", "a_only", "b_only", "both_missed"]
+
+
 class DatasetBenchmarkCompareResponse(BaseModel):
     comparable: bool
     reasons: list[str]
@@ -166,6 +174,7 @@ class DatasetBenchmarkCompareResponse(BaseModel):
     aggregate_a: dict | None
     aggregate_b: dict | None
     deltas: dict[str, float | None]
+    recordings: list[DatasetBenchmarkCompareRecordingRead] = Field(default_factory=list)
 
 
 class ImportedBatchResolveRequest(BaseModel):

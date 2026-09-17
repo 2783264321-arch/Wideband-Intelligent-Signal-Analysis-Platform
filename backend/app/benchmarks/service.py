@@ -855,10 +855,11 @@ class DatasetBenchmarkService:
         return evaluation
     
     
-    def list_evaluations(self) -> list[DatasetEvaluationModel]:
-        return list(
-            self.session.scalars(select(DatasetEvaluationModel).order_by(DatasetEvaluationModel.created_at.desc())).all()
-        )
+    def list_evaluations(self, dataset_id: str | None = None) -> list[DatasetEvaluationModel]:
+        statement = select(DatasetEvaluationModel).order_by(DatasetEvaluationModel.created_at.desc())
+        if dataset_id is not None:
+            statement = statement.where(DatasetEvaluationModel.dataset_id == dataset_id)
+        return list(self.session.scalars(statement).all())
     
     
     def list_items(self, evaluation_id: str) -> list[DatasetEvaluationItemView]:
@@ -904,6 +905,12 @@ class DatasetBenchmarkService:
             reasons.append("dataset_split_mismatch")
         if a.label_space != b.label_space:
             reasons.append("label_space_mismatch")
+        if (
+            a.dataset_id is not None
+            and b.dataset_id is not None
+            and a.dataset_id != b.dataset_id
+        ):
+            reasons.append("dataset_id_mismatch")
         if a.recording_manifest_hash != b.recording_manifest_hash:
             reasons.append("recording_manifest_hash_mismatch")
         if a.evaluation_protocol != b.evaluation_protocol:
@@ -938,4 +945,74 @@ class DatasetBenchmarkService:
             "aggregate_a": a.aggregate_metrics_json,
             "aggregate_b": b.aggregate_metrics_json,
             "deltas": deltas,
+            "recordings": self._compare_recordings(a, b),
         }
+
+    @staticmethod
+    def _match_box(obj) -> dict:
+        return {
+            "t_start_s": obj.t_start_s,
+            "t_end_s": obj.t_end_s,
+            "f_low_hz": obj.f_low_hz,
+            "f_high_hz": obj.f_high_hz,
+        }
+
+    def _detected_recordings(self, evaluation: DatasetEvaluationModel) -> dict[str, bool]:
+        """Reuse the frozen protocol view + M8.5 matching to decide, per Recording,
+        whether the evaluation's run matched at least one Ground Truth at IoU 0.5.
+        """
+        from app.benchmarks.loader import BenchmarkInputLoader
+        from app.benchmarks.protocol import build_protocol_view
+        from app.evaluation.matching import match_predictions
+
+        loaded = BenchmarkInputLoader(self.session).load(evaluation.id)
+        view = build_protocol_view(evaluation.evaluation_protocol, loaded)
+        detected: dict[str, bool] = {}
+        for sample in view.samples:
+            match = match_predictions(
+                [self._match_box(gt) for gt in sample.ground_truths],
+                [self._match_box(pred) for pred in sample.predictions],
+                iou_threshold=0.5,
+            )
+            detected[sample.recording_id] = bool(match.pairs)
+        return detected
+
+    def _compare_recordings(
+        self, a: DatasetEvaluationModel, b: DatasetEvaluationModel
+    ) -> list[dict]:
+        items_a = {item.recording_id: item for item in self.list_items(a.id)}
+        items_b = {item.recording_id: item for item in self.list_items(b.id)}
+        detected_a = self._detected_recordings(a)
+        detected_b = self._detected_recordings(b)
+
+        order: dict[str, int] = {}
+        for recording_id in {**items_a, **items_b}:
+            candidates = [
+                item.manifest_order
+                for item in (items_a.get(recording_id), items_b.get(recording_id))
+                if item is not None
+            ]
+            order[recording_id] = min(candidates)
+
+        rows: list[dict] = []
+        for recording_id in sorted(order, key=lambda rid: order[rid]):
+            item_a = items_a.get(recording_id)
+            item_b = items_b.get(recording_id)
+            a_detected = detected_a.get(recording_id, False)
+            b_detected = detected_b.get(recording_id, False)
+            if a_detected and b_detected:
+                comparison = "both_detected"
+            elif a_detected:
+                comparison = "a_only"
+            elif b_detected:
+                comparison = "b_only"
+            else:
+                comparison = "both_missed"
+            rows.append({
+                "recording_id": recording_id,
+                "recording_name": (item_a or item_b).recording_name,
+                "evaluation_a_run_id": item_a.analysis_run_id if item_a else None,
+                "evaluation_b_run_id": item_b.analysis_run_id if item_b else None,
+                "comparison": comparison,
+            })
+        return rows

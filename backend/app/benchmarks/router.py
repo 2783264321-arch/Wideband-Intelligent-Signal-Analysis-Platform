@@ -72,9 +72,9 @@ def create_evaluation(payload: DatasetEvaluationCreate, request: Request):
 
 
 @router.get("", response_model=list[DatasetEvaluationRead])
-def list_evaluations(request: Request):
+def list_evaluations(request: Request, dataset_id: str | None = None):
     with request.app.state.database.session_factory() as session:
-        return _service(request, session).list_evaluations()
+        return _service(request, session).list_evaluations(dataset_id=dataset_id)
 
 
 @router.get("/imported-batches", response_model=list[ImportedBatchCatalogRead])
