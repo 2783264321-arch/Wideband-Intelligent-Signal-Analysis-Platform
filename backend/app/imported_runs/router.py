@@ -1,8 +1,13 @@
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 
 from app.analysis.schema import AnalysisRunRead
 from app.imported_runs.batch_schema import BatchImportSummary
 from app.imported_runs.batch_service import BatchPackageImportService
+from app.imported_runs.bundle_schema import AnalysisBundleImportSummary
+from app.imported_runs.bundle_service import (
+    AnalysisBundleExportService,
+    AnalysisBundleImportService,
+)
 from app.imported_runs.service import PackageImportService
 from app.labels.service import LabelSpaceService
 
@@ -26,3 +31,26 @@ def import_analysis_batch(request: Request, file: UploadFile = File(...)):
             request.app.state.storage,
             LabelSpaceService(request.app.state.settings.label_space_root),
         ).import_batch(file.file)
+
+
+@router.get("/api/dataset-experiments/{experiment_id}/export")
+def export_dataset_analysis_bundle(experiment_id: str, request: Request):
+    """Export the results of a completed Dataset Analysis as an Analysis Bundle ZIP."""
+    with request.app.state.database.session_factory() as session:
+        filename, payload = AnalysisBundleExportService(session).export_experiment(experiment_id)
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/api/analysis-bundles/import",
+    response_model=AnalysisBundleImportSummary,
+    status_code=201,
+)
+def import_analysis_bundle(request: Request, file: UploadFile = File(...)):
+    """Import a portable Analysis Bundle without rerunning inference."""
+    with request.app.state.database.session_factory() as session:
+        return AnalysisBundleImportService(session, request.app.state.storage).import_bundle(file.file)

@@ -1,0 +1,679 @@
+"""Analysis Bundle export/import services.
+
+Export packages the *results* of a completed Dataset Analysis into a portable
+ZIP (versioned manifest + per-sample ``detections.json``). Import resolves the
+bundle against a locally registered dataset using portable dataset identity and
+stable sample fingerprints only — never absolute filesystem paths — and creates
+ordinary completed imported ``AnalysisRunModel`` / ``DetectionResultModel`` rows
+through the existing imported-run factory. No inference is rerun, and pipeline
+availability is not required to view imported results.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import BinaryIO
+from uuid import uuid4
+import json
+import zipfile
+
+from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.analysis.model import AnalysisRunModel
+from app.benchmarks.manifest import ManifestGroundTruth, ManifestRecording
+from app.benchmarks.model import DatasetEvaluationModel
+from app.core.errors import PlatformError
+from app.dataset_experiments.model import (
+    DatasetExperimentAttemptModel,
+    DatasetExperimentItemModel,
+    DatasetExperimentModel,
+)
+from app.datasets.identity import fingerprint_for_recordings
+from app.datasets.model import DatasetModel
+from app.detections.model import DetectionResultModel
+from app.ground_truth.model import GroundTruthModel
+from app.imported_runs.archive import safe_path
+from app.imported_runs.batch_archive import extract_batch_package, read_batch_json
+from app.imported_runs.bundle_fingerprint import (
+    CanonicalBundleSample,
+    build_analysis_bundle_import_fingerprint,
+)
+from app.imported_runs.bundle_schema import (
+    ANALYSIS_BUNDLE_MANIFEST_FILENAME,
+    ANALYSIS_BUNDLE_SCHEMA_VERSION,
+    AnalysisBundleImportSummary,
+    AnalysisBundleManifest,
+    BundleAnalysis,
+    BundleDataset,
+    BundleProvenance,
+    BundleRunMapping,
+    BundleSample,
+)
+from app.imported_runs.factory import build_imported_run_models
+from app.imported_runs.fingerprint import build_recording_fingerprint
+from app.imported_runs.schema import (
+    ExecutionMetadata,
+    Manifest,
+    PackageDetection,
+    PipelineMetadata,
+    RecordingMetadata,
+    ResultPaths,
+)
+from app.imported_runs.validation import ValidatedAnalysisPackage
+from app.recordings.model import RecordingModel
+
+EXPORTER_VERSION = "analysis_bundle_exporter_v1"
+COMPLETED_EXPERIMENT_STATUSES = ("completed", "completed_with_failures")
+_INTERNAL_LABEL_SPACE_FALLBACK = "__none__"
+
+
+def invalid_bundle(message: str, *, details: dict[str, object] | None = None) -> PlatformError:
+    return PlatformError(
+        "INVALID_ANALYSIS_BUNDLE",
+        message,
+        400,
+        details={} if details is None else details,
+    )
+
+
+def _stable_key(recording: RecordingModel) -> str:
+    return recording.sample_key or recording.name
+
+
+def _gt_rows_by_recording(session: Session, recording_ids: list[str]) -> dict[str, list]:
+    if not recording_ids:
+        return {}
+    rows = list(
+        session.scalars(
+            select(GroundTruthModel).where(GroundTruthModel.recording_id.in_(recording_ids))
+        ).all()
+    )
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row.recording_id, []).append(row)
+    return grouped
+
+
+def _portable_recording_fingerprint(
+    dataset_name: str,
+    dataset_split: str,
+    label_space: str,
+    stable_key: str,
+    recording: RecordingModel,
+    gt_rows: list,
+) -> str:
+    manifest_recording = ManifestRecording(
+        recording_id=recording.id,
+        name=stable_key,
+        data_format=recording.data_format,
+        sample_rate_hz=recording.sample_rate_hz,
+        center_frequency_hz=recording.center_frequency_hz,
+        frequency_low_hz=recording.frequency_low_hz,
+        frequency_high_hz=recording.frequency_high_hz,
+        num_samples=recording.num_samples,
+        duration_s=recording.duration_s,
+        ground_truth=tuple(
+            ManifestGroundTruth(
+                t_start_s=row.t_start_s,
+                t_end_s=row.t_end_s,
+                f_low_hz=row.f_low_hz,
+                f_high_hz=row.f_high_hz,
+                class_id=row.class_id,
+                class_name=row.class_name,
+            )
+            for row in gt_rows
+        ),
+    )
+    return build_recording_fingerprint(
+        dataset_name, dataset_split, label_space, manifest_recording
+    ).sha256
+
+
+def _detection_to_package(detection: DetectionResultModel) -> PackageDetection:
+    return PackageDetection(
+        id=detection.id,
+        t_start_s=detection.t_start_s,
+        t_end_s=detection.t_end_s,
+        f_low_hz=detection.f_low_hz,
+        f_high_hz=detection.f_high_hz,
+        class_id=detection.class_id,
+        class_name=detection.class_name,
+        confidence=detection.confidence,
+        scores=detection.scores_json,
+    )
+
+
+class AnalysisBundleExportService:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def export_experiment(self, experiment_id: str) -> tuple[str, bytes]:
+        experiment = self.session.get(DatasetExperimentModel, experiment_id)
+        if experiment is None:
+            raise PlatformError(
+                "DATASET_EXPERIMENT_NOT_FOUND", "Dataset experiment was not found.", 404
+            )
+        if experiment.status not in COMPLETED_EXPERIMENT_STATUSES:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_NOT_COMPLETED",
+                "Only a completed Dataset Analysis can be exported as an Analysis Bundle.",
+                409,
+                details={"status": experiment.status},
+            )
+
+        items = list(
+            self.session.scalars(
+                select(DatasetExperimentItemModel)
+                .where(DatasetExperimentItemModel.experiment_id == experiment.id)
+                .order_by(DatasetExperimentItemModel.manifest_order)
+            ).all()
+        )
+        if not items:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_NO_RESULTS", "Dataset Analysis has no items to export.", 409
+            )
+        recordings = {
+            recording.id: recording
+            for recording in self.session.scalars(
+                select(RecordingModel).where(
+                    RecordingModel.id.in_([item.recording_id for item in items])
+                )
+            ).all()
+        }
+        gt_by_recording = _gt_rows_by_recording(self.session, list(recordings))
+
+        label_space = experiment.dataset_label_space or ""
+        portable_fingerprint = self._portable_fingerprint(experiment, recordings)
+
+        exported: list[tuple[BundleSample, tuple[PackageDetection, ...]]] = []
+        for index, item in enumerate(items):
+            recording = recordings.get(item.recording_id)
+            if recording is None:
+                continue
+            run = self._latest_completed_run(item.id)
+            if run is None:
+                continue
+            detections = tuple(
+                _detection_to_package(row)
+                for row in self.session.scalars(
+                    select(DetectionResultModel)
+                    .where(DetectionResultModel.run_id == run.id)
+                    .order_by(DetectionResultModel.id)
+                ).all()
+            )
+            stable_key = _stable_key(recording)
+            fingerprint = _portable_recording_fingerprint(
+                experiment.dataset_name,
+                experiment.dataset_split,
+                label_space,
+                stable_key,
+                recording,
+                gt_by_recording.get(recording.id, []),
+            )
+            exported.append((
+                BundleSample(
+                    key=stable_key,
+                    sample_name=recording.name,
+                    recording_fingerprint=fingerprint,
+                    detection_count=len(detections),
+                    detections_path=f"samples/{index:06d}/detections.json",
+                ),
+                detections,
+            ))
+
+        if not exported:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_NO_RESULTS",
+                "Dataset Analysis has no completed per-sample results to export.",
+                409,
+            )
+
+        bundle_id = f"bundle_{uuid4().hex[:12]}"
+        manifest = AnalysisBundleManifest(
+            schema_version=ANALYSIS_BUNDLE_SCHEMA_VERSION,
+            bundle_id=bundle_id,
+            dataset=BundleDataset(
+                name=experiment.dataset_name,
+                split=experiment.dataset_split,
+                label_space=label_space,
+                portable_fingerprint=portable_fingerprint,
+            ),
+            pipeline=PipelineMetadata(
+                id=experiment.plugin_id,
+                name=experiment.plugin_id,
+                version=experiment.plugin_version,
+            ),
+            parameters=dict(experiment.parameters_json or {}),
+            analysis=BundleAnalysis(
+                experiment_id=experiment.id,
+                name=experiment.name,
+                status=experiment.status,
+                executor=experiment.executor,
+                evaluation_id=experiment.dataset_evaluation_id,
+            ),
+            provenance=BundleProvenance(
+                exporter_version=EXPORTER_VERSION,
+                export_timestamp=datetime.now(timezone.utc).isoformat(),
+                evaluation_summary=self._evaluation_summary(experiment),
+            ),
+            samples=[sample for sample, _ in exported],
+        )
+        return f"analysis_bundle_{bundle_id}.zip", self._render_zip(manifest, exported)
+
+    def _latest_completed_run(self, item_id: str) -> AnalysisRunModel | None:
+        return self.session.scalars(
+            select(AnalysisRunModel)
+            .join(
+                DatasetExperimentAttemptModel,
+                DatasetExperimentAttemptModel.analysis_run_id == AnalysisRunModel.id,
+            )
+            .where(
+                DatasetExperimentAttemptModel.experiment_item_id == item_id,
+                AnalysisRunModel.status == "completed",
+            )
+            .order_by(DatasetExperimentAttemptModel.attempt_number.desc())
+        ).first()
+
+    def _portable_fingerprint(
+        self, experiment: DatasetExperimentModel, recordings: dict[str, RecordingModel]
+    ) -> str:
+        if experiment.dataset_id is not None:
+            dataset = self.session.get(DatasetModel, experiment.dataset_id)
+            if dataset is not None:
+                if dataset.portable_fingerprint:
+                    return dataset.portable_fingerprint
+                members = list(
+                    self.session.scalars(
+                        select(RecordingModel).where(RecordingModel.dataset_id == dataset.id)
+                    ).all()
+                )
+                return fingerprint_for_recordings(
+                    self.session,
+                    name=dataset.name,
+                    split=dataset.split,
+                    label_space=dataset.label_space,
+                    recordings=members,
+                )
+        return fingerprint_for_recordings(
+            self.session,
+            name=experiment.dataset_name,
+            split=experiment.dataset_split,
+            label_space=experiment.dataset_label_space or None,
+            recordings=list(recordings.values()),
+        )
+
+    def _evaluation_summary(self, experiment: DatasetExperimentModel) -> dict | None:
+        if not experiment.dataset_evaluation_id:
+            return None
+        evaluation = self.session.get(DatasetEvaluationModel, experiment.dataset_evaluation_id)
+        if evaluation is None:
+            return None
+        return {
+            "protocol": evaluation.evaluation_protocol,
+            "status": evaluation.status,
+            "coverage": evaluation.coverage,
+            "comparable": evaluation.comparable,
+            "evaluated_recordings": evaluation.evaluated_recordings,
+            "expected_recordings": evaluation.expected_recordings,
+            "aggregate_metrics": dict(evaluation.aggregate_metrics_json or {}),
+            "per_class_metrics": list(evaluation.per_class_metrics_json or []),
+        }
+
+    def _render_zip(
+        self,
+        manifest: AnalysisBundleManifest,
+        exported: list[tuple[BundleSample, tuple[PackageDetection, ...]]],
+    ) -> bytes:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                ANALYSIS_BUNDLE_MANIFEST_FILENAME,
+                json.dumps(manifest.model_dump(mode="json"), sort_keys=True),
+            )
+            for sample, detections in exported:
+                archive.writestr(
+                    sample.detections_path,
+                    json.dumps(
+                        {"detections": [detection.model_dump(mode="json") for detection in detections]},
+                        sort_keys=True,
+                    ),
+                )
+        return buffer.getvalue()
+
+
+class AnalysisBundleImportService:
+    def __init__(self, session: Session, storage) -> None:
+        self.session = session
+        self.storage = storage
+
+    def import_bundle(self, source: BinaryIO) -> AnalysisBundleImportSummary:
+        archive_sha256 = _sha256_fileobj(source)
+        temp_root = self.storage.data_root / "imports"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix="bundle-staging-", dir=temp_root) as temporary:
+            root = extract_batch_package(
+                source,
+                Path(temporary),
+                manifest_filename=ANALYSIS_BUNDLE_MANIFEST_FILENAME,
+            )
+            manifest = self._read_manifest(root)
+            validated = self._validate_samples(root, manifest)
+            return self._import_validated(manifest, validated, archive_sha256)
+
+    def _read_manifest(self, root: Path) -> AnalysisBundleManifest:
+        try:
+            return AnalysisBundleManifest.model_validate(
+                read_batch_json(root / ANALYSIS_BUNDLE_MANIFEST_FILENAME)
+            )
+        except ValidationError as exc:
+            raise invalid_bundle("Analysis Bundle manifest schema is invalid.") from exc
+
+    def _validate_samples(
+        self, root: Path, manifest: AnalysisBundleManifest
+    ) -> list[tuple[BundleSample, tuple[PackageDetection, ...]]]:
+        keys = [sample.key for sample in manifest.samples]
+        if len(keys) != len(set(keys)):
+            raise invalid_bundle("Duplicate sample key in Analysis Bundle.")
+        paths = [sample.detections_path for sample in manifest.samples]
+        if len(paths) != len(set(paths)):
+            raise invalid_bundle("Duplicate detections path in Analysis Bundle.")
+        adapter = TypeAdapter(list[PackageDetection])
+        validated: list[tuple[BundleSample, tuple[PackageDetection, ...]]] = []
+        for sample in manifest.samples:
+            if not sample.detections_path.startswith("samples/"):
+                raise invalid_bundle("Sample detections must live under the samples/ directory.")
+            try:
+                target = safe_path(root, sample.detections_path)
+            except PlatformError as exc:
+                raise invalid_bundle(exc.message) from exc
+            if not target.is_file():
+                raise invalid_bundle(
+                    "Sample detections file is missing.", details={"sample_key": sample.key}
+                )
+            document = read_batch_json(target)
+            if not isinstance(document, dict) or not isinstance(document.get("detections"), list):
+                raise invalid_bundle(
+                    "Sample detections.json must contain a 'detections' array.",
+                    details={"sample_key": sample.key},
+                )
+            try:
+                detections = tuple(adapter.validate_python(document["detections"]))
+            except ValidationError as exc:
+                raise invalid_bundle(
+                    "Sample detections are invalid.", details={"sample_key": sample.key}
+                ) from exc
+            if len(detections) != sample.detection_count:
+                raise invalid_bundle(
+                    "Sample detection_count does not match detections.json.",
+                    details={"sample_key": sample.key},
+                )
+            validated.append((sample, detections))
+        return validated
+
+    def _import_validated(
+        self,
+        manifest: AnalysisBundleManifest,
+        validated: list[tuple[BundleSample, tuple[PackageDetection, ...]]],
+        archive_sha256: str,
+    ) -> AnalysisBundleImportSummary:
+        dataset_name = manifest.dataset.name
+        dataset_split = manifest.dataset.split
+        label_space = manifest.dataset.label_space
+        fingerprint = manifest.dataset.portable_fingerprint
+
+        candidate_datasets = list(
+            self.session.scalars(
+                select(DatasetModel).where(DatasetModel.portable_fingerprint == fingerprint)
+            ).all()
+        )
+        if not candidate_datasets:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_DATASET_MISMATCH",
+                "No local dataset matches this bundle's portable dataset identity.",
+                409,
+                details={
+                    "portable_fingerprint": fingerprint,
+                    "dataset_name": dataset_name,
+                    "dataset_split": dataset_split,
+                },
+            )
+
+        candidate_ids = [dataset.id for dataset in candidate_datasets]
+        recordings = list(
+            self.session.scalars(
+                select(RecordingModel).where(RecordingModel.dataset_id.in_(candidate_ids))
+            ).all()
+        )
+        gt_by_recording = _gt_rows_by_recording(self.session, [rec.id for rec in recordings])
+
+        resolved: list[tuple[BundleSample, RecordingModel, tuple[PackageDetection, ...]]] = []
+        used: set[str] = set()
+        for sample, detections in validated:
+            matches = []
+            for recording in recordings:
+                if recording.id in used:
+                    continue
+                stable_key = _stable_key(recording)
+                if stable_key != sample.key and recording.name != sample.sample_name:
+                    continue
+                local_fingerprint = _portable_recording_fingerprint(
+                    dataset_name,
+                    dataset_split,
+                    label_space,
+                    stable_key,
+                    recording,
+                    gt_by_recording.get(recording.id, []),
+                )
+                if local_fingerprint == sample.recording_fingerprint:
+                    matches.append(recording)
+            if not matches:
+                raise PlatformError(
+                    "ANALYSIS_BUNDLE_SAMPLE_NOT_FOUND",
+                    "No local sample matches this bundle sample's stable identity/fingerprint.",
+                    422,
+                    details={"sample_key": sample.key, "sample_name": sample.sample_name},
+                )
+            if len(matches) > 1:
+                raise PlatformError(
+                    "ANALYSIS_BUNDLE_SAMPLE_AMBIGUOUS",
+                    "More than one local sample matches this bundle sample.",
+                    409,
+                    details={"sample_key": sample.key, "sample_name": sample.sample_name},
+                )
+            recording = matches[0]
+            used.add(recording.id)
+            resolved.append((sample, recording, detections))
+
+        canonical_samples = tuple(
+            CanonicalBundleSample(
+                key=sample.key,
+                recording_fingerprint=sample.recording_fingerprint,
+                detections=detections,
+            )
+            for sample, _, detections in resolved
+        )
+        import_fingerprint = build_analysis_bundle_import_fingerprint(manifest, canonical_samples)
+
+        existing = self._find_existing(manifest, import_fingerprint, resolved)
+        expected_keys = {sample.key for sample, _, _ in resolved}
+        if existing:
+            if set(existing.keys()) != expected_keys or len(existing) != len(expected_keys):
+                raise PlatformError(
+                    "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                    "Partial or conflicting prior Analysis Bundle import state exists.",
+                    409,
+                )
+            for sample, recording, _ in resolved:
+                if existing[sample.key]["recording_id"] != recording.id:
+                    raise PlatformError(
+                        "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                        "Prior Analysis Bundle import maps a sample to a different Recording.",
+                        409,
+                    )
+            return self._summary(
+                manifest,
+                import_fingerprint,
+                archive_sha256,
+                dataset_id=resolved[0][1].dataset_id,
+                already_imported=True,
+                created_runs=0,
+                existing_runs=len(existing),
+                created_detections=0,
+                mapping=[
+                    BundleRunMapping(
+                        sample_key=sample.key,
+                        sample_name=sample.sample_name,
+                        recording_id=recording.id,
+                        analysis_run_id=existing[sample.key]["run_id"],
+                    )
+                    for sample, recording, _ in resolved
+                ],
+            )
+
+        internal_label_space = label_space or _INTERNAL_LABEL_SPACE_FALLBACK
+        runs = []
+        detections_to_add = []
+        mapping = []
+        for sample, recording, detections in resolved:
+            run_id = f"run_{uuid4().hex}"
+            detection_ids = [f"det_{uuid4().hex}" for _ in detections]
+            package_manifest = Manifest(
+                schema_version=1,
+                pipeline=manifest.pipeline,
+                label_space=internal_label_space,
+                recording=RecordingMetadata(name=sample.key, dataset=dataset_name),
+                execution=ExecutionMetadata(executor="imported", device=None, environment=None),
+                results=ResultPaths(detections="detections.json"),
+                parameters=dict(manifest.parameters),
+            )
+            built = build_imported_run_models(
+                recording,
+                ValidatedAnalysisPackage(manifest=package_manifest, detections=tuple(detections)),
+                run_id=run_id,
+                detection_ids=detection_ids,
+            )
+            built.run.parameters_json = {
+                **built.run.parameters_json,
+                "analysis_bundle": {
+                    "schema_version": ANALYSIS_BUNDLE_SCHEMA_VERSION,
+                    "bundle_id": manifest.bundle_id,
+                    "item_key": sample.key,
+                    "import_fingerprint": import_fingerprint,
+                    "recording_fingerprint": sample.recording_fingerprint,
+                    "archive_sha256": archive_sha256,
+                    "dataset_portable_fingerprint": fingerprint,
+                    "pipeline_id": manifest.pipeline.id,
+                    "pipeline_version": manifest.pipeline.version,
+                },
+            }
+            runs.append(built.run)
+            detections_to_add.extend(built.detections)
+            mapping.append(BundleRunMapping(
+                sample_key=sample.key,
+                sample_name=sample.sample_name,
+                recording_id=recording.id,
+                analysis_run_id=run_id,
+            ))
+
+        try:
+            self.session.add_all(runs)
+            if detections_to_add:
+                self.session.add_all(detections_to_add)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+
+        return self._summary(
+            manifest,
+            import_fingerprint,
+            archive_sha256,
+            dataset_id=resolved[0][1].dataset_id,
+            already_imported=False,
+            created_runs=len(runs),
+            existing_runs=0,
+            created_detections=len(detections_to_add),
+            mapping=mapping,
+        )
+
+    def _find_existing(self, manifest, import_fingerprint, resolved) -> dict[str, dict]:
+        recording_ids = [recording.id for _, recording, _ in resolved]
+        if not recording_ids:
+            return {}
+        runs = list(
+            self.session.scalars(
+                select(AnalysisRunModel).where(
+                    AnalysisRunModel.recording_id.in_(recording_ids),
+                    AnalysisRunModel.pipeline_id == manifest.pipeline.id,
+                    AnalysisRunModel.pipeline_version == manifest.pipeline.version,
+                    AnalysisRunModel.executor == "imported",
+                    AnalysisRunModel.status == "completed",
+                )
+            ).all()
+        )
+        by_key: dict[str, dict] = {}
+        for run in runs:
+            meta = (run.parameters_json or {}).get("analysis_bundle") or {}
+            if meta.get("import_fingerprint") != import_fingerprint:
+                continue
+            item_key = meta.get("item_key")
+            if item_key is None:
+                continue
+            if item_key in by_key:
+                raise PlatformError(
+                    "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                    "Duplicate sample-key mapping in prior Analysis Bundle import state.",
+                    409,
+                )
+            by_key[item_key] = {"run_id": run.id, "recording_id": run.recording_id}
+        return by_key
+
+    def _summary(
+        self,
+        manifest: AnalysisBundleManifest,
+        import_fingerprint: str,
+        archive_sha256: str,
+        *,
+        dataset_id: str | None,
+        already_imported: bool,
+        created_runs: int,
+        existing_runs: int,
+        created_detections: int,
+        mapping: list[BundleRunMapping],
+    ) -> AnalysisBundleImportSummary:
+        return AnalysisBundleImportSummary(
+            schema_version=ANALYSIS_BUNDLE_SCHEMA_VERSION,
+            bundle_id=manifest.bundle_id,
+            import_fingerprint=import_fingerprint,
+            archive_sha256=archive_sha256,
+            dataset_id=dataset_id,
+            dataset_name=manifest.dataset.name,
+            dataset_split=manifest.dataset.split,
+            pipeline_id=manifest.pipeline.id,
+            pipeline_version=manifest.pipeline.version,
+            label_space=manifest.dataset.label_space,
+            sample_count=len(mapping),
+            detection_count=sum(sample.detection_count for sample in manifest.samples),
+            already_imported=already_imported,
+            created_runs=created_runs,
+            existing_runs=existing_runs,
+            created_detections=created_detections,
+            sample_run_mapping=mapping,
+        )
+
+
+def _sha256_fileobj(source: BinaryIO) -> str:
+    source.seek(0)
+    digest = sha256()
+    while True:
+        block = source.read(1024 * 1024)
+        if not block:
+            break
+        digest.update(block)
+    source.seek(0)
+    return digest.hexdigest()
