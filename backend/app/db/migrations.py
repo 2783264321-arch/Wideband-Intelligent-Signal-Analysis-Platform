@@ -46,6 +46,49 @@ def run_additive_migrations(engine) -> None:
     upgrade_m9_1_provenance(engine)
     upgrade_dataset_experiments(engine)
     upgrade_v1_1_dataset_projection(engine)
+    upgrade_p1_dataset_authority(engine)
+
+
+def upgrade_p1_dataset_authority(engine) -> None:
+    """P1: first-class datasets table + recordings membership + legacy backfill.
+
+    Additive and idempotent: existing recordings, analysis runs, ground truth and
+    detections are preserved; no raw IQ is copied and external_path is untouched.
+    """
+    from sqlalchemy.orm import Session
+
+    from app.datasets.backfill import backfill_legacy_datasets
+    from app.datasets.model import DatasetModel
+    from app.recordings.model import RecordingModel
+
+    DatasetModel.__table__.create(engine, checkfirst=True)
+    with engine.begin() as connection:
+        recordings = {column["name"] for column in inspect(connection).get_columns("recordings")}
+        if "dataset_id" not in recordings:
+            connection.execute(text("ALTER TABLE recordings ADD COLUMN dataset_id VARCHAR(64)"))
+        if "sample_key" not in recordings:
+            connection.execute(text("ALTER TABLE recordings ADD COLUMN sample_key VARCHAR(255)"))
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_recordings_dataset_id ON recordings (dataset_id)")
+        )
+        connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_datasets_portable_fingerprint "
+                "ON datasets (portable_fingerprint)"
+            )
+        )
+        recording_columns = {
+            column["name"] for column in inspect(connection).get_columns("recordings")
+        }
+
+    # Backfill only when the recordings table has the full domain schema. Some
+    # partial/foreign test schemas intentionally contain a subset of columns and
+    # must not be treated as legacy dataset rows.
+    expected_columns = {column.name for column in RecordingModel.__table__.columns}
+    if expected_columns <= recording_columns:
+        with Session(engine) as session:
+            backfill_legacy_datasets(session)
+            session.commit()
 
 
 def upgrade_v1_1_dataset_projection(engine) -> None:

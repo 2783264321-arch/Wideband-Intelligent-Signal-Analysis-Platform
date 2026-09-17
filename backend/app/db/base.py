@@ -10,6 +10,7 @@ def load_domain_models() -> None:
     from app.analysis import model as _analysis  # noqa: F401
     from app.benchmarks import model as _benchmarks  # noqa: F401
     from app.dataset_experiments import model as _dataset_experiments  # noqa: F401
+    from app.datasets import model as _datasets  # noqa: F401
     from app.detections import model as _detections  # noqa: F401
     from app.ground_truth import model as _ground_truth  # noqa: F401
     from app.recordings import model as _recordings  # noqa: F401
