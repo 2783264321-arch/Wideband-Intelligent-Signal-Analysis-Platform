@@ -110,6 +110,45 @@ def delete_standalone_recording(session, storage, recording_id: str) -> None:
         session.commit()
 
 
+def delete_dataset(session, storage, dataset_id: str) -> None:
+    """Remove a first-class Dataset and its member Recordings.
+
+    Membership is authoritative from ``dataset_id``. External source IQ is never a
+    deletion target. Explicit row deletion (not physical FK cascade) keeps legacy
+    SQLite databases, which gained ``dataset_id`` via ALTER TABLE, correct.
+    """
+    from app.datasets.model import DatasetModel
+
+    dataset = session.get(DatasetModel, dataset_id)
+    if dataset is None:
+        raise PlatformError("DATASET_NOT_FOUND", "Dataset was not found.", 404)
+    members = list(
+        session.scalars(
+            select(RecordingModel).where(RecordingModel.dataset_id == dataset_id)
+        ).all()
+    )
+    member_ids = [recording.id for recording in members]
+    blockers = find_recording_blockers(session, member_ids)
+    if blockers:
+        raise PlatformError(
+            "DATASET_REMOVE_BLOCKED",
+            "Dataset removal is blocked by retained dependents; no members were removed.",
+            409,
+            blocker_details(blockers),
+        )
+    managed: list[Path] = []
+    for recording in members:
+        if recording.external_path is None and recording.source == "custom":
+            managed.append(storage.recording_dir(recording.id))
+    for run in _owned_runs(session, member_ids):
+        managed.extend(_run_owned_managed_dirs(storage, run))
+    with quarantine_managed_dirs(storage, managed):
+        for recording in members:
+            session.delete(recording)
+        session.delete(dataset)
+        session.commit()
+
+
 def remove_dataset_projection(session, storage, dataset_projection_id: str) -> None:
     service = DataLibraryService(session)
     _projection, members = service._projection_members(dataset_projection_id)

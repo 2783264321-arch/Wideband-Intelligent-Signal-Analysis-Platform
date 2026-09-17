@@ -88,6 +88,29 @@ class DatasetReadService:
         ]
         return items, total
 
+    def list_analysis_history(self, dataset_id: str):
+        """Compatibility bridge: derive the legacy projection from dataset members
+        and reuse the existing history logic. Projection identity is never returned."""
+        dataset = self.session.get(DatasetModel, dataset_id)
+        if dataset is None:
+            raise PlatformError("DATASET_NOT_FOUND", "Dataset was not found.", 404)
+        members = list(
+            self.session.scalars(
+                select(RecordingModel).where(RecordingModel.dataset_id == dataset_id)
+            ).all()
+        )
+        if not members:
+            return []
+        from app.data_library.service import DataLibraryService
+        from app.datasets.projection import DatasetProjectionResolver
+
+        projection = DatasetProjectionResolver(self.session).find_for_recording(members[0])
+        if projection is None:
+            return []
+        return DataLibraryService(self.session).list_dataset_analysis_history(
+            projection.dataset_projection_id
+        )
+
     def _analysis_counts(self, recording_ids: list[str]) -> dict[str, int]:
         if not recording_ids:
             return {}

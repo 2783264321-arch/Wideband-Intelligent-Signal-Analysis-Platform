@@ -1,4 +1,13 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class RegisterRecordingPathRequest(BaseModel):
+    path: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    data_format: str = "complex64_le"
+    sample_rate_hz: float = Field(gt=0)
+    center_frequency_hz: float
+    label_space: str | None = None
 
 
 class RecordingRead(BaseModel):

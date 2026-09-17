@@ -1,6 +1,10 @@
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 
-from app.recordings.schema import RecordingListRead, RecordingRead
+from app.recordings.schema import (
+    RecordingListRead,
+    RecordingRead,
+    RegisterRecordingPathRequest,
+)
 from app.recordings.service import RecordingService
 from app.lifecycle.service import delete_standalone_recording
 
@@ -33,6 +37,19 @@ def import_recording(
             dataset_name=dataset_name,
             dataset_split=dataset_split,
             label_space=label_space,
+        )
+
+
+@router.post("/register-path", response_model=RecordingRead, status_code=201)
+def register_recording_path(payload: RegisterRecordingPathRequest, request: Request):
+    with request.app.state.database.session_factory() as session:
+        return _service(request, session).register_local_path(
+            path=payload.path,
+            name=payload.name,
+            data_format=payload.data_format,
+            sample_rate_hz=payload.sample_rate_hz,
+            center_frequency_hz=payload.center_frequency_hz,
+            label_space=payload.label_space,
         )
 
 

@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from app.data_library.schema import DatasetAnalysisHistoryItemRead
+
 
 class RegisterSpaceNetRequest(BaseModel):
     dataset_path: str = Field(min_length=1)
@@ -54,4 +56,10 @@ class DatasetSampleRead(BaseModel):
 class DatasetSampleListRead(BaseModel):
     dataset_id: str
     items: list[DatasetSampleRead]
+    total: int
+
+
+class DatasetAnalysisHistoryListRead(BaseModel):
+    dataset_id: str
+    items: list[DatasetAnalysisHistoryItemRead]
     total: int

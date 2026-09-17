@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query, Request
 
 from app.datasets.read_service import DatasetReadService
 from app.datasets.schema import (
+    DatasetAnalysisHistoryListRead,
     DatasetListRead,
     DatasetRead,
     DatasetSampleListRead,
@@ -9,6 +10,7 @@ from app.datasets.schema import (
     RegistrationSummaryRead,
 )
 from app.datasets.service import SpaceNetRegistrationService
+from app.lifecycle.service import delete_dataset
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
@@ -41,6 +43,19 @@ def list_dataset_samples(
     with request.app.state.database.session_factory() as session:
         items, total = DatasetReadService(session).list_samples(dataset_id, limit, offset, search)
         return DatasetSampleListRead(dataset_id=dataset_id, items=items, total=total)
+
+
+@router.get("/{dataset_id}/analysis-history", response_model=DatasetAnalysisHistoryListRead)
+def list_dataset_analysis_history(dataset_id: str, request: Request):
+    with request.app.state.database.session_factory() as session:
+        items = DatasetReadService(session).list_analysis_history(dataset_id)
+        return DatasetAnalysisHistoryListRead(dataset_id=dataset_id, items=items, total=len(items))
+
+
+@router.delete("/{dataset_id}", status_code=204)
+def remove_dataset(dataset_id: str, request: Request):
+    with request.app.state.database.session_factory() as session:
+        delete_dataset(session, request.app.state.storage, dataset_id)
 
 
 @router.post("/spacenet/register", response_model=RegistrationSummaryRead)

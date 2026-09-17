@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import PlatformError
 from app.recordings.model import RecordingModel
 from app.storage.service import StorageService
+
+# bytes per complex sample for path-registerable formats
+PATH_FORMAT_BYTES: dict[str, int] = {
+    "complex64_le": 8,
+    "float16_interleaved_le": 4,
+}
 
 
 class RecordingService:
@@ -34,6 +41,96 @@ class RecordingService:
         recording = self.session.get(RecordingModel, recording_id)
         if recording is None:
             raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", status_code=404)
+        return recording
+
+    def register_local_path(
+        self,
+        *,
+        path: str,
+        name: str,
+        data_format: str,
+        sample_rate_hz: float,
+        center_frequency_hz: float,
+        label_space: str | None = None,
+    ) -> RecordingModel:
+        """Register an existing on-host IQ file WITHOUT copying it.
+
+        Path mode is standalone-only: dataset members are never repurposed.
+        """
+        if sample_rate_hz <= 0:
+            raise PlatformError("INVALID_RECORDING", "Sample rate must be positive.")
+        if data_format not in PATH_FORMAT_BYTES:
+            raise PlatformError(
+                "INVALID_RECORDING",
+                "Unsupported path data format. Use complex64_le or float16_interleaved_le.",
+            )
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            raise PlatformError("INVALID_RECORDING", "Path must be an absolute path.")
+        resolved = candidate.resolve()
+        if not resolved.is_file():
+            raise PlatformError(
+                "RECORDING_PATH_NOT_FOUND", "Local IQ file was not found or is not a regular file.", 404
+            )
+        if not os.access(resolved, os.R_OK):
+            raise PlatformError("RECORDING_PATH_NOT_READABLE", "Local IQ file is not readable.", 403)
+        byte_size = resolved.stat().st_size
+        bytes_per_sample = PATH_FORMAT_BYTES[data_format]
+        if byte_size <= 0 or byte_size % bytes_per_sample:
+            raise PlatformError(
+                "INVALID_RECORDING",
+                f"IQ byte length is not a non-empty multiple of {bytes_per_sample}.",
+            )
+
+        existing = self.session.scalar(
+            select(RecordingModel).where(
+                or_(
+                    RecordingModel.external_path == str(resolved),
+                    RecordingModel.data_path == str(resolved),
+                )
+            )
+        )
+        if existing is not None:
+            if existing.dataset_id is not None:
+                raise PlatformError(
+                    "RECORDING_PATH_IS_DATASET_MEMBER",
+                    "This path is a Dataset sample. Use the Dataset workspace instead.",
+                    409,
+                    {"recording_id": existing.id, "dataset_id": existing.dataset_id},
+                )
+            raise PlatformError(
+                "ALREADY_REGISTERED",
+                "This path is already registered as a standalone sample.",
+                409,
+                {"recording_id": existing.id},
+            )
+
+        num_samples = byte_size // bytes_per_sample
+        duration_s = num_samples / sample_rate_hz
+        half_band = sample_rate_hz / 2
+        recording = RecordingModel(
+            id=f"rec_{uuid4().hex}",
+            name=name.strip() or resolved.stem,
+            data_path=str(resolved),
+            data_format=data_format,
+            source="custom",
+            external_path=str(resolved),
+            sample_rate_hz=sample_rate_hz,
+            center_frequency_hz=center_frequency_hz,
+            frequency_low_hz=center_frequency_hz - half_band,
+            frequency_high_hz=center_frequency_hz + half_band,
+            num_samples=num_samples,
+            duration_s=duration_s,
+            dataset_name=None,
+            dataset_split=None,
+            label_space=label_space,
+            has_ground_truth=False,
+            dataset_id=None,
+            sample_key=None,
+        )
+        self.session.add(recording)
+        self.session.commit()
+        self.session.refresh(recording)
         return recording
 
     def import_complex64(
