@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { SpectrogramViewer } from "./SpectrogramViewer";
+import { VIEWER_VIEWPORT_HEIGHT } from "./viewerGeometry";
 import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { DetectionResult, GroundTruthResult, SpectrogramMeta } from "../../api/types";
 
@@ -126,17 +127,43 @@ test("renders distinct ground-truth, prediction, and selected overlays with a le
   expect(legend).toHaveTextContent("Selected prediction");
 });
 
-test("frame aspect follows the intrinsic image aspect", () => {
+test("analysis viewport height is substantial and independent of the raster natural aspect", () => {
   render(
     renderWithLocalization(
       <SpectrogramViewer meta={{ ...meta, imageUrl: "/x.png" }} detections={[]} />,
     ),
   );
+  const viewer = screen.getByTestId("spectrogram-viewer");
+  expect(viewer.style.height).toBe(VIEWER_VIEWPORT_HEIGHT);
+  expect(viewer.style.aspectRatio).toBe("");
+
+  // A wide/short raster must NOT drive the browser display geometry.
   const img = screen.getByAltText("STFT spectrogram") as HTMLImageElement;
-  Object.defineProperty(img, "naturalWidth", { value: 1200 });
-  Object.defineProperty(img, "naturalHeight", { value: 400 });
+  Object.defineProperty(img, "naturalWidth", { value: 4096 });
+  Object.defineProperty(img, "naturalHeight", { value: 128 });
   fireEvent.load(img);
-  expect(screen.getByTestId("spectrogram-viewer").style.aspectRatio).toBe("3 / 1");
+  expect(viewer.style.height).toBe(VIEWER_VIEWPORT_HEIGHT);
+  expect(viewer.style.aspectRatio).toBe("");
+});
+
+test("image and prediction/ground-truth overlays share the same display viewport", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer
+        meta={{ ...meta, imageUrl: "/x.png" }}
+        detections={detections}
+        groundTruth={[groundTruth("gt_1")]}
+      />,
+    ),
+  );
+  const viewer = screen.getByTestId("spectrogram-viewer");
+  const img = screen.getByAltText("STFT spectrogram");
+  const overlayLayer = viewer.querySelector('svg[aria-label="Detection overlays"]') as SVGSVGElement | null;
+  expect(overlayLayer).not.toBeNull();
+  expect(viewer.contains(img)).toBe(true);
+  expect(viewer.contains(overlayLayer as SVGSVGElement)).toBe(true);
+  expect(img).toHaveStyle({ position: "absolute", width: "100%", height: "100%" });
+  expect(overlayLayer as SVGSVGElement).toHaveStyle({ position: "absolute", width: "100%", height: "100%" });
 });
 
 test("localizes ordinary controls and hints in zh-CN without changing physical values", () => {

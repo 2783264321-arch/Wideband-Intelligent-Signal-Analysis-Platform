@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Checkbox, Col, Row, Select, Space, Spin, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Select, Space, Spin, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection, getGroundTruth, getRecording, getSpectrogram, listPipelines } from "../api/client";
@@ -219,31 +219,33 @@ export function SpectrumAnalysisPage() {
         ) : <Typography.Text type="secondary">{t("common.noRunSelected")}</Typography.Text>}
         {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
       </Space>
-      <Row gutter={16} align="stretch">
-        <Col xs={24} xl={18}>
-          <Card>
-            <SpectrogramViewer
-              meta={spectrogram}
-              detections={showPredictions ? detections : []}
-              groundTruth={showGroundTruth ? groundTruth : []}
-              selectedDetectionId={selectedId}
-              onSelectDetection={selectDetection}
-            />
-            {selected ? <Typography.Text style={{ display: "block", marginTop: 12 }}>{t("spectrum.selected")}: {selected.className}</Typography.Text> : null}
-          </Card>
-        </Col>
-        <Col xs={24} xl={6}>
-          <Card style={{ height: "100%" }}>
-            <SignalResultsPanel
-              detections={detections}
-              selectedId={selectedId}
-              onSelect={selectDetection}
-              onViewDetails={(id) => currentRun && navigate(`/signals/${currentRun.id}/${id}`)}
-              onViewAll={() => currentRun && navigate(`/signals/${currentRun.id}`)}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <div
+        data-testid="spectrum-workspace"
+        style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "stretch" }}
+      >
+        <Card data-testid="spectrum-viewer-pane" style={{ flex: "1 1 520px", minWidth: 0 }}>
+          <SpectrogramViewer
+            meta={spectrogram}
+            detections={showPredictions ? detections : []}
+            groundTruth={showGroundTruth ? groundTruth : []}
+            selectedDetectionId={selectedId}
+            onSelectDetection={selectDetection}
+          />
+          {selected ? <Typography.Text style={{ display: "block", marginTop: 12 }}>{t("spectrum.selected")}: {selected.className}</Typography.Text> : null}
+        </Card>
+        <Card
+          data-testid="spectrum-results-pane"
+          style={{ flex: "0 1 320px", minWidth: 240, maxWidth: 340, height: "auto" }}
+        >
+          <SignalResultsPanel
+            detections={detections}
+            selectedId={selectedId}
+            onSelect={selectDetection}
+            onViewDetails={(id) => currentRun && navigate(`/signals/${currentRun.id}/${id}`)}
+            onViewAll={() => currentRun && navigate(`/signals/${currentRun.id}`)}
+          />
+        </Card>
+      </div>
     </Space>
   );
 }

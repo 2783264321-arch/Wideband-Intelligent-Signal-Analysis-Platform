@@ -376,9 +376,29 @@ test("exposes STFT Energy Detector with detection-only copy and submits its id",
   await screen.findByText("Burst Demo");
   expect(screen.getByText("STFT Energy Detector · CPU · Detection & localization only")).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "Run Analysis" }));
+  const runButton = screen.getByRole("button", { name: "Run Analysis" });
+  await waitFor(() => expect(runButton).not.toBeDisabled());
+  fireEvent.click(runButton);
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ pipeline_id: "stft_energy_detector", execution_mode: "auto" });
+});
+
+test("gives the spectrogram dominant desktop space and lets the results panel stack responsively", async () => {
+  setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable });
+  await screen.findByText("Burst Demo");
+
+  const workspace = await screen.findByTestId("spectrum-workspace");
+  expect(workspace).toHaveStyle({ display: "flex", flexWrap: "wrap" });
+
+  const viewerPane = screen.getByTestId("spectrum-viewer-pane");
+  const resultsPane = screen.getByTestId("spectrum-results-pane");
+  expect(workspace.contains(viewerPane)).toBe(true);
+  expect(workspace.contains(resultsPane)).toBe(true);
+
+  // The viewer grows to fill the remaining width; the results panel is a bounded sidebar.
+  expect(viewerPane.style.flexGrow).toBe("1");
+  expect(Number.parseInt(resultsPane.style.flexBasis, 10)).toBeGreaterThanOrEqual(280);
+  expect(Number.parseInt(resultsPane.style.flexBasis, 10)).toBeLessThanOrEqual(340);
 });
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ import { frequencyToPercentFromTop, timeToPercent } from "./coordinates";
 import { useLocalization } from "../../localization/useLocalization";
 import {
   FIT_ZOOM,
-  viewerAspectRatio,
+  VIEWER_VIEWPORT_HEIGHT,
   zoomStep,
 } from "./viewerGeometry";
 
@@ -22,9 +22,13 @@ interface SpectrogramViewerProps {
 //   model input size        owned by the detection model; never applied here
 //   spectrogram raster size the intrinsic image dimensions (naturalWidth/Height)
 //   browser display size    the CSS box of this frame
+//
+// The display viewport is deliberately raster-independent: height is a
+// responsive analysis workspace size, never naturalWidth/naturalHeight.
 const baseFrameStyle: CSSProperties = {
   position: "relative",
   width: "100%",
+  height: VIEWER_VIEWPORT_HEIGHT,
   overflow: "hidden",
   borderRadius: 8,
   background: "#0b0f19",
@@ -54,12 +58,10 @@ export function SpectrogramViewer({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const [cursor, setCursor] = useState<{ timeS: number; frequencyHz: number } | null>(null);
-  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
 
   const frameStyle: CSSProperties = {
     ...baseFrameStyle,
-    aspectRatio: String(viewerAspectRatio(naturalSize)),
     border: `1px solid ${token.colorBorderSecondary}`,
   };
 
@@ -119,12 +121,6 @@ export function SpectrogramViewer({
               src={meta.imageUrl}
               alt={t("spectrum.spectrogramAlt", { representation: meta.representation.toUpperCase() })}
               draggable={false}
-              onLoad={(event) =>
-                setNaturalSize({
-                  width: event.currentTarget.naturalWidth,
-                  height: event.currentTarget.naturalHeight,
-                })
-              }
               style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "fill", userSelect: "none" }}
             />
           ) : null}
