@@ -157,6 +157,12 @@ class DatasetExperimentCoordinator:
             return CoordinatorOutcome.INVARIANT_FAILED
 
     def _finish_inference(self, session, ds, benchmarks, experiment, coordinator_token):
+        # Analysis and Evaluation are different states: an incomplete/no-GT
+        # Dataset completes as Dataset Analysis with no linked Evaluation.
+        if not ds.experiment_evaluation_eligible(experiment.id):
+            if ds.mark_experiment_completed_without_evaluation(experiment.id, coordinator_token):
+                return CoordinatorOutcome.EXPERIMENT_COMPLETED
+            return CoordinatorOutcome.FENCE_LOST
         evaluation = self._ensure_evaluation(session, ds, benchmarks, experiment, coordinator_token)
         try:
             ds.start_linked_evaluation(
@@ -197,6 +203,7 @@ class DatasetExperimentCoordinator:
             recording_manifest_hash=experiment.recording_manifest_hash,
             items=membership, allow_incomplete=False,
             evaluation_protocol=experiment.evaluation_protocol,
+            dataset_id=experiment.dataset_id,
         )
         session.flush()
         if not ds.link_evaluation(experiment.id, evaluation.id, coordinator_token):

@@ -21,6 +21,7 @@ class DatasetExperimentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=255)
+    dataset_id: str | None = Field(default=None, min_length=1, max_length=64)
     dataset_projection_id: str | None = Field(default=None, min_length=1, max_length=64)
     dataset_name: str | None = Field(default=None, min_length=1)
     dataset_split: str | None = Field(default=None, min_length=1)
@@ -39,14 +40,15 @@ class DatasetExperimentCreate(BaseModel):
 
     @model_validator(mode="after")
     def _require_identity_scope(self) -> "DatasetExperimentCreate":
+        has_dataset = self.dataset_id is not None
         has_projection = self.dataset_projection_id is not None
         has_triple = all(
             value is not None
             for value in (self.dataset_name, self.dataset_split, self.dataset_label_space)
         )
-        if not has_projection and not has_triple:
+        if not has_dataset and not has_projection and not has_triple:
             raise ValueError(
-                "Dataset identity requires dataset_projection_id or the "
+                "Dataset identity requires dataset_id, dataset_projection_id, or the "
                 "dataset_name/split/label_space triple."
             )
         return self
@@ -91,6 +93,7 @@ class DatasetExperimentRead(BaseModel):
     dataset_split: str
     dataset_label_space: str
     dataset_projection_id: str | None = None
+    dataset_id: str | None = None
     recording_manifest_hash: str
 
     plugin_id: str

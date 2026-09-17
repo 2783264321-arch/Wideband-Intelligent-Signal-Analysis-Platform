@@ -545,8 +545,32 @@ class DatasetBenchmarkService:
         allow_incomplete: bool = False,
         evaluation_protocol: str = DEFAULT_PHYSICAL_TF_PROTOCOL,
         dataset_projection_id: str | None = None,
+        dataset_id: str | None = None,
     ) -> DatasetEvaluationModel:
-        if dataset_projection_id is not None:
+        if dataset_id is not None:
+            from app.datasets.analysis_manifest import build_dataset_analysis_manifest
+
+            info = build_dataset_analysis_manifest(self.session, dataset_id)
+            if dataset_name != info.dataset_name:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_name does not match the dataset authority.",
+                )
+            if dataset_split != info.dataset_split:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_split does not match the dataset authority.",
+                )
+            if label_space != info.label_space:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied label_space does not match the dataset authority.",
+                )
+            dataset_name = info.dataset_name
+            dataset_split = info.dataset_split
+            label_space = info.label_space
+            frozen = info.frozen
+        elif dataset_projection_id is not None:
             projection = DatasetProjectionResolver(self.session).get(dataset_projection_id)
             if dataset_name != projection.dataset_name:
                 raise PlatformError(
@@ -638,6 +662,7 @@ class DatasetBenchmarkService:
             comparable=False,
             recording_manifest_hash=frozen.sha256,
             dataset_projection_id=dataset_projection_id,
+            dataset_id=dataset_id,
             evaluation_protocol=evaluation_protocol,
             protocol_config_json=_protocol_config_for(evaluation_protocol),
         )

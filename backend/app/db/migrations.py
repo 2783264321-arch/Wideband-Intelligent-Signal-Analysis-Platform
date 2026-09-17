@@ -1,5 +1,5 @@
 """Small additive migrations for databases created by the V1 core slice."""
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 
 
 def upgrade_recording_external(engine) -> None:
@@ -47,6 +47,55 @@ def run_additive_migrations(engine) -> None:
     upgrade_dataset_experiments(engine)
     upgrade_v1_1_dataset_projection(engine)
     upgrade_p1_dataset_authority(engine)
+    upgrade_p3_dataset_analysis_authority(engine)
+
+
+def upgrade_p3_dataset_analysis_authority(engine) -> None:
+    """P3: first-class dataset_id on dataset experiments/evaluations + backfill.
+
+    Additive and idempotent. Legacy projection identity columns are preserved.
+    Backfill resolves via ``dataset_projection_id`` -> projection members ->
+    the shared ``recording.dataset_id``; ambiguous mappings are left NULL.
+    """
+    from sqlalchemy.orm import Session
+
+    with engine.begin() as connection:
+        experiments = {c["name"] for c in inspect(connection).get_columns("dataset_experiments")}
+        if "dataset_id" not in experiments:
+            connection.execute(text("ALTER TABLE dataset_experiments ADD COLUMN dataset_id VARCHAR(64)"))
+        evaluations = {c["name"] for c in inspect(connection).get_columns("dataset_evaluations")}
+        if "dataset_id" not in evaluations:
+            connection.execute(text("ALTER TABLE dataset_evaluations ADD COLUMN dataset_id VARCHAR(64)"))
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_dataset_experiments_dataset_id ON dataset_experiments (dataset_id)")
+        )
+        connection.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_dataset_evaluations_dataset_id ON dataset_evaluations (dataset_id)")
+        )
+
+    from app.benchmarks.model import DatasetEvaluationModel
+    from app.dataset_experiments.model import DatasetExperimentModel
+    from app.datasets.projection import DatasetProjectionResolver
+
+    with Session(engine) as session:
+        def _resolve(projection_id: str) -> str | None:
+            members = DatasetProjectionResolver(session).members(projection_id)
+            dataset_ids = {member.dataset_id for member in members if member.dataset_id is not None}
+            return next(iter(dataset_ids)) if len(dataset_ids) == 1 else None
+
+        for model in (DatasetExperimentModel, DatasetEvaluationModel):
+            rows = list(
+                session.scalars(
+                    select(model).where(
+                        model.dataset_id.is_(None), model.dataset_projection_id.is_not(None)
+                    )
+                ).all()
+            )
+            for row in rows:
+                resolved = _resolve(row.dataset_projection_id)
+                if resolved is not None:
+                    row.dataset_id = resolved
+        session.commit()
 
 
 def upgrade_p1_dataset_authority(engine) -> None:

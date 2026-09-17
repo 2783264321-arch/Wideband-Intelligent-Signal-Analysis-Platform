@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from app.dataset_experiments.schema import (
     DatasetExperimentAttemptRead,
@@ -26,6 +26,7 @@ def create_experiment(payload: DatasetExperimentCreate, request: Request):
         service = _service(request, session)
         experiment = service.create_experiment(
             name=payload.name,
+            dataset_id=payload.dataset_id,
             dataset_name=payload.dataset_name,
             dataset_split=payload.dataset_split,
             dataset_label_space=payload.dataset_label_space,
@@ -43,9 +44,9 @@ def create_experiment(payload: DatasetExperimentCreate, request: Request):
 
 
 @router.get("", response_model=list[DatasetExperimentRead])
-def list_experiments(request: Request):
+def list_experiments(request: Request, dataset_id: str | None = Query(None)):
     with request.app.state.database.session_factory() as session:
-        return _service(request, session).list_experiments()
+        return _service(request, session).list_experiments(dataset_id=dataset_id)
 
 
 @router.get("/{experiment_id}", response_model=DatasetExperimentRead)

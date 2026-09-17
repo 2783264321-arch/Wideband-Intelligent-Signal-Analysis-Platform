@@ -12,6 +12,8 @@ from app.analysis.model import AnalysisRunModel
 from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
 from app.benchmarks.service import DatasetBenchmarkService, resolve_protocol_config
 from app.core.errors import PlatformError
+from app.datasets.analysis_manifest import build_dataset_analysis_manifest
+from app.datasets.model import DatasetModel
 from app.datasets.projection import DatasetProjectionResolver
 from app.dataset_experiments.model import (
     DatasetExperimentAttemptModel,
@@ -208,6 +210,7 @@ class DatasetExperimentService:
             dataset_split=experiment.dataset_split,
             dataset_label_space=experiment.dataset_label_space,
             dataset_projection_id=experiment.dataset_projection_id,
+            dataset_id=experiment.dataset_id,
             recording_manifest_hash=experiment.recording_manifest_hash,
             plugin_id=experiment.plugin_id,
             plugin_version=experiment.plugin_version,
@@ -297,9 +300,9 @@ class DatasetExperimentService:
         self,
         *,
         name,
-        dataset_name,
-        dataset_split,
-        dataset_label_space,
+        dataset_name=None,
+        dataset_split=None,
+        dataset_label_space=None,
         plugin_id,
         plugin_version,
         executor=None,
@@ -309,6 +312,7 @@ class DatasetExperimentService:
         model_release_id=None,
         execution_mode="manual",
         dataset_projection_id=None,
+        dataset_id=None,
     ):
         if max_concurrency < 1:
             raise PlatformError(
@@ -321,7 +325,38 @@ class DatasetExperimentService:
                 "EXECUTION_REQUEST_INVALID", "execution_mode must be 'manual' or 'auto'."
             )
 
-        if dataset_projection_id is not None:
+        if dataset_id is not None:
+            if dataset_projection_id is not None:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "dataset_id and dataset_projection_id are mutually exclusive.",
+                )
+            model = self.session.get(DatasetModel, dataset_id)
+            if model is None:
+                raise PlatformError("DATASET_NOT_FOUND", "Dataset was not found.", 404)
+            derived_name = model.name
+            derived_split = model.split
+            derived_label_space = model.label_space or ""
+            if dataset_name is not None and dataset_name != derived_name:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_name does not match the dataset authority.",
+                )
+            if dataset_split is not None and dataset_split != derived_split:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_split does not match the dataset authority.",
+                )
+            if dataset_label_space is not None and dataset_label_space != derived_label_space:
+                raise PlatformError(
+                    "EXECUTION_REQUEST_INVALID",
+                    "Supplied dataset_label_space does not match the dataset authority.",
+                )
+            dataset_name = derived_name
+            dataset_split = derived_split
+            dataset_label_space = derived_label_space
+            manifest = build_dataset_analysis_manifest(self.session, dataset_id)
+        elif dataset_projection_id is not None:
             projection = DatasetProjectionResolver(self.session).get(dataset_projection_id)
             if dataset_name is not None and dataset_name != projection.dataset_name:
                 raise PlatformError(
@@ -426,6 +461,7 @@ class DatasetExperimentService:
             dataset_split=dataset_split,
             dataset_label_space=dataset_label_space,
             dataset_projection_id=dataset_projection_id,
+            dataset_id=dataset_id,
             recording_manifest_hash=manifest.recording_manifest_hash,
             plugin_id=definition.plugin_id,
             plugin_version=definition.plugin_version,
@@ -477,7 +513,9 @@ class DatasetExperimentService:
 
         # 1. Frozen dataset membership hash.
         try:
-            if experiment.dataset_projection_id is not None:
+            if experiment.dataset_id is not None:
+                manifest = build_dataset_analysis_manifest(self.session, experiment.dataset_id)
+            elif experiment.dataset_projection_id is not None:
                 manifest = DatasetBenchmarkService(self.session).prepare_projection_manifest(
                     experiment.dataset_projection_id
                 )
@@ -1625,6 +1663,51 @@ class DatasetExperimentService:
 
     # ---------- G5 evaluation ownership ----------
 
+    def experiment_evaluation_eligible(self, experiment_id) -> bool:
+        """Evaluation requires complete GT coverage across all frozen items.
+
+        Dataset Analysis itself never requires GT; this only gates the optional
+        linked Evaluation. Legacy projection experiments are all-GT by
+        construction, so their behavior is unchanged.
+        """
+        recordings = list(
+            self.session.scalars(
+                select(RecordingModel)
+                .join(
+                    DatasetExperimentItemModel,
+                    DatasetExperimentItemModel.recording_id == RecordingModel.id,
+                )
+                .where(DatasetExperimentItemModel.experiment_id == experiment_id)
+            ).all()
+        )
+        if not recordings:
+            return False
+        return all(recording.has_ground_truth for recording in recordings)
+
+    def mark_experiment_completed_without_evaluation(self, experiment_id, coordinator_token):
+        """Generation-fenced ``running -> completed`` with NO linked evaluation."""
+        try:
+            with self.session.no_autoflush:
+                result = self.session.execute(
+                    update(DatasetExperimentModel)
+                    .where(
+                        DatasetExperimentModel.id == experiment_id,
+                        DatasetExperimentModel.coordinator_token == coordinator_token,
+                        DatasetExperimentModel.status == "running",
+                    )
+                    .values(
+                        status="completed",
+                        completed_at=datetime.now(timezone.utc),
+                        error_type=None, error_message=None,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return int(result.rowcount or 0) == 1
+
     def mark_experiment_completed(self, experiment_id, coordinator_token):
         try:
             with self.session.no_autoflush:
@@ -1725,6 +1808,9 @@ class DatasetExperimentService:
         if evaluation.recording_manifest_hash != experiment.recording_manifest_hash:
             raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
                                 "Linked evaluation manifest hash mismatch.", 409)
+        if experiment.dataset_id is not None and evaluation.dataset_id != experiment.dataset_id:
+            raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
+                                "Linked evaluation dataset_id mismatch.", 409)
         if (evaluation.dataset_name != experiment.dataset_name
                 or evaluation.dataset_split != experiment.dataset_split
                 or evaluation.label_space != experiment.dataset_label_space):
@@ -1932,10 +2018,12 @@ class DatasetExperimentService:
         raise PlatformError("DATASET_EXPERIMENT_INVARIANT_VIOLATION",
                             "Evaluation start claim missed in an impossible state.", 409)
 
-    def list_experiments(self):
+    def list_experiments(self, dataset_id: str | None = None):
+        statement = select(DatasetExperimentModel)
+        if dataset_id is not None:
+            statement = statement.where(DatasetExperimentModel.dataset_id == dataset_id)
         experiments = list(self.session.scalars(
-            select(DatasetExperimentModel)
-            .order_by(DatasetExperimentModel.created_at, DatasetExperimentModel.id)
+            statement.order_by(DatasetExperimentModel.created_at, DatasetExperimentModel.id)
         ).all())
         return [self._to_read(experiment) for experiment in experiments]
 
