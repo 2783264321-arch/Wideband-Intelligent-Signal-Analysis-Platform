@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { DatasetDetailPage } from "./DatasetDetailPage";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
@@ -203,6 +203,12 @@ test("Analyze Dataset modal defaults to STFT Energy + Auto · Local CPU and star
   expect(await screen.findByTitle("STFT Energy Detector")).toBeInTheDocument();
   expect(await screen.findByText("Auto · Local CPU")).toBeInTheDocument();
 
+  // Executor-selection preview uses the first-class dataset_id scope only.
+  const selectionCall = fetchCalls().find((call) => String(call[0]).includes("/api/executor-selection"));
+  expect(selectionCall).toBeDefined();
+  expect(String(selectionCall![0])).toContain("dataset_id=ds_1");
+  expect(String(selectionCall![0])).not.toContain("dataset_name");
+
   fireEvent.click(await screen.findByRole("button", { name: "Start Analysis" }));
   await screen.findByTestId("location-probe");
   expect(posted).toHaveLength(1);
@@ -211,12 +217,38 @@ test("Analyze Dataset modal defaults to STFT Energy + Auto · Local CPU and star
     plugin_id: "stft_energy_detector",
     execution_mode: "auto",
   });
+  // dataset_id is authoritative: no redundant legacy identity fields.
+  expect(posted[0]).not.toHaveProperty("dataset_name");
+  expect(posted[0]).not.toHaveProperty("dataset_split");
+  expect(posted[0]).not.toHaveProperty("dataset_label_space");
   const runCall = fetchCalls().find(
     (call) => String(call[0]).includes("/api/dataset-experiments/exp_1/run")
       && (call[1] as RequestInit | undefined)?.method === "POST",
   );
   expect(runCall).toBeDefined();
   expect(screen.getByTestId("location-probe")).toHaveTextContent("/experiments/exp_1");
+});
+
+test("a zero-GT dataset with runnable Auto Local CPU enables Start Analysis", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const target = String(url);
+    if (target.includes("/api/dataset-experiments")) return new Response(JSON.stringify([]), { status: 200 });
+    if (target.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionWire), { status: 200 });
+    if (target.includes("/api/pipelines")) return new Response(JSON.stringify([pipelineWire]), { status: 200 });
+    if (target.includes("/samples")) {
+      return new Response(JSON.stringify({ dataset_id: "ds_1", items: [], total: 0 }), { status: 200 });
+    }
+    if (target.includes("/api/datasets/ds_1")) {
+      return new Response(JSON.stringify({ ...datasetWire, ground_truth_sample_count: 0 }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
+  }));
+  renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Analyses" }));
+  fireEvent.click(await screen.findByTestId("analyze-dataset-button"));
+  const start = await screen.findByRole("button", { name: "Start Analysis" });
+  await waitFor(() => expect(start).not.toBeDisabled());
+  expect(await screen.findByText("Auto · Local CPU")).toBeInTheDocument();
 });
 
 test("Remove Dataset confirms external-file preservation and navigates back on success", async () => {

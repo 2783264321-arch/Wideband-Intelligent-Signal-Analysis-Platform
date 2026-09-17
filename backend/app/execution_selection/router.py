@@ -8,6 +8,7 @@ from fastapi import APIRouter, Query, Request
 
 from app.benchmarks.service import DatasetBenchmarkService
 from app.core.errors import PlatformError
+from app.datasets.analysis_manifest import build_dataset_analysis_manifest
 from app.execution_selection.resolver import resolve_auto_execution
 from app.execution_selection.schema import ExecutionCandidateRead, ExecutorSelectionRead
 from app.recordings.model import RecordingModel
@@ -61,6 +62,7 @@ def executor_selection(
     pipeline_id: str = Query(...),
     model_release_id: str | None = Query(None),
     recording_id: str | None = Query(None),
+    dataset_id: str | None = Query(None),
     dataset_projection_id: str | None = Query(None),
     dataset_name: str | None = Query(None),
     dataset_split: str | None = Query(None),
@@ -75,13 +77,18 @@ def executor_selection(
             "Dataset scope requires dataset_name, dataset_split and dataset_label_space.",
         )
     scope_count = sum(
-        [recording_id is not None, dataset_projection_id is not None, has_dataset_scope]
+        [
+            recording_id is not None,
+            dataset_id is not None,
+            dataset_projection_id is not None,
+            has_dataset_scope,
+        ]
     )
     if scope_count != 1:
         raise PlatformError(
             _SCOPE_INVALID,
-            "Provide exactly one scope: recording_id, dataset_projection_id, or the "
-            "dataset name/split/label_space triple.",
+            "Provide exactly one scope: recording_id, dataset_id, dataset_projection_id, "
+            "or the dataset name/split/label_space triple.",
         )
 
     state = request.app.state
@@ -105,6 +112,19 @@ def executor_selection(
                 model_release=resolved_release,
                 probe_recording=probe_recording,
                 executor_registry=executor_registry,
+            )
+        elif dataset_id is not None:
+            # First-class Dataset Analysis membership: ALL members, GT not required.
+            manifest = build_dataset_analysis_manifest(session, dataset_id)
+            probe_recording = session.get(RecordingModel, manifest.entries[0].recording_id)
+            if probe_recording is None:
+                raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+            selection = resolve_auto_execution(
+                definition=definition,
+                model_release=resolved_release,
+                probe_recording=probe_recording,
+                executor_registry=executor_registry,
+                dataset_item_count=manifest.expected_recordings,
             )
         elif dataset_projection_id is not None:
             manifest = DatasetBenchmarkService(session).prepare_projection_manifest(

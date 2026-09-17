@@ -474,6 +474,15 @@ function assertSelectionScope(scope: ExecutionSelectionScope): void {
     }
     return;
   }
+  if (scope.kind === "dataset_id") {
+    if ("recordingId" in scope) {
+      throw new Error("Execution selection scope is invalid (mixed recording/dataset-id scope).");
+    }
+    if (typeof scope.datasetId !== "string" || scope.datasetId.length === 0) {
+      throw new Error("Dataset-id scope requires a non-empty datasetId.");
+    }
+    return;
+  }
   if (scope.kind === "dataset") {
     if ("recordingId" in scope) {
       throw new Error("Execution selection scope is invalid (mixed recording/dataset scope).");
@@ -510,6 +519,8 @@ export async function getExecutorSelection(params: {
   const query = new URLSearchParams();
   if (params.scope.kind === "recording") {
     query.set("recording_id", params.scope.recordingId);
+  } else if (params.scope.kind === "dataset_id") {
+    query.set("dataset_id", params.scope.datasetId);
   } else if (params.scope.kind === "dataset_projection") {
     query.set("dataset_projection_id", params.scope.datasetProjectionId);
   } else {
@@ -638,9 +649,9 @@ interface DatasetExperimentAttemptWire {
 
 interface DatasetExperimentCreateWire {
   name: string;
-  dataset_name: string;
-  dataset_split: string;
-  dataset_label_space: string;
+  dataset_name?: string;
+  dataset_split?: string;
+  dataset_label_space?: string;
   dataset_projection_id?: string | null;
   dataset_id?: string | null;
   plugin_id: string;
@@ -735,15 +746,15 @@ export async function createDatasetExperiment(
 ): Promise<import("./types").DatasetExperiment> {
   const wire: DatasetExperimentCreateWire = {
     name: request.name,
-    dataset_name: request.datasetName,
-    dataset_split: request.datasetSplit,
-    dataset_label_space: request.datasetLabelSpace,
     plugin_id: request.pluginId,
     plugin_version: request.pluginVersion,
     execution_mode: request.executionMode,
     parameters: request.parameters,
     max_concurrency: request.maxConcurrency,
   };
+  if (request.datasetName !== undefined) wire.dataset_name = request.datasetName;
+  if (request.datasetSplit !== undefined) wire.dataset_split = request.datasetSplit;
+  if (request.datasetLabelSpace !== undefined) wire.dataset_label_space = request.datasetLabelSpace;
   if (request.datasetProjectionId != null) wire.dataset_projection_id = request.datasetProjectionId;
   if (request.datasetId != null) wire.dataset_id = request.datasetId;
   if (request.executor !== undefined) wire.executor = request.executor;

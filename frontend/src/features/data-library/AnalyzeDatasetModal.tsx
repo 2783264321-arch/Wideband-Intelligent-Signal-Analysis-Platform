@@ -41,7 +41,6 @@ export interface AnalyzeDatasetModalProps {
 
 export function AnalyzeDatasetModal({ dataset, open, onClose, onStarted }: AnalyzeDatasetModalProps) {
   const { t } = useLocalization();
-  const labelSpace = dataset.labelSpace ?? "_";
   const [pipelines, setPipelines] = useState<PipelineDefinition[]>([]);
   const [pipelineId, setPipelineId] = useState("");
   const [maxConcurrency, setMaxConcurrency] = useState(1);
@@ -72,12 +71,8 @@ export function AnalyzeDatasetModal({ dataset, open, onClose, onStarted }: Analy
     setBoundSelection(null);
     setEnvironment({ mode: "auto", executor: null });
     if (!open || pipelineId === "") return undefined;
-    const scope: ExecutionSelectionScope = {
-      kind: "dataset",
-      datasetName: dataset.name,
-      datasetSplit: dataset.split,
-      datasetLabelSpace: labelSpace,
-    };
+    // First-class dataset authority: membership is ALL samples, GT not required.
+    const scope: ExecutionSelectionScope = { kind: "dataset_id", datasetId: dataset.id };
     let active = true;
     setLoading(true);
     void getExecutorSelection({ scope, pipelineId })
@@ -106,9 +101,6 @@ export function AnalyzeDatasetModal({ dataset, open, onClose, onStarted }: Analy
       const created = await createDatasetExperiment({
         name: `${dataset.name} · ${selectedPipeline.name}`,
         datasetId: dataset.id,
-        datasetName: dataset.name,
-        datasetSplit: dataset.split,
-        datasetLabelSpace: dataset.labelSpace ?? "",
         pluginId: selectedPipeline.id,
         pluginVersion: selectedPipeline.version,
         executionMode: environment.mode,

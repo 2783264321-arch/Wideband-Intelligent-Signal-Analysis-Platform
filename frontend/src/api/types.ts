@@ -392,6 +392,7 @@ export interface ExecutorSelection {
 
 export type ExecutionSelectionScope =
   | { kind: "recording"; recordingId: string }
+  | { kind: "dataset_id"; datasetId: string }
   | { kind: "dataset"; datasetName: string; datasetSplit: string; datasetLabelSpace: string }
   | { kind: "dataset_projection"; datasetProjectionId: string };
 
@@ -465,9 +466,10 @@ export interface DatasetExperiment {
 
 export interface DatasetExperimentCreateRequest {
   name: string;
-  datasetName: string;
-  datasetSplit: string;
-  datasetLabelSpace: string;
+  /** Legacy identity fields. Optional: dataset_id alone is sufficient authority. */
+  datasetName?: string;
+  datasetSplit?: string;
+  datasetLabelSpace?: string;
   datasetProjectionId?: string | null;
   datasetId?: string | null;
   pluginId: string;
