@@ -72,11 +72,42 @@ export function MainLayout() {
           borderRight: `1px solid ${token.colorBorderSecondary}`,
         }}
       >
-        {!collapsed ? (
-          <div style={{ padding: "22px 18px 14px" }}>
-            <Typography.Text strong>{t("app.title")}</Typography.Text>
-          </div>
-        ) : null}
+        {/*
+          Brand region is ALWAYS mounted at a fixed height so collapse is a purely
+          horizontal transition: the menu top and all vertical positions stay put.
+          Only the brand text visibility (opacity/max-width) changes.
+        */}
+        <div
+          data-testid="sidebar-brand"
+          style={{
+            height: 64,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            paddingInline: 22,
+            overflow: "hidden",
+            flexShrink: 0,
+            whiteSpace: "nowrap",
+          }}
+        >
+          <span data-testid="sidebar-brand-icon" style={{ display: "inline-flex", flexShrink: 0 }}>
+            <RadarChartOutlined style={{ fontSize: 20 }} />
+          </span>
+          <Typography.Text
+            strong
+            data-testid="sidebar-brand-title"
+            style={{
+              display: "inline-block",
+              maxWidth: collapsed ? 0 : 160,
+              opacity: collapsed ? 0 : 1,
+              overflow: "hidden",
+              whiteSpace: "nowrap",
+              transition: "opacity 200ms ease, max-width 200ms ease",
+            }}
+          >
+            {t("app.title")}
+          </Typography.Text>
+        </div>
         <Menu
           mode="inline"
           theme={resolved === "dark" ? "dark" : "light"}
