@@ -4,9 +4,11 @@ import type {
   DatasetBenchmarkCompareResult,
   DatasetBenchmarkConfusion,
   DatasetBenchmarkPerClassMetric,
+  DatasetBenchmarkRecordingComparison,
   DatasetEvaluation,
   DatasetEvaluationItem,
   DatasetEvaluationStatus,
+  DatasetRecordingComparison,
   ImportedBatchResolution,
   ImportedBenchmarkBatch,
   OperatingMetrics,
@@ -1162,6 +1164,14 @@ interface ImportedBatchResolutionWire {
   }>;
 }
 
+interface DatasetBenchmarkCompareRecordingWire {
+  recording_id: string;
+  recording_name: string;
+  evaluation_a_run_id: string | null;
+  evaluation_b_run_id: string | null;
+  comparison: DatasetRecordingComparison;
+}
+
 interface DatasetBenchmarkCompareWire {
   comparable: boolean;
   reasons: string[];
@@ -1170,6 +1180,7 @@ interface DatasetBenchmarkCompareWire {
   aggregate_a: DatasetBenchmarkAggregateWire | null;
   aggregate_b: DatasetBenchmarkAggregateWire | null;
   deltas: Record<string, number | null>;
+  recordings?: DatasetBenchmarkCompareRecordingWire[] | null;
 }
 
 function mapOperating(item: OperatingMetricsWire): OperatingMetrics {
@@ -1312,8 +1323,9 @@ const mapImportedResolution = (item: ImportedBatchResolutionWire): ImportedBatch
   })),
 });
 
-export async function listDatasetBenchmarks(): Promise<DatasetEvaluation[]> {
-  return (await apiGet<DatasetEvaluationWire[]>("/api/dataset-benchmarks")).map(mapDatasetEvaluation);
+export async function listDatasetBenchmarks(datasetId?: string): Promise<DatasetEvaluation[]> {
+  const suffix = datasetId ? `?dataset_id=${encodeURIComponent(datasetId)}` : "";
+  return (await apiGet<DatasetEvaluationWire[]>(`/api/dataset-benchmarks${suffix}`)).map(mapDatasetEvaluation);
 }
 
 export async function getDatasetBenchmark(id: string): Promise<DatasetEvaluation> {
@@ -1370,6 +1382,16 @@ export async function retryDatasetBenchmark(id: string): Promise<DatasetEvaluati
   return mapDatasetEvaluation(await apiPostJson<DatasetEvaluationWire>(`/api/dataset-benchmarks/${id}/retry`, {}));
 }
 
+const mapRecordingComparison = (
+  item: DatasetBenchmarkCompareRecordingWire,
+): DatasetBenchmarkRecordingComparison => ({
+  recordingId: item.recording_id,
+  recordingName: item.recording_name,
+  evaluationARunId: item.evaluation_a_run_id,
+  evaluationBRunId: item.evaluation_b_run_id,
+  comparison: item.comparison,
+});
+
 export async function compareDatasetBenchmarks(a: string, b: string): Promise<DatasetBenchmarkCompareResult> {
   const wire = await apiPostJson<DatasetBenchmarkCompareWire>("/api/dataset-benchmarks/compare", {
     evaluation_a_id: a,
@@ -1383,6 +1405,7 @@ export async function compareDatasetBenchmarks(a: string, b: string): Promise<Da
     aggregateA: mapAggregate(wire.aggregate_a),
     aggregateB: mapAggregate(wire.aggregate_b),
     deltas: wire.deltas,
+    recordings: (wire.recordings ?? []).map(mapRecordingComparison),
   };
 }
 

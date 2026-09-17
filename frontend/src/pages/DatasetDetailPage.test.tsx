@@ -119,6 +119,9 @@ function route(url: string, init?: RequestInit): Response {
   if (url.includes("/api/dataset-experiments")) {
     return new Response(JSON.stringify([experimentWire]), { status: 200 });
   }
+  if (url.includes("/api/dataset-benchmarks")) {
+    return new Response(JSON.stringify([]), { status: 200 });
+  }
   if (url.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionWire), { status: 200 });
   if (url.includes("/api/pipelines")) return new Response(JSON.stringify([pipelineWire]), { status: 200 });
   if (url.includes("/samples")) {
@@ -233,6 +236,7 @@ test("a zero-GT dataset with runnable Auto Local CPU enables Start Analysis", as
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     const target = String(url);
     if (target.includes("/api/dataset-experiments")) return new Response(JSON.stringify([]), { status: 200 });
+    if (target.includes("/api/dataset-benchmarks")) return new Response(JSON.stringify([]), { status: 200 });
     if (target.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionWire), { status: 200 });
     if (target.includes("/api/pipelines")) return new Response(JSON.stringify([pipelineWire]), { status: 200 });
     if (target.includes("/samples")) {

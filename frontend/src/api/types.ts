@@ -351,6 +351,16 @@ export interface ImportedBatchResolution {
   }>;
 }
 
+export type DatasetRecordingComparison = "both_detected" | "a_only" | "b_only" | "both_missed";
+
+export interface DatasetBenchmarkRecordingComparison {
+  recordingId: string;
+  recordingName: string;
+  evaluationARunId: string | null;
+  evaluationBRunId: string | null;
+  comparison: DatasetRecordingComparison;
+}
+
 export interface DatasetBenchmarkCompareResult {
   comparable: boolean;
   reasons: string[];
@@ -359,6 +369,7 @@ export interface DatasetBenchmarkCompareResult {
   aggregateA: DatasetBenchmarkAggregateMetrics | null;
   aggregateB: DatasetBenchmarkAggregateMetrics | null;
   deltas: Record<string, number | null>;
+  recordings: DatasetBenchmarkRecordingComparison[];
 }
 
 // ---------------------------------------------------------------------------

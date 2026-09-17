@@ -18,6 +18,7 @@ const result: DatasetBenchmarkCompareResult = {
     class_aware_map50_95: null,
     matched_accuracy: null,
   },
+  recordings: [],
 };
 
 function itemWire(id: string, evaluationId: string, recordingId: string, runId: string | null) {
