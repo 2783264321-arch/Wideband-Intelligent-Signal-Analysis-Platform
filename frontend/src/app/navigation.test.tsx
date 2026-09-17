@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-test("primary navigation is exactly Data Library | Dataset Experiments | Algorithm Lab | User Guide | Settings", () => {
+test("primary navigation is exactly Data Library | Dataset Analysis | Algorithm Lab | User Guide | Settings", () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <AppWithLocale />
@@ -39,7 +39,7 @@ test("primary navigation is exactly Data Library | Dataset Experiments | Algorit
   const items = screen.getAllByRole("menuitem");
   expect(items).toHaveLength(5);
   expect(screen.getByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
-  expect(screen.getByRole("menuitem", { name: /Dataset Experiments/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Dataset Analysis/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /Algorithm Lab/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /User Guide/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /Settings/ })).toBeInTheDocument();
@@ -54,7 +54,7 @@ test("the Experiments route renders the Experiments tab shell", async () => {
       <AppWithLocale />
     </MemoryRouter>,
   );
-  expect(await screen.findByRole("tab", { name: "Dataset Experiments" })).toBeInTheDocument();
+  expect(await screen.findByRole("tab", { name: "Dataset Analysis" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Compare" })).toBeInTheDocument();
 });
 
@@ -110,7 +110,7 @@ test("fresh UI defaults to Simplified Chinese primary navigation", async () => {
     </MemoryRouter>,
   );
   expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
-  expect(screen.getByRole("menuitem", { name: /数据集实验/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /数据集分析/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /算法评测实验室/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /使用指南/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /设置/ })).toBeInTheDocument();

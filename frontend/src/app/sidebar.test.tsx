@@ -70,7 +70,7 @@ test("brand title stays in the DOM when collapsed and is only visually hidden", 
 
 test("navigation items remain present across collapse", () => {
   renderApp();
-  const labels = ["Data Library", "Dataset Experiments", "Algorithm Lab", "User Guide", "Settings"];
+  const labels = ["Data Library", "Dataset Analysis", "Algorithm Lab", "User Guide", "Settings"];
   for (const label of labels) expect(screen.getByRole("menuitem", { name: new RegExp(label) })).toBeInTheDocument();
 
   fireEvent.click(screen.getByTestId("sidebar-toggle"));

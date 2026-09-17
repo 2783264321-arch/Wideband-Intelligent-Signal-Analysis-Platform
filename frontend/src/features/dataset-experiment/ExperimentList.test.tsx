@@ -65,7 +65,7 @@ test("shows an empty state when there are no experiments", async () => {
       </MemoryRouter>,
     ),
   );
-  expect(await screen.findByText(/No dataset experiments/i)).toBeInTheDocument();
+  expect(await screen.findByText(/No dataset analyses/i)).toBeInTheDocument();
 });
 
 test("surfaces a bounded platform error", async () => {

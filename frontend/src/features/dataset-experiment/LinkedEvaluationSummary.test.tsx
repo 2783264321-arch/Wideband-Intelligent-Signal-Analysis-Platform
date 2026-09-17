@@ -12,6 +12,7 @@ function experiment(overrides: Partial<DatasetExperiment> = {}): DatasetExperime
     datasetSplit: "test",
     datasetLabelSpace: "spacenet_14",
     datasetProjectionId: null,
+    datasetId: null,
     recordingManifestHash: "a".repeat(64),
     pluginId: "dummy",
     pluginVersion: "1.0",
@@ -268,4 +269,27 @@ test("localizes a known linked-evaluation status in zh-CN", async () => {
   const summary = await screen.findByTestId("linked-evaluation-summary");
   await waitFor(() => expect(summary).toHaveTextContent("已中断"));
   expect(summary).toHaveTextContent("BENCHMARK_INTERRUPTED");
+});
+
+test("a completed analysis without complete GT shows the Evaluation-unavailable state", () => {
+  render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <LinkedEvaluationSummary experiment={experiment({ status: "completed", datasetEvaluationId: null })} />
+      </MemoryRouter>,
+    ),
+  );
+  expect(screen.getByTestId("evaluation-unavailable")).toHaveTextContent(/complete Ground Truth/i);
+  expect(screen.queryByTestId("linked-evaluation-summary")).toBeNull();
+});
+
+test("a running analysis without evaluation renders nothing (no misleading panel)", () => {
+  const { container } = render(
+    renderWithLocalization(
+      <MemoryRouter>
+        <LinkedEvaluationSummary experiment={experiment({ status: "running", datasetEvaluationId: null })} />
+      </MemoryRouter>,
+    ),
+  );
+  expect(container).toBeEmptyDOMElement();
 });

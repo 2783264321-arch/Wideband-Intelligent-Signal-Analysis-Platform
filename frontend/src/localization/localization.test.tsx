@@ -31,7 +31,7 @@ test("restores persisted zh-CN", () => {
   window.localStorage.setItem(LOCALE_STORAGE_KEY, "zh-CN");
   const { result } = renderHook(() => useLocalization(), { wrapper });
   expect(result.current.locale).toBe("zh-CN");
-  expect(result.current.t("nav.experiments")).toBe("数据集实验");
+  expect(result.current.t("nav.experiments")).toBe("数据集分析");
 });
 
 test("invalid persisted locale falls back to zh-CN", () => {
@@ -44,7 +44,7 @@ test("setLocale rerenders immediately and persists", () => {
   const { result } = renderHook(() => useLocalization(), { wrapper });
   act(() => { result.current.setLocale("en-US"); });
   expect(result.current.locale).toBe("en-US");
-  expect(result.current.t("nav.experiments")).toBe("Dataset Experiments");
+  expect(result.current.t("nav.experiments")).toBe("Dataset Analysis");
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("en-US");
   act(() => { result.current.setLocale("zh-CN"); });
   expect(result.current.locale).toBe("zh-CN");

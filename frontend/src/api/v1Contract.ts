@@ -101,6 +101,7 @@ const experiment: DatasetExperiment = {
   datasetSplit: "test",
   datasetLabelSpace: "spacenet_14",
   datasetProjectionId: null,
+  datasetId: null,
   recordingManifestHash: "a".repeat(64),
   pluginId: "dummy",
   pluginVersion: "1.0",

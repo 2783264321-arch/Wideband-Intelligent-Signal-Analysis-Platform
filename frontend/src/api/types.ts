@@ -433,6 +433,7 @@ export interface DatasetExperiment {
   datasetSplit: string;
   datasetLabelSpace: string;
   datasetProjectionId: string | null;
+  datasetId: string | null;
   recordingManifestHash: string;
   pluginId: string;
   pluginVersion: string;
@@ -467,6 +468,7 @@ export interface DatasetExperimentCreateRequest {
   datasetSplit: string;
   datasetLabelSpace: string;
   datasetProjectionId?: string | null;
+  datasetId?: string | null;
   pluginId: string;
   pluginVersion: string;
   executionMode: ExecutionMode;

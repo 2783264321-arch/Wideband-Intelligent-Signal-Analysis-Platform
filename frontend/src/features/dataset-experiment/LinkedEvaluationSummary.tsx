@@ -48,7 +48,16 @@ export function LinkedEvaluationSummary({
   }, [experiment.datasetEvaluationId, experiment.status]);
 
   if (experiment.datasetEvaluationId === null) {
-    return null;
+    // Analysis completed without an Evaluation: a valid state for Datasets
+    // without complete Ground Truth coverage. Never an empty mysterious panel.
+    return experiment.status === "completed" ? (
+      <Alert
+        type="info"
+        showIcon
+        data-testid="evaluation-unavailable"
+        message={t("datasetAnalysis.evaluationUnavailable")}
+      />
+    ) : null;
   }
   if (evaluation === null) {
     return error !== null

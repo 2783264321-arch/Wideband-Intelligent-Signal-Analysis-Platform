@@ -4,8 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { deleteBlockersFromError, deleteDataset, getDataset } from "../api/client";
 import { useLocalization } from "../localization/useLocalization";
 import type { DatasetSummary, DeleteBlocker } from "../api/types";
-import { BatchImportModal } from "../features/imports/BatchImportModal";
-import { DatasetAnalysisHistory } from "../features/data-library/DatasetAnalysisHistory";
+import { DatasetAnalysesPanel } from "../features/data-library/DatasetAnalysesPanel";
 import { DatasetSamplesTable } from "../features/data-library/DatasetSamplesTable";
 import { DeleteConfirmModal } from "../features/data-library/DeleteConfirmModal";
 import { DeleteConflictAlert } from "../features/data-library/DeleteConflictAlert";
@@ -15,7 +14,6 @@ export function DatasetDetailPage() {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [dataset, setDataset] = useState<DatasetSummary | null>(null);
-  const [batchOpen, setBatchOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [blockers, setBlockers] = useState<DeleteBlocker[]>([]);
@@ -108,19 +106,13 @@ export function DatasetDetailPage() {
             children: <DatasetSamplesTable datasetId={datasetId} />,
           },
           {
-            key: "history",
-            label: t("dataLibrary.analysisHistory"),
-            children: (
-              <DatasetAnalysisHistory
-                datasetId={datasetId}
-                onImportBatchResults={() => setBatchOpen(true)}
-              />
-            ),
+            key: "analyses",
+            label: t("datasetAnalysis.analyses"),
+            children: dataset ? <DatasetAnalysesPanel dataset={dataset} /> : null,
           },
         ]}
       />
 
-      <BatchImportModal open={batchOpen} onClose={() => setBatchOpen(false)} />
       <DeleteConfirmModal
         open={confirmOpen}
         title={t("dataLibrary.removeDataset")}

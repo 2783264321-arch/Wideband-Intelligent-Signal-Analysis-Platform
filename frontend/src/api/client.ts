@@ -584,6 +584,7 @@ interface DatasetExperimentWire {
   dataset_split: string;
   dataset_label_space: string;
   dataset_projection_id: string | null;
+  dataset_id?: string | null;
   recording_manifest_hash: string;
   plugin_id: string;
   plugin_version: string;
@@ -641,6 +642,7 @@ interface DatasetExperimentCreateWire {
   dataset_split: string;
   dataset_label_space: string;
   dataset_projection_id?: string | null;
+  dataset_id?: string | null;
   plugin_id: string;
   plugin_version: string;
   execution_mode: ExecutionMode;
@@ -659,6 +661,7 @@ function mapDatasetExperiment(item: DatasetExperimentWire): import("./types").Da
     datasetSplit: item.dataset_split,
     datasetLabelSpace: item.dataset_label_space,
     datasetProjectionId: item.dataset_projection_id,
+    datasetId: item.dataset_id ?? null,
     recordingManifestHash: item.recording_manifest_hash,
     pluginId: item.plugin_id,
     pluginVersion: item.plugin_version,
@@ -715,8 +718,11 @@ function mapDatasetExperimentAttempt(item: DatasetExperimentAttemptWire): import
   };
 }
 
-export async function listDatasetExperiments(): Promise<import("./types").DatasetExperiment[]> {
-  const items = await apiGet<DatasetExperimentWire[]>("/api/dataset-experiments");
+export async function listDatasetExperiments(
+  datasetId?: string,
+): Promise<import("./types").DatasetExperiment[]> {
+  const suffix = datasetId ? `?dataset_id=${encodeURIComponent(datasetId)}` : "";
+  const items = await apiGet<DatasetExperimentWire[]>(`/api/dataset-experiments${suffix}`);
   return items.map(mapDatasetExperiment);
 }
 
@@ -739,6 +745,7 @@ export async function createDatasetExperiment(
     max_concurrency: request.maxConcurrency,
   };
   if (request.datasetProjectionId != null) wire.dataset_projection_id = request.datasetProjectionId;
+  if (request.datasetId != null) wire.dataset_id = request.datasetId;
   if (request.executor !== undefined) wire.executor = request.executor;
   if (request.modelReleaseId !== undefined) wire.model_release_id = request.modelReleaseId;
   if (request.evaluationProtocol !== undefined) wire.evaluation_protocol = request.evaluationProtocol;

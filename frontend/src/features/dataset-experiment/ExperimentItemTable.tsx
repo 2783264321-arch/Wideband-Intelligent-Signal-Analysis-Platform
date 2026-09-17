@@ -1,4 +1,4 @@
-import { Empty, Table, Tag, Typography } from "antd";
+import { Empty, Space, Table, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { listDatasetExperimentItems, PlatformApiError } from "../../api/client";
@@ -58,12 +58,23 @@ export function ExperimentItemTable({ experimentId }: { experimentId: string }) 
           render: (value: string | null) => (value !== null ? <Typography.Text code>{value}</Typography.Text> : null),
         },
         {
-          title: t("items.columnRun"),
-          key: "run",
-          render: (_: unknown, record: DatasetExperimentItem) =>
-            record.latestAnalysisRunId !== null
-              ? <Link to={`/signals/${record.latestAnalysisRunId}`}>{record.latestAnalysisRunId}</Link>
-              : null,
+          title: "",
+          key: "actions",
+          render: (_: unknown, record: DatasetExperimentItem) => (
+            <Space>
+              {record.latestAnalysisRunId !== null && record.status === "completed" ? (
+                <Link
+                  data-testid="item-view-result"
+                  to={`/spectrum/${record.recordingId}?run=${record.latestAnalysisRunId}`}
+                >
+                  {t("datasetAnalysis.viewResult")}
+                </Link>
+              ) : null}
+              <Link data-testid="item-open-sample" to={`/samples/${record.recordingId}`}>
+                {t("datasetAnalysis.openSample")}
+              </Link>
+            </Space>
+          ),
         },
       ]}
     />

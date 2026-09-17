@@ -64,7 +64,6 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
       <Tabs
         items={[
           { key: "items", label: t("experiment.itemsTab"), children: <ExperimentItemTable experimentId={experiment.id} /> },
-          { key: "attempts", label: t("experiment.attemptsTab"), children: <ExperimentAttemptsTab experimentId={experiment.id} /> },
           { key: "evaluation", label: t("experiment.evaluationTab"), children: (
             <LinkedEvaluationSummary
               experiment={experiment}
@@ -75,6 +74,11 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
               }}
             />
           ) },
+          {
+            key: "details",
+            label: t("experiment.detailsTab"),
+            children: <ExperimentAttemptsTab experimentId={experiment.id} />,
+          },
         ]}
       />
     </>

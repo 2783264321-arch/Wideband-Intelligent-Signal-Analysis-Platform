@@ -32,8 +32,9 @@ test("renders items with status and a link to the analysis run", async () => {
   );
   expect(await screen.findByText("rec_1")).toBeInTheDocument();
   expect(screen.getByText("Completed")).toBeInTheDocument();
-  const link = screen.getByRole("link", { name: /run_1/ });
-  expect(link).toHaveAttribute("href", "/signals/run_1");
+  const viewResult = screen.getByRole("link", { name: "View Result" });
+  expect(viewResult).toHaveAttribute("href", "/spectrum/rec_1?run=run_1");
+  expect(screen.getByRole("link", { name: "Open Sample" })).toHaveAttribute("href", "/samples/rec_1");
 });
 
 test("a failed item shows its bounded last error type", async () => {
@@ -63,7 +64,9 @@ test("localizes a known item status in zh-CN while preserving raw identity", asy
   expect(await screen.findByText("rec_1")).toBeInTheDocument();
   expect(screen.getByText("排队中")).toBeInTheDocument();
   expect(screen.queryByText("Queued")).not.toBeInTheDocument();
-  expect(screen.getByRole("link", { name: /run_42/ })).toHaveAttribute("href", "/signals/run_42");
+  // An unfinished item offers Open Sample but no View Result yet.
+  expect(screen.getByRole("link", { name: "打开样本" })).toHaveAttribute("href", "/samples/rec_1");
+  expect(screen.queryByRole("link", { name: "查看结果" })).toBeNull();
 });
 
 test("shows an empty state when there are no items", async () => {

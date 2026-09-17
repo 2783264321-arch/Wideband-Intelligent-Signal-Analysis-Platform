@@ -54,7 +54,7 @@ test("a fresh install defaults to zh-CN with document.lang zh-CN and Chinese pri
   stubShellFetches();
   renderApp();
   expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
-  expect(screen.getByRole("menuitem", { name: /数据集实验/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /数据集分析/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /算法评测实验室/ })).toBeInTheDocument();
   expect(document.documentElement.lang).toBe("zh-CN");
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBeNull();
@@ -119,7 +119,7 @@ test("primary navigation is exactly the five intended destinations in both local
     { locale: "zh-CN" },
   ));
   const zhItems = await screen.findAllByRole("menuitem");
-  expect(zhItems.map((item) => item.textContent)).toEqual(["数据管理", "数据集实验", "算法评测实验室", "使用指南", "设置"]);
+  expect(zhItems.map((item) => item.textContent)).toEqual(["数据管理", "数据集分析", "算法评测实验室", "使用指南", "设置"]);
   unmount();
 
   render(renderWithLocalization(
@@ -129,7 +129,7 @@ test("primary navigation is exactly the five intended destinations in both local
   const enItems = await screen.findAllByRole("menuitem");
   expect(enItems.map((item) => item.textContent)).toEqual([
     "Data Library",
-    "Dataset Experiments",
+    "Dataset Analysis",
     "Algorithm Lab",
     "User Guide",
     "Settings",
@@ -147,8 +147,8 @@ const TERMINOLOGY: Array<[MessageKey, string, string]> = [
   ["signals.title", "Signals", "信号检测结果"],
   ["signalDetail.title", "Signal Detail", "检测结果详情"],
   ["common.groundTruth", "Ground Truth", "真值标注（GT）"],
-  ["nav.experiments", "Dataset Experiments", "数据集实验"],
-  ["experiment.itemsTab", "Items", "实验样本"],
+  ["nav.experiments", "Dataset Analysis", "数据集分析"],
+  ["experiment.itemsTab", "Samples", "样本"],
   ["experiment.attemptsTab", "Attempts", "执行尝试"],
   ["experiment.evaluationTab", "Evaluation", "评测"],
   ["benchmarks.tabLabel", "Benchmarks", "基准评测"],
