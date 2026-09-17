@@ -182,6 +182,7 @@ export const zhCN: Record<MessageKey, string> = {
   "spectrum.workspaceError": "无法打开频谱工作台",
   "spectrum.warning": "分析警告",
   "spectrum.capabilityDetectionLocalization": "仅检测与定位",
+  "spectrum.algorithmLabel": "算法",
 
   "signalDetail.processingInspector": "处理过程检查",
 
@@ -299,21 +300,24 @@ export const zhCN: Record<MessageKey, string> = {
   "algorithmLab.loadCaseError": "无法加载信号实例检查。",
 
   "executionEnv.title": "执行环境",
+  "executionEnv.fieldLabel": "执行环境",
   "executionEnv.auto": "自动选择",
+  "executionEnv.autoResolved": "自动 · {executor}",
   "executionEnv.localCpu": "本地 CPU",
   "executionEnv.localGpu": "本地 GPU",
   "executionEnv.remoteGpu": "远程 GPU",
-  "executionEnv.details": "详情",
-  "executionEnv.checking": "正在检查执行环境…",
+  "executionEnv.details": "环境详情",
+  "executionEnv.checking": "正在检查本地运行环境…",
   "executionEnv.recommended": "推荐执行环境：{executor}",
   "executionEnv.unresolved": "自动选择没有可运行的执行环境。",
-  "executionEnv.noRunnableTitle": "没有可用的执行环境",
-  "executionEnv.noRunnableHint": "该算法流水线当前没有可用的执行环境。请查看下方各执行环境状态。",
+  "executionEnv.noRunnableTitle": "无法运行当前算法",
+  "executionEnv.noRunnableHint": "本地运行环境暂时不可用。请查看运行环境详情。",
   "common.technicalDetails": "技术详情",
   "executionEnv.temporarilyUnavailable": "暂时不可用",
   "executionEnv.notCertified": "未通过认证",
   "executionEnv.notConfigured": "未配置",
   "executionEnv.unsupported": "不支持",
+  "executionEnv.notAvailable": "不可用",
 
   "executionEnv.available": "可用",
 

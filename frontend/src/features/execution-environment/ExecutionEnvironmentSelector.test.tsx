@@ -1,11 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
 import { ExecutionEnvironmentSelector } from "./ExecutionEnvironmentSelector";
-import { LocalizationProvider } from "../../localization/LocalizationProvider";
-
-function LocaleWrap({ children }: { children: ReactNode }) {
-  return <LocalizationProvider initialLocale="en-US">{children}</LocalizationProvider>;
-}
+import { renderWithLocalization } from "../../test-utils/renderWithLocalization";
 import type { ExecutionCandidate, ExecutorSelection } from "../../api/types";
 
 function candidate(overrides: Partial<ExecutionCandidate> & { executor: string }): ExecutionCandidate {
@@ -33,141 +28,226 @@ function selection(overrides: Partial<ExecutorSelection> = {}): ExecutorSelectio
 
 const AUTO_VALUE = { mode: "auto" as const, executor: null };
 
-test("renders all four product options regardless of candidates", () => {
-  render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection({ candidates: [candidate({ executor: "local_cpu" })] })}
-      loading={false}
-      error={null}
-      value={AUTO_VALUE}
-      onChange={() => {}}
-    />
-    </LocaleWrap>,
-  );
-  expect(screen.getByText("Auto")).toBeInTheDocument();
-  expect(screen.getByText("Local CPU")).toBeInTheDocument();
-  expect(screen.getByText("Local GPU")).toBeInTheDocument();
-  expect(screen.getByText("Remote GPU")).toBeInTheDocument();
+function openSelect() {
+  fireEvent.mouseDown(screen.getByLabelText("Execution Environment"));
+}
+
+async function chooseOption(name: string) {
+  const options = await screen.findAllByTitle(name);
+  fireEvent.click(options[options.length - 1]);
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
-test("Auto shows the backend-resolved executor (recommended), never a client decision", () => {
+test("happy path renders a single compact Auto · Local CPU control, not radio buttons", () => {
   render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection({ resolvedExecutor: "local_gpu", reasonCode: "AUTO_LOCAL_GPU_PREFERRED" })}
-      loading={false}
-      error={null}
-      value={AUTO_VALUE}
-      onChange={() => {}}
-    />
-    </LocaleWrap>,
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({ candidates: [candidate({ executor: "local_cpu" })] })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
   );
-  expect(screen.getByTestId("execution-environment-summary")).toHaveTextContent("Recommended: Local GPU");
+  expect(screen.getByText("Auto · Local CPU")).toBeInTheDocument();
+  expect(screen.queryAllByRole("radio")).toHaveLength(0);
+  // Unavailable executors must not appear as primary controls.
+  expect(screen.queryByText("Local GPU")).toBeNull();
+  expect(screen.queryByText("Remote GPU")).toBeNull();
 });
 
-test("selecting a manual option emits the exact executor", () => {
+test("localizes the compact control in zh-CN", () => {
+  render(
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({ candidates: [candidate({ executor: "local_cpu" })] })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+      { locale: "zh-CN" },
+    ),
+  );
+  expect(screen.getByText("自动 · 本地 CPU")).toBeInTheDocument();
+});
+
+test("dropdown offers only Auto and runnable manual executors", async () => {
+  render(
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({
+          candidates: [
+            candidate({ executor: "local_cpu" }),
+            candidate({ executor: "local_gpu", technical: false, configured: false, certified: false, available: false }),
+            candidate({ executor: "remote_gpu", technical: false, configured: false, certified: false, available: false }),
+          ],
+        })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
+  );
+  openSelect();
+  expect(await screen.findAllByTitle("Auto · Local CPU")).not.toHaveLength(0);
+  expect(await screen.findAllByTitle("Local CPU")).not.toHaveLength(0);
+  expect(screen.queryByTitle("Local GPU")).toBeNull();
+  expect(screen.queryByTitle("Remote GPU")).toBeNull();
+});
+
+test("selecting the runnable manual Local CPU preserves manual request semantics", async () => {
   const onChange = vi.fn();
   render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection({ candidates: [candidate({ executor: "local_cpu" })] })}
-      loading={false}
-      error={null}
-      value={AUTO_VALUE}
-      onChange={onChange}
-    />
-    </LocaleWrap>,
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({ candidates: [candidate({ executor: "local_cpu" })] })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={onChange}
+      />,
+    ),
   );
-  fireEvent.click(screen.getByText("Local CPU"));
+  openSelect();
+  await chooseOption("Local CPU");
   expect(onChange).toHaveBeenCalledWith({ mode: "manual", executor: "local_cpu" });
 });
 
-test("selecting Auto emits the auto mode (not a resolved executor)", () => {
+test("selecting Auto preserves mode=auto and never emits a resolved executor", async () => {
   const onChange = vi.fn();
   render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection()}
-      loading={false}
-      error={null}
-      value={{ mode: "manual", executor: "local_cpu" }}
-      onChange={onChange}
-    />
-    </LocaleWrap>,
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({ candidates: [candidate({ executor: "local_cpu" })] })}
+        loading={false}
+        error={null}
+        value={{ mode: "manual", executor: "local_cpu" }}
+        onChange={onChange}
+      />,
+    ),
   );
-  fireEvent.click(screen.getByText("Auto"));
+  openSelect();
+  await chooseOption("Auto · Local CPU");
   expect(onChange).toHaveBeenCalledWith({ mode: "auto", executor: null });
 });
 
-test("an unavailable manual option is disabled and shows its bounded reason in details", () => {
+test("unavailable executors are disclosed only after opening Environment details", () => {
+  render(
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({
+          candidates: [
+            candidate({ executor: "local_cpu" }),
+            candidate({ executor: "local_gpu", technical: false, configured: false, certified: false, available: false, reasonCode: "EXECUTION_CAPABILITY_UNAVAILABLE" }),
+            candidate({
+              executor: "remote_gpu",
+              configured: false,
+              reasonCode: "EXECUTION_CAPABILITY_UNAVAILABLE",
+              reasonMessage: "No executor provider is registered for 'remote_gpu'.",
+            }),
+          ],
+        })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
+  );
+  expect(screen.queryByTestId("execution-environment-details")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Environment details" }));
+  const localGpu = screen.getByTestId("execution-option-local_gpu");
+  expect(localGpu).toHaveTextContent("Local GPU");
+  expect(localGpu).toHaveTextContent("Unsupported");
+  const remoteGpu = screen.getByTestId("execution-option-remote_gpu");
+  expect(remoteGpu).toHaveTextContent("Not configured");
+  expect(remoteGpu).toHaveTextContent("No executor provider is registered");
+  // Technical reason code is only behind the disclosure.
+  expect(screen.getByTestId("execution-environment-reason-code")).toHaveTextContent("AUTO_ONLY_RUNNABLE_EXECUTOR");
+});
+
+test("loading shows a checking state instead of disabled executor buttons", () => {
+  render(
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={null}
+        loading
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
+  );
+  expect(screen.getByText("Checking local environment…")).toBeInTheDocument();
+  expect(screen.queryAllByRole("radio")).toHaveLength(0);
+  expect(screen.getByLabelText("Execution Environment")).toBeDisabled();
+});
+
+test("no-runnable state is concise and keeps details accessible", () => {
+  render(
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({
+          resolvedExecutor: null,
+          reasonCode: "AUTO_NO_RUNNABLE_EXECUTOR",
+          reason: "No runnable executor.",
+          candidates: [candidate({ executor: "local_cpu", configured: false, certified: false, available: false })],
+        })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
+  );
+  expect(screen.getByTestId("execution-environment-no-runnable")).toHaveTextContent("This algorithm cannot run right now.");
+  expect(screen.getByTestId("execution-environment-no-runnable")).toHaveTextContent("The local execution environment is unavailable.");
+  expect(screen.queryByTestId("execution-environment-details")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Environment details" }));
+  expect(screen.getByTestId("execution-option-local_cpu")).toHaveTextContent("Not configured");
+});
+
+test("a certified-but-unavailable manual executor is not offered and never falls back", () => {
   const onChange = vi.fn();
   render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection({
-        candidates: [
-          candidate({ executor: "local_cpu" }),
-          candidate({
-            executor: "remote_gpu",
-            configured: false,
-            reasonCode: "EXECUTION_CAPABILITY_UNAVAILABLE",
-            reasonMessage: "No executor provider is registered for 'remote_gpu'.",
-          }),
-        ],
-      })}
-      loading={false}
-      error={null}
-      value={AUTO_VALUE}
-      onChange={onChange}
-    />
-    </LocaleWrap>,
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={selection({
+          resolvedExecutor: null,
+          reasonCode: "AUTO_NO_RUNNABLE_EXECUTOR",
+          reason: "No runnable executor.",
+          candidates: [candidate({ executor: "local_gpu", available: false, reasonCode: "EXECUTION_CAPABILITY_UNAVAILABLE" })],
+        })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={onChange}
+      />,
+    ),
   );
-  fireEvent.click(screen.getByText("Remote GPU"));
+  openSelect();
+  expect(screen.queryByTitle("Local GPU")).toBeNull();
   expect(onChange).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: /details/i }));
-  const remoteLi = screen.getByTestId("execution-option-remote_gpu");
-  expect(remoteLi).toHaveTextContent(/No executor provider is registered/);
-  expect(remoteLi).toHaveTextContent(/Not configured|未配置/);
 });
 
-test("Auto is unresolved when no executor is runnable and does NOT fall back", () => {
+test("renders the backend error and locks the control", () => {
   render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection({
-        resolvedExecutor: null,
-        reasonCode: "AUTO_NO_RUNNABLE_EXECUTOR",
-        reason: "No runnable executor.",
-        candidates: [],
-      })}
-      loading={false}
-      error={null}
-      value={AUTO_VALUE}
-      onChange={() => {}}
-    />
-    </LocaleWrap>,
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
+        selection={null}
+        loading={false}
+        error="Unable to load execution environments."
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
   );
-  const auto = screen.getAllByRole("radio").find((element) => element.closest("label")?.textContent === "Auto");
-  expect(auto).toBeDefined();
-  expect(auto).toBeDisabled();
-  expect(screen.getByTestId("execution-environment-summary")).toHaveTextContent("No runnable executor.");
-});
-
-test("backend facts drive availability: certified-but-unavailable is disabled", () => {
-  render(
-    <LocaleWrap>
-    <ExecutionEnvironmentSelector
-      selection={selection({
-        candidates: [candidate({ executor: "local_gpu", available: false, reasonCode: "EXECUTION_CAPABILITY_UNAVAILABLE" })],
-      })}
-      loading={false}
-      error={null}
-      value={AUTO_VALUE}
-      onChange={() => {}}
-    />
-    </LocaleWrap>,
-  );
-  const gpu = screen.getAllByRole("radio").find((element) => element.closest("label")?.textContent === "Local GPU");
-  expect(gpu).toBeDisabled();
+  expect(screen.getByTestId("execution-environment-error")).toHaveTextContent("Unable to load execution environments.");
+  expect(screen.getByLabelText("Execution Environment")).toBeDisabled();
 });

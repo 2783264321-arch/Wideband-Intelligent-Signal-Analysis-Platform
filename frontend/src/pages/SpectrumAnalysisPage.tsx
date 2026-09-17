@@ -11,7 +11,6 @@ import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { useLocalization } from "../localization/useLocalization";
 import type { MessageKey } from "../localization/types";
 import { ExecutionEnvironmentSelector } from "../features/execution-environment/ExecutionEnvironmentSelector";
-import { NoRunnableExecutorPanel } from "../features/execution-environment/NoRunnableExecutorPanel";
 import { effectiveSelectionForScope, optionsFromSelection, scopeKeyFor, type BoundExecutorSelection } from "../features/execution-environment/executionEnvironment";
 import type { ExecutionEnvironmentValue } from "../features/execution-environment/types";
 import { SpectrogramViewer } from "../features/spectrum/SpectrogramViewer";
@@ -179,37 +178,39 @@ export function SpectrumAnalysisPage() {
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error ? <Alert type="error" showIcon message={t("spectrum.warning")} description={error} closable onClose={() => setError(null)} /> : null}
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
         <div>
           <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>
           <Typography.Text type="secondary">
             Fs {(recording.sampleRateHz / 1e6).toFixed(3)} MHz · Fc {(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz · {recording.durationS.toFixed(6)} s
           </Typography.Text>
         </div>
-        <Space wrap>
-          <Select value="stft" style={{ width: 130 }} options={[{ value: "stft", label: "STFT" }]} />
-          <Select
-            value={pipelineId}
-            style={{ width: 360 }}
-            onChange={setPipelineId}
-            options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
+        <Space wrap size="middle" align="end">
+          <div>
+            <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>{t("spectrum.algorithmLabel")}</Typography.Text>
+            <Space>
+              <Select value="stft" style={{ width: 96 }} options={[{ value: "stft", label: "STFT" }]} />
+              <Select
+                value={pipelineId}
+                style={{ width: 320 }}
+                onChange={setPipelineId}
+                options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
+              />
+            </Space>
+          </div>
+          <ExecutionEnvironmentSelector
+            selection={effectiveSelection}
+            loading={selectionLoading}
+            error={selectionError}
+            value={environment}
+            onChange={setEnvironment}
+            disabled={runActive}
           />
           <Button type="primary" loading={runActive} disabled={!canRun} onClick={() => void runAnalysis()}>
             {runActive ? t("common.analyzing") : t("common.runAnalysis")}
           </Button>
         </Space>
       </div>
-      <ExecutionEnvironmentSelector
-        selection={effectiveSelection}
-        loading={selectionLoading}
-        error={selectionError}
-        value={environment}
-        onChange={setEnvironment}
-        disabled={runActive}
-      />
-      {!selectionLoading && selectionError === null && effectiveSelection !== null && !environmentOptions.some((option) => option.enabled) ? (
-        <NoRunnableExecutorPanel selection={effectiveSelection} />
-      ) : null}
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>{t("common.prediction")}</Checkbox>
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t("common.groundTruth")}</Checkbox>

@@ -92,6 +92,12 @@ function setup() {
   return { urls, posted: () => posted };
 }
 
+async function chooseExecution(title: string) {
+  fireEvent.mouseDown(screen.getByLabelText("Execution Environment"));
+  const options = await screen.findAllByTitle(title);
+  fireEvent.click(options[options.length - 1]);
+}
+
 test("the pipeline choice comes from /api/pipelines and supplies id + version", async () => {
   const { posted } = setup();
   await screen.findByLabelText("Name");
@@ -215,7 +221,7 @@ test("a scope change resets manual environment and cannot authorize the new scop
   const button = screen.getByRole("button", { name: "Create Experiment" });
   await waitFor(() => expect(button).not.toBeDisabled());
 
-  fireEvent.click(screen.getByText("Local GPU"));
+  await chooseExecution("Local GPU");
   await waitFor(() => expect(button).not.toBeDisabled());
 
   // Change dataset identity -> new scope; selection B is deferred.
@@ -233,7 +239,7 @@ test("a manual current-scope available executor posts the exact executor", async
   const { posted } = authoritySetup({ selection: dualAvailableSelection });
   await fillIdentityAndPipeline();
   await waitFor(() => expect(screen.getByRole("button", { name: "Create Experiment" })).not.toBeDisabled());
-  fireEvent.click(screen.getByText("Local GPU"));
+  await chooseExecution("Local GPU");
   await waitFor(() => expect(screen.getByRole("button", { name: "Create Experiment" })).not.toBeDisabled());
   fireEvent.click(screen.getByRole("button", { name: "Create Experiment" }));
   await waitFor(() => expect(posted.length).toBe(1));

@@ -216,10 +216,16 @@ test("the spectrum page renders the execution environment selector and never cal
   await waitFor(() => expect(selectionCalls.length).toBeGreaterThan(0));
 });
 
+async function chooseExecution(title: string) {
+  fireEvent.mouseDown(screen.getByLabelText("Execution Environment"));
+  const options = await screen.findAllByTitle(title);
+  fireEvent.click(options[options.length - 1]);
+}
+
 test("default Auto submits execution_mode auto with no executor", async () => {
   const { posted } = setup();
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
-  await waitFor(() => expect(screen.getByTestId("execution-environment-summary")).toHaveTextContent("Recommended: Remote GPU"));
+  await screen.findByText("Auto · Remote GPU");
 
   fireEvent.click(screen.getByRole("button", { name: "Run Analysis" }));
   await waitFor(() => expect(posted.length).toBe(1));
@@ -234,9 +240,9 @@ test("default Auto submits execution_mode auto with no executor", async () => {
 test("an explicit manual selection submits the exact executor and no auto mode", async () => {
   const { posted } = setup({ selection: selectionDual, pipelines: [remotePipeline] });
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
-  await waitFor(() => expect(screen.getByText("Local GPU")).toBeInTheDocument());
+  await screen.findByText("Auto · Local CPU");
 
-  fireEvent.click(screen.getByText("Local GPU"));
+  await chooseExecution("Local GPU");
   const button = screen.getByRole("button", { name: "Run Analysis" });
   await waitFor(() => expect(button).not.toBeDisabled());
   fireEvent.click(button);
@@ -251,7 +257,7 @@ test("an unavailable executor disables the run with the backend reason and no fa
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
   const button = await screen.findByRole("button", { name: "Run Analysis" });
   await waitFor(() => expect(button).toBeDisabled());
-  expect(screen.getByTestId("execution-environment-summary")).toHaveTextContent("No runnable executor.");
+  expect(screen.getByTestId("execution-environment-no-runnable")).toHaveTextContent("This algorithm cannot run right now.");
 });
 
 test("stale executor-selection response from the previous pipeline is ignored", async () => {
@@ -269,7 +275,7 @@ test("stale executor-selection response from the previous pipeline is ignored", 
   fireEvent.mouseDown(screen.getByText("Remote A · GPU"));
   fireEvent.click(await screen.findByTitle("Remote B · GPU"));
   await waitFor(() => expect(selectionCalls).toEqual(["pA", "pB"]));
-  await waitFor(() => expect(screen.getByTestId("execution-environment-summary")).toHaveTextContent("No runnable executor."));
+  await waitFor(() => expect(screen.getByTestId("execution-environment-no-runnable")).toBeInTheDocument());
   expect(screen.getByRole("button", { name: "Run Analysis" })).toBeDisabled();
 
   // A's deferred selection resolves now, but must not be applied (stale).
@@ -277,7 +283,7 @@ test("stale executor-selection response from the previous pipeline is ignored", 
     resolveDeferred()?.(new Response(JSON.stringify(selectionRemoteAvailable)));
     await Promise.resolve();
   });
-  expect(screen.getByTestId("execution-environment-summary")).toHaveTextContent("No runnable executor.");
+  expect(screen.getByTestId("execution-environment-no-runnable")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Run Analysis" })).toBeDisabled();
 });
 

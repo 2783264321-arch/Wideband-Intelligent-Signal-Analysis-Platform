@@ -176,6 +176,7 @@ export const enUS = {
   "spectrum.workspaceError": "Unable to open spectrum workspace",
   "spectrum.warning": "Analysis warning",
   "spectrum.capabilityDetectionLocalization": "Detection & localization only",
+  "spectrum.algorithmLabel": "Algorithm",
 
   "signalDetail.processingInspector": "Processing Inspector",
 
@@ -293,22 +294,24 @@ export const enUS = {
   "algorithmLab.loadCaseError": "Unable to load case inspection.",
 
   "executionEnv.title": "Execution Environment",
+  "executionEnv.fieldLabel": "Execution",
   "executionEnv.auto": "Auto",
+  "executionEnv.autoResolved": "Auto · {executor}",
   "executionEnv.localCpu": "Local CPU",
   "executionEnv.localGpu": "Local GPU",
   "executionEnv.remoteGpu": "Remote GPU",
-  "executionEnv.details": "Details",
-  "executionEnv.checking": "Checking execution environments...",
+  "executionEnv.details": "Environment details",
+  "executionEnv.checking": "Checking local environment…",
   "executionEnv.recommended": "Recommended: {executor}",
   "executionEnv.unresolved": "Auto has no runnable executor.",
-  "executionEnv.noRunnableTitle": "No runnable execution environment",
-  "executionEnv.noRunnableHint": "This pipeline has no runnable execution environment. See each environment below.",
+  "executionEnv.noRunnableTitle": "This algorithm cannot run right now.",
+  "executionEnv.noRunnableHint": "The local execution environment is unavailable. See environment details.",
   "common.technicalDetails": "Technical details",
   "executionEnv.temporarilyUnavailable": "Temporarily unavailable",
   "executionEnv.notCertified": "Not certified",
   "executionEnv.notConfigured": "Not configured",
   "executionEnv.unsupported": "Unsupported",
-
+  "executionEnv.notAvailable": "Not available",
   "executionEnv.available": "Available",
 
   "provenance.executor": "Executor",
