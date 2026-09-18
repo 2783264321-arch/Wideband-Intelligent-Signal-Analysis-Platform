@@ -149,6 +149,27 @@ export async function exportAnalysisBundle(experimentId: string): Promise<string
   return filename;
 }
 
+/**
+ * Download one completed single-sample analysis run as a portable Analysis
+ * Bundle. Returns the filename actually used for the browser download.
+ */
+export async function exportAnalysisRunBundle(runId: string): Promise<string> {
+  const response = await fetch(
+    apiUrl(`/api/analysis-runs/${encodeURIComponent(runId)}/export`),
+  );
+  if (!response.ok) {
+    throw await structuredErrorFromResponse(response);
+  }
+  const blob = await response.blob();
+  const fallback = `wisa-analysis-run-${runId}.zip`;
+  const filename = sanitizeFilename(
+    filenameFromContentDisposition(response.headers.get("Content-Disposition")),
+    fallback,
+  );
+  triggerBrowserDownload(blob, filename);
+  return filename;
+}
+
 /** Import a previously exported Analysis Bundle. Never reruns inference. */
 export async function importAnalysisBundle(file: File): Promise<AnalysisBundleImportSummary> {
   const body = new FormData();

@@ -6,6 +6,7 @@ import { toErrorText } from "../api/errors";
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
 import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
+import { ExportAnalysisRunButton } from "../features/analysis-bundle/ExportAnalysisRunButton";
 import { RunStatusBadge } from "../features/analysis-run/RunStatusBadge";
 import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { useLocalization } from "../localization/useLocalization";
@@ -218,6 +219,9 @@ export function SpectrumAnalysisPage() {
           <RunStatusBadge status={currentRun.status} errorType={currentRun.errorType} errorMessage={currentRun.errorMessage} />
         ) : <Typography.Text type="secondary">{t("common.noRunSelected")}</Typography.Text>}
         {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
+        {currentRun ? (
+          <ExportAnalysisRunButton runId={currentRun.id} status={currentRun.status} />
+        ) : null}
       </Space>
       <div
         data-testid="spectrum-workspace"

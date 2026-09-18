@@ -50,6 +50,9 @@ class BundleProvenance(PackageObject):
     platform_repo_commit: str | None = None
     export_timestamp: str | None = None
     evaluation_summary: dict[str, Any] | None = None
+    # The platform exported this bundle from one completed single-sample run,
+    # so an importing service may accept partial dataset coverage from it.
+    single_sample_export: bool = False
 
 
 class BundleSample(PackageObject):

@@ -30,7 +30,7 @@ import json
 import zipfile
 
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.analysis.model import AnalysisRunModel
@@ -45,6 +45,7 @@ from app.dataset_experiments.model import (
 )
 from app.datasets.analysis_manifest import build_dataset_analysis_manifest
 from app.datasets.identity import fingerprint_for_recordings
+from app.ground_truth.model import GroundTruthModel
 from app.datasets.model import DatasetModel
 from app.detections.model import DetectionResultModel
 from app.ground_truth.model import GroundTruthModel
@@ -106,6 +107,22 @@ def invalid_bundle(message: str, *, details: dict[str, object] | None = None) ->
         400,
         details={} if details is None else details,
     )
+
+
+def _matches_real_dataset(portable_fingerprint: str, name: str, split: str, session: Session) -> bool:
+    """Whether the bundle's dataset fingerprint belongs to a real local dataset.
+
+    Standalone single-sample exports derive their dataset fingerprint from one
+    recording; a dataset fingerprint is derived from its full member list, so
+    they only ever coincide for a genuine dataset-member export.
+    """
+    return session.scalar(
+        select(func.count()).select_from(DatasetModel).where(
+            DatasetModel.portable_fingerprint == portable_fingerprint,
+            DatasetModel.name == name,
+            DatasetModel.split == split,
+        )
+    ) > 0
 
 
 def _stable_key(recording: RecordingModel) -> str:
@@ -306,6 +323,123 @@ class AnalysisBundleExportService:
             .order_by(DatasetExperimentAttemptModel.attempt_number.desc())
         ).first()
 
+    def export_run(self, run_id: str) -> tuple[str, bytes]:
+        """Export ONE completed AnalysisRun as a single-sample Analysis Bundle.
+
+        Same portable shape as the dataset-level export (dataset identity + one
+        sample fingerprint + detections), so the importing side needs no special
+        handling. Samples keep their dataset provenance when they have one;
+        standalone samples build their identity from recording metadata alone.
+        """
+        run = self.session.get(AnalysisRunModel, run_id)
+        if run is None:
+            raise PlatformError("ANALYSIS_RUN_NOT_FOUND", "Analysis run was not found.", 404)
+        if run.status != "completed":
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_NOT_COMPLETED",
+                "Only a completed analysis run can be exported as an Analysis Bundle.",
+                409,
+                details={"status": run.status},
+            )
+        recording = self.session.get(RecordingModel, run.recording_id)
+        if recording is None:
+            raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
+        detections = tuple(
+            _detection_to_package(row)
+            for row in self.session.scalars(
+                select(DetectionResultModel)
+                .where(DetectionResultModel.run_id == run.id)
+                .order_by(DetectionResultModel.id)
+            ).all()
+        )
+        if not detections:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_NO_RESULTS",
+                "This analysis run has no detections to export.",
+                409,
+            )
+
+        dataset = self.session.get(DatasetModel, recording.dataset_id) if recording.dataset_id else None
+        dataset_name = dataset.name if dataset is not None else (
+            recording.dataset_name or recording.name
+        )
+        dataset_split = dataset.split if dataset is not None else (
+            recording.dataset_split or "standalone"
+        )
+        label_space = recording.label_space or ""
+
+        stable_key = _stable_key(recording)
+        gt_rows = list(
+            self.session.scalars(
+                select(GroundTruthModel).where(GroundTruthModel.recording_id == recording.id)
+            ).all()
+        )
+        sample_fingerprint = _portable_recording_fingerprint(
+            dataset_name,
+            dataset_split,
+            label_space,
+            stable_key,
+            recording,
+            gt_rows,
+        )
+
+        # Standalone recordings have no dataset-authority fingerprint, so the
+        # dataset fingerprint is derived from the recording itself. Two machines
+        # holding the byte-identical sample still match because paths never enter
+        # the fingerprint.
+        bundle_id = f"bundle_{uuid4().hex[:12]}"
+        manifest = AnalysisBundleManifest(
+            schema_version=ANALYSIS_BUNDLE_SCHEMA_VERSION,
+            bundle_id=bundle_id,
+            dataset=BundleDataset(
+                name=dataset_name,
+                split=dataset_split,
+                label_space=label_space or "",
+                # For a dataset member this equals the dataset fingerprint
+                # computed from its members, so the importing machine binds the
+                # result to the same Dataset authority. For a standalone sample it
+                # identifies the individual capture instead.
+                portable_fingerprint=(
+                    dataset.portable_fingerprint
+                    if dataset is not None and dataset.portable_fingerprint
+                    else fingerprint_for_recordings(
+                        self.session,
+                        name=dataset_name,
+                        split=dataset_split,
+                        label_space=label_space or None,
+                        recordings=[recording],
+                    )
+                ),
+            ),
+            pipeline=PipelineMetadata(id=run.pipeline_id, name=run.pipeline_id, version=run.pipeline_version),
+            parameters=dict(run.parameters_json or {}),
+            analysis=BundleAnalysis(
+                experiment_id=run.id,
+                name=run.id,
+                status=run.status,
+                executor=run.executor,
+                evaluation_id=None,
+            ),
+            provenance=BundleProvenance(
+                exporter_version=EXPORTER_VERSION,
+                export_timestamp=datetime.now(timezone.utc).isoformat(),
+                evaluation_summary=None,
+                single_sample_export=True,
+            ),
+            samples=[
+                BundleSample(
+                    key=stable_key,
+                    sample_name=recording.name,
+                    recording_fingerprint=sample_fingerprint,
+                    detection_count=len(detections),
+                    detections_path="samples/000000/detections.json",
+                )
+            ],
+        )
+        filename = f"analysis_bundle_{bundle_id}.zip"
+        return filename, self._render_zip(manifest, [(manifest.samples[0], detections)])
+
+
     def _portable_fingerprint(
         self, experiment: DatasetExperimentModel, recordings: dict[str, RecordingModel]
     ) -> str:
@@ -391,7 +525,165 @@ class AnalysisBundleImportService:
             )
             manifest = self._read_manifest(root)
             validated = self._validate_samples(root, manifest)
+            if (
+                len(validated) == 1
+                and manifest.provenance.single_sample_export
+                and not _matches_real_dataset(
+                    manifest.dataset.portable_fingerprint,
+                    manifest.dataset.name,
+                    manifest.dataset.split,
+                    self.session,
+                )
+            ):
+                return self._import_standalone(manifest, validated, archive_sha256)
             return self._import_validated(manifest, validated, archive_sha256)
+
+    def _import_standalone(
+        self,
+        manifest: AnalysisBundleManifest,
+        validated: list[tuple[BundleSample, tuple[PackageDetection, ...]]],
+        archive_sha256: str,
+    ) -> AnalysisBundleImportSummary:
+        """Import a platform-exported single-sample run for a standalone sample.
+
+        Matched purely by recording fingerprint — no dataset authority exists on
+        either side, so no Dataset Experiment shell is fabricated and no
+        evaluation is restored. Failure modes stay fail-closed.
+        """
+        dataset_name = manifest.dataset.name
+        dataset_split = manifest.dataset.split
+        label_space = manifest.dataset.label_space
+        sample, detections = validated[0]
+        if manifest.analysis.status != "completed":
+            raise invalid_bundle(
+                "Analysis Bundle analysis status is not importable.",
+                details={"status": manifest.analysis.status},
+            )
+
+        # Candidates: standalone recordings with a compatible label space.
+        candidates = list(
+            self.session.scalars(
+                select(RecordingModel).where(RecordingModel.label_space == label_space)
+            ).all()
+        )
+        matches = []
+        for recording in candidates:
+            if recording.dataset_id is not None:
+                continue
+            local_fingerprint = _portable_recording_fingerprint(
+                dataset_name,
+                dataset_split,
+                label_space,
+                _stable_key(recording),
+                recording,
+                list(
+                    self.session.scalars(
+                        select(GroundTruthModel).where(
+                            GroundTruthModel.recording_id == recording.id
+                        )
+                    ).all()
+                ),
+            )
+            if local_fingerprint == sample.recording_fingerprint:
+                matches.append(recording)
+        if not matches:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_SAMPLE_NOT_FOUND",
+                "No local standalone sample matches this bundle sample's fingerprint.",
+                422,
+                details={"sample_key": sample.key, "sample_name": sample.sample_name},
+            )
+        if len(matches) > 1:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_SAMPLE_AMBIGUOUS",
+                "More than one local standalone sample matches this bundle sample.",
+                409,
+                details={"sample_key": sample.key, "sample_name": sample.sample_name},
+            )
+        recording = matches[0]
+
+        canonical_samples = (
+            CanonicalBundleSample(
+                key=sample.key,
+                recording_fingerprint=sample.recording_fingerprint,
+                detections=detections,
+            ),
+        )
+        import_fingerprint = build_analysis_bundle_import_fingerprint(manifest, canonical_samples)
+
+        existing = self._find_existing(manifest, import_fingerprint, [(sample, recording, detections)])
+        run_ids_by_key: dict[str, str] = {}
+        created_runs: list[AnalysisRunModel] = []
+        detections_to_add: list[DetectionResultModel] = []
+        if existing:
+            run_ids_by_key[sample.key] = existing[sample.key]["run_id"]
+        else:
+            internal_label_space = label_space or _INTERNAL_LABEL_SPACE_FALLBACK
+            run_id = f"run_{uuid4().hex}"
+            detection_ids = [f"det_{uuid4().hex}" for _ in detections]
+            package_manifest = Manifest(
+                schema_version=1,
+                pipeline=manifest.pipeline,
+                label_space=internal_label_space,
+                recording=RecordingMetadata(name=sample.key, dataset=dataset_name),
+                execution=ExecutionMetadata(executor="imported", device=None, environment=None),
+                results=ResultPaths(detections="detections.json"),
+                parameters=dict(manifest.parameters),
+            )
+            built = build_imported_run_models(
+                recording,
+                ValidatedAnalysisPackage(manifest=package_manifest, detections=tuple(detections)),
+                run_id=run_id,
+                detection_ids=detection_ids,
+            )
+            built.run.parameters_json = {
+                **built.run.parameters_json,
+                "analysis_bundle": {
+                    "schema_version": ANALYSIS_BUNDLE_SCHEMA_VERSION,
+                    "bundle_id": manifest.bundle_id,
+                    "item_key": sample.key,
+                    "import_fingerprint": import_fingerprint,
+                    "recording_fingerprint": sample.recording_fingerprint,
+                    "archive_sha256": archive_sha256,
+                    "dataset_portable_fingerprint": manifest.dataset.portable_fingerprint,
+                    "pipeline_id": manifest.pipeline.id,
+                    "pipeline_version": manifest.pipeline.version,
+                    "standalone": True,
+                },
+            }
+            created_runs.append(built.run)
+            detections_to_add.extend(built.detections)
+            run_ids_by_key[sample.key] = run_id
+
+        mapping = [
+            BundleRunMapping(
+                sample_key=sample.key,
+                sample_name=sample.sample_name,
+                recording_id=recording.id,
+                analysis_run_id=run_ids_by_key[sample.key],
+            )
+        ]
+        try:
+            self.session.add_all(created_runs)
+            if detections_to_add:
+                self.session.add_all(detections_to_add)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+
+        return self._summary(
+            manifest,
+            import_fingerprint,
+            archive_sha256,
+            dataset_id=None,
+            already_imported=bool(existing),
+            created_runs=len(created_runs),
+            existing_runs=len(run_ids_by_key) - len(created_runs),
+            created_detections=len(detections_to_add),
+            dataset_analysis_id=None,
+            mapping=mapping,
+        )
 
     def _read_manifest(self, root: Path) -> AnalysisBundleManifest:
         try:
@@ -546,7 +838,22 @@ class AnalysisBundleImportService:
                 "Analysis Bundle analysis status is not importable.",
                 details={"status": manifest.analysis.status},
             )
-        if manifest.analysis.status == "completed" and resolved_ids != member_ids:
+
+        # A platform-marked single-sample export IS one completed run of a
+        # dataset analysis: accept it as a partial result set instead of
+        # demanding full Dataset Analysis coverage. User-crafted bundles lack the
+        # marker and still fail closed.
+        is_partial_single_sample = (
+            len(resolved) == 1
+            and manifest.provenance.single_sample_export
+            and _matches_real_dataset(
+                manifest.dataset.portable_fingerprint, dataset_name, dataset_split, self.session
+            )
+        )
+        if manifest.analysis.status == "completed" and is_partial_single_sample:
+            manifest = manifest.model_copy(deep=True)
+            manifest.analysis.status = "completed_with_failures"
+        if manifest.analysis.status == "completed" and not is_partial_single_sample and resolved_ids != member_ids:
             missing = sorted(member_ids - resolved_ids)
             raise PlatformError(
                 "ANALYSIS_BUNDLE_INCOMPLETE_FOR_COMPLETED",

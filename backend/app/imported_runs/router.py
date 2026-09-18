@@ -45,6 +45,18 @@ def export_dataset_analysis_bundle(experiment_id: str, request: Request):
     )
 
 
+@router.get("/api/analysis-runs/{run_id}/export")
+def export_analysis_run_bundle(run_id: str, request: Request):
+    """Export ONE completed single-sample analysis run as an Analysis Bundle ZIP."""
+    with request.app.state.database.session_factory() as session:
+        filename, payload = AnalysisBundleExportService(session).export_run(run_id)
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.post(
     "/api/analysis-bundles/import",
     response_model=AnalysisBundleImportSummary,

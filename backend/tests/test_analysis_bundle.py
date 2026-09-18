@@ -741,3 +741,104 @@ def test_pipeline_absence_does_not_block_experiment_import(tmp_path):
     assert experiment is not None
     assert experiment.plugin_id == PIPELINE_ID
     assert experiment.executor == "imported"
+
+
+def test_single_sample_run_export_imports_into_dataset_target(tmp_path):
+    """P: Export Results on one run -> import -> partial, durable, no rerun."""
+    source = _new_app(tmp_path, "runexp_src")
+    _, experiment_id, _, _ = _seed_completed_analysis(
+        source, machine="rse", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    # The seeded run for sample 0000 is "rse_run_0"; export THE RUN.
+    run = source.state.database.session_factory().get(AnalysisRunModel, "rse_run_0")
+    filename, payload = AnalysisBundleExportService(
+        source.state.database.session_factory()
+    ).export_run("rse_run_0")
+    assert filename.endswith(".zip")
+
+    target = _new_app(tmp_path, "runexp_tgt")
+    target_session, _, _, _ = _seed_completed_analysis(
+        target, machine="rtgt", local_root="/data/SpaceNet",
+        path_for=lambda i: f"/data/SpaceNet/test/{i:04d}.bin",
+    )
+    summary = AnalysisBundleImportService(
+        target_session, target.state.storage
+    ).import_bundle(BytesIO(payload))
+
+    assert summary.sample_count == 1
+    assert summary.created_runs == 1
+    assert summary.created_detections == 1
+    experiment = target_session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment is not None
+    assert experiment.status == "completed_with_failures"
+    items = list(target_session.query(DatasetExperimentItemModel).filter_by(
+        experiment_id=experiment.id
+    ).order_by(DatasetExperimentItemModel.manifest_order))
+    assert len(items) == 2
+    assert [item.status for item in items].count("completed") == 1
+    assert [item.status for item in items].count("failed") == 1
+    # Re-export/importing the same run stays idempotent.
+    again = AnalysisBundleImportService(
+        target_session, target.state.storage
+    ).import_bundle(BytesIO(payload))
+    assert again.already_imported is True
+    assert again.created_runs == 0
+
+
+def test_single_sample_run_export_of_standalone_sample(tmp_path):
+    """Q: a standalone sample's run export imports onto a matching standalone."""
+    app = _new_app(tmp_path, "standalone_src")
+    session = app.state.database.session_factory()
+    recording = RecordingModel(
+        id="sa_rec", name="capture7", data_path="D:\\captures\\capture7.bin",
+        data_format="complex64_le", source="custom", external_path="D:\\captures\\capture7.bin",
+        sample_rate_hz=1_000_000.0, center_frequency_hz=2_441_000_000.0,
+        frequency_low_hz=2_440_500_000.0, frequency_high_hz=2_441_500_000.0,
+        num_samples=100_000, duration_s=0.1, dataset_name=None, dataset_split=None,
+        label_space=LABEL_SPACE, has_ground_truth=True, dataset_id=None, sample_key=None,
+    )
+    session.add(recording)
+    session.add(GroundTruthModel(
+        id="sa_gt", recording_id="sa_rec", t_start_s=0.01, t_end_s=0.02,
+        f_low_hz=FREQUENCY_LOW_HZ, f_high_hz=FREQUENCY_LOW_HZ + 100_000.0,
+        class_id=9, class_name="LoRa 250kHz",
+    ))
+    session.add(AnalysisRunModel(
+        id="sa_run", recording_id="sa_rec", pipeline_id=PIPELINE_ID,
+        pipeline_version=PIPELINE_VERSION, executor="local_cpu", status="completed",
+        parameters_json={},
+    ))
+    session.add(DetectionResultModel(
+        id="sa_det", run_id="sa_run", t_start_s=0.011, t_end_s=0.022,
+        f_low_hz=FREQUENCY_LOW_HZ, f_high_hz=FREQUENCY_LOW_HZ + 100_000.0,
+        class_id=9, class_name="LoRa 250kHz", confidence=0.9,
+    ))
+    session.commit()
+
+    _, payload = AnalysisBundleExportService(session).export_run("sa_run")
+
+    other = _new_app(tmp_path, "standalone_tgt")
+    other_session = other.state.database.session_factory()
+    other_recording = RecordingModel(
+        id="tb_rec", name="capture7", data_path="", data_format="complex64_le", source="custom",
+        sample_rate_hz=1_000_000.0, center_frequency_hz=2_441_000_000.0,
+        frequency_low_hz=2_440_500_000.0, frequency_high_hz=2_441_500_000.0,
+        num_samples=100_000, duration_s=0.1, label_space=LABEL_SPACE, has_ground_truth=True,
+    )
+    other_session.add(other_recording)
+    other_session.add(GroundTruthModel(
+        id="tb_gt", recording_id="tb_rec", t_start_s=0.01, t_end_s=0.02,
+        f_low_hz=FREQUENCY_LOW_HZ, f_high_hz=FREQUENCY_LOW_HZ + 100_000.0,
+        class_id=9, class_name="LoRa 250kHz",
+    ))
+    other_session.commit()
+
+    summary = AnalysisBundleImportService(
+        other_session, other.state.storage
+    ).import_bundle(BytesIO(payload))
+    assert summary.sample_count == 1
+    assert summary.created_runs == 1
+    imported = other_session.query(AnalysisRunModel).filter_by(executor="imported").one()
+    assert imported.recording_id == "tb_rec"
+    # No Dataset Experiment shell is fabricated for a standalone import.
+    assert _imported_experiments(other_session) == []
