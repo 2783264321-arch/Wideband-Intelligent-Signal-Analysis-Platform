@@ -305,7 +305,8 @@ export const enUS = {
   "analysisBundle.alreadyImportedLabel": "Already imported",
   "analysisBundle.yes": "Yes",
   "analysisBundle.no": "No",
-  "analysisBundle.viewImportedResults": "View Imported Results",
+  "analysisBundle.viewImportedAnalysis": "View Imported Analysis",
+  "analysisBundle.viewFirstResult": "View First Result",
 
   "analysisRun.label": "Analysis Run {id}",
 

@@ -23,6 +23,7 @@ const SUMMARY = {
   created_runs: 2,
   existing_runs: 0,
   created_detections: 3,
+  dataset_analysis_id: "exp_imported_1",
   sample_run_mapping: [
     { sample_key: "0000", sample_name: "name_0", recording_id: "rec_1", analysis_run_id: "run_1" },
     { sample_key: "0001", sample_name: "name_1", recording_id: "rec_2", analysis_run_id: "run_2" },
@@ -103,6 +104,7 @@ function renderModal(onImported?: () => void) {
             element={<ImportAnalysisBundleModal open onClose={() => undefined} onImported={onImported} />}
           />
           <Route path="/spectrum/:recordingId" element={<LocationProbe />} />
+          <Route path="/experiments/:experimentId" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
     ),
@@ -265,7 +267,43 @@ test("dataset mismatch renders a useful, non-technical message", async () => {
   ).toBeInTheDocument();
 });
 
-test("View Imported Results navigates to the spectrum view with recording and run ids", async () => {
+test("View Imported Analysis navigates to the imported Dataset Analysis", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(SUMMARY), { status: 201 })));
+  renderModal();
+
+  chooseFile();
+  fireEvent.click(screen.getByRole("button", { name: "Import" }));
+  fireEvent.click(await screen.findByTestId("analysis-bundle-view-analysis"));
+
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent(
+    "/experiments/exp_imported_1",
+  );
+});
+
+test("already-imported bundles navigate to the same Dataset Analysis", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      new Response(
+        JSON.stringify({ ...SUMMARY, already_imported: true, created_runs: 0, existing_runs: 2 }),
+        { status: 201 },
+      ),
+    ),
+  );
+  renderModal();
+
+  chooseFile();
+  fireEvent.click(screen.getByRole("button", { name: "Import" }));
+  const idempotent = await screen.findByTestId("analysis-bundle-idempotent");
+  expect(idempotent).toBeInTheDocument();
+  fireEvent.click(screen.getByTestId("analysis-bundle-view-analysis"));
+
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent(
+    "/experiments/exp_imported_1",
+  );
+});
+
+test("View First Result keeps the direct per-sample spectrum route", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(SUMMARY), { status: 201 })));
   renderModal();
 

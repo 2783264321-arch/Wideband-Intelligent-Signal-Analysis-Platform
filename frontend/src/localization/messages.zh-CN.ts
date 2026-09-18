@@ -311,7 +311,8 @@ export const zhCN: Record<MessageKey, string> = {
   "analysisBundle.alreadyImportedLabel": "是否已导入",
   "analysisBundle.yes": "是",
   "analysisBundle.no": "否",
-  "analysisBundle.viewImportedResults": "查看导入结果",
+  "analysisBundle.viewImportedAnalysis": "查看导入的分析",
+  "analysisBundle.viewFirstResult": "查看首个结果",
 
   "analysisRun.label": "分析任务 {id}",
 

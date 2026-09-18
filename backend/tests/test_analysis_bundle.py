@@ -14,6 +14,7 @@ import zipfile
 import pytest
 
 from app.analysis.model import AnalysisRunModel
+from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
 from app.core.config import Settings
 from app.core.errors import PlatformError
 from app.dataset_experiments.model import (
@@ -21,6 +22,7 @@ from app.dataset_experiments.model import (
     DatasetExperimentItemModel,
     DatasetExperimentModel,
 )
+from app.dataset_experiments.service import DatasetExperimentService
 from app.datasets.model import DatasetModel
 from app.datasets.repository import get_or_create_dataset, refresh_dataset_stats
 from app.detections.model import DetectionResultModel
@@ -142,6 +144,54 @@ def _seed_completed_analysis(
         ))
     session.commit()
     return session, experiment.id, dataset.id, [recording.id for recording in recordings]
+
+
+def _seed_source_evaluation(session, experiment_id, dataset, run_ids):
+    """Link a completed evaluation snapshot to the source experiment (P4.1 export)."""
+    evaluation = DatasetEvaluationModel(
+        id=f"eval_{experiment_id}", name="source evaluation",
+        dataset_name=DATASET_NAME, dataset_split=DATASET_SPLIT, label_space=LABEL_SPACE,
+        dataset_id=dataset.id, pipeline_id=PIPELINE_ID, pipeline_version=PIPELINE_VERSION,
+        status="completed", expected_recordings=2, evaluated_recordings=2,
+        missing_recordings=0, coverage=1.0, comparable=True,
+        recording_manifest_hash="b" * 64,
+        evaluation_protocol="physical_tf_detection_ap_v2", protocol_config_json={},
+        aggregate_metrics_json={"localization": {"ap50": 0.87}},
+        per_class_metrics_json=[{"class_id": 9, "class_name": "LoRa 250kHz", "ap50": 0.87}],
+        confusion_json=[{"gt_class_id": 9, "pred_class_id": 9, "count": 2}],
+        completed_at=datetime.now(timezone.utc),
+    )
+    session.add(evaluation)
+    for index, run_id in enumerate(run_ids):
+        run = session.get(AnalysisRunModel, run_id)
+        session.add(DatasetEvaluationItemModel(
+            id=f"evalitem_{experiment_id}_{index}", evaluation_id=evaluation.id,
+            manifest_order=index, recording_id=run.recording_id,
+            analysis_run_id=run_id, status="completed", gt_count=1, prediction_count=1,
+        ))
+    experiment = session.get(DatasetExperimentModel, experiment_id)
+    experiment.dataset_evaluation_id = evaluation.id
+    session.commit()
+    return evaluation
+
+
+def _imported_experiments(session):
+    return session.query(DatasetExperimentModel).filter_by(executor="imported").all()
+
+
+def _craft_bundle(payload: bytes, tmp_path: Path, *, name: str, keep_keys: set, status: str) -> BytesIO:
+    """Rewrite an exported bundle to a partial subset/status for fail-closed tests."""
+    import json
+
+    extract_dir = tmp_path / name
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        archive.extractall(extract_dir)
+    manifest_path = extract_dir / ANALYSIS_BUNDLE_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["samples"] = [sample for sample in manifest["samples"] if sample["key"] in keep_keys]
+    manifest["analysis"]["status"] = status
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return _zip_bytes(extract_dir)
 
 
 def _zip_bytes(root: Path) -> BytesIO:
@@ -345,3 +395,262 @@ def test_legacy_batch_import_endpoint_still_works(client, tmp_path):
     )
     assert response.status_code == 201, response.text
     assert response.json()["created_runs"] == 2
+
+
+# ---------- P4.1: durable imported Dataset Analysis ----------
+
+def test_import_creates_durable_imported_dataset_analysis(tmp_path):
+    """A/B/D/E/F: the imported bundle becomes a first-class Dataset Analysis."""
+    app = _new_app(tmp_path, "durable")
+    session, experiment_id, dataset_id, _ = _seed_completed_analysis(
+        app, machine="dur", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(app, experiment_id)
+    summary = AnalysisBundleImportService(session, app.state.storage).import_bundle(BytesIO(payload))
+
+    assert summary.dataset_analysis_id is not None
+    experiment = session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment is not None
+    assert experiment.executor == "imported"
+    assert experiment.status == "completed"
+    assert experiment.dataset_id == dataset_id  # B: matched local Dataset authority
+    assert experiment.dataset_name == DATASET_NAME
+    assert experiment.plugin_id == PIPELINE_ID
+    assert experiment.evaluation_protocol == "physical_tf_detection_ap_v2"
+    provenance = experiment.runtime_descriptor_json["analysis_bundle"]
+    assert provenance["bundle_id"] == summary.bundle_id
+    assert provenance["import_fingerprint"] == summary.import_fingerprint
+    assert experiment.recording_manifest_hash  # current local manifest hash
+
+    items = session.query(DatasetExperimentItemModel).filter_by(
+        experiment_id=experiment.id
+    ).order_by(DatasetExperimentItemModel.manifest_order).all()
+    assert len(items) == 2
+    assert all(item.status == "completed" for item in items)  # D
+    imported_runs = {run.id for run in session.query(AnalysisRunModel).filter_by(executor="imported")}
+    for item in items:
+        attempts = session.query(DatasetExperimentAttemptModel).filter_by(
+            experiment_item_id=item.id
+        ).all()
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+        assert attempts[0].analysis_run_id in imported_runs  # E
+
+    # F: latest_analysis_run_id works through the existing read model.
+    service = DatasetExperimentService(session, None, None, None)
+    listed = service.list_items(experiment.id)
+    assert {row.latest_analysis_run_id for row in listed} == imported_runs
+
+
+def test_imported_experiment_appears_in_dataset_listing(tmp_path):
+    """C: Dataset → Analyses discovers the imported analysis via dataset_id."""
+    app = _new_app(tmp_path, "discoverable")
+    session, experiment_id, dataset_id, _ = _seed_completed_analysis(
+        app, machine="disc", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(app, experiment_id)
+    summary = AnalysisBundleImportService(session, app.state.storage).import_bundle(BytesIO(payload))
+
+    listed = DatasetExperimentService(session, None, None, None).list_experiments(dataset_id=dataset_id)
+    assert summary.dataset_analysis_id in {row.id for row in listed}
+
+
+def test_same_bundle_twice_creates_one_dataset_analysis(tmp_path):
+    """G: experiment-level idempotence."""
+    app = _new_app(tmp_path, "expidem")
+    session, experiment_id, _, _ = _seed_completed_analysis(
+        app, machine="expidem", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(app, experiment_id)
+    service = AnalysisBundleImportService(session, app.state.storage)
+    first = service.import_bundle(BytesIO(payload))
+    second = service.import_bundle(BytesIO(payload))
+
+    assert first.dataset_analysis_id == second.dataset_analysis_id
+    experiments = _imported_experiments(session)
+    assert len(experiments) == 1
+    assert session.query(DatasetExperimentItemModel).filter_by(
+        experiment_id=experiments[0].id
+    ).count() == 2
+    assert session.query(DatasetExperimentAttemptModel).join(
+        DatasetExperimentItemModel,
+        DatasetExperimentAttemptModel.experiment_item_id == DatasetExperimentItemModel.id,
+    ).filter(DatasetExperimentItemModel.experiment_id == experiments[0].id).count() == 2
+
+
+def test_backfills_shell_around_existing_imported_runs(tmp_path):
+    """H: runs exist (pre-shell state) -> importing backfills the shell around them."""
+    app = _new_app(tmp_path, "backfill")
+    session, experiment_id, _, _ = _seed_completed_analysis(
+        app, machine="bf", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(app, experiment_id)
+    service = AnalysisBundleImportService(session, app.state.storage)
+    first = service.import_bundle(BytesIO(payload))
+    first_run_ids = {row.analysis_run_id for row in first.sample_run_mapping}
+
+    # Simulate the pre-P4.1 state: runs exist, the shell does not.
+    shell = session.get(DatasetExperimentModel, first.dataset_analysis_id)
+    session.delete(shell)
+    session.commit()
+    assert _imported_experiments(session) == []
+    assert session.query(AnalysisRunModel).filter_by(executor="imported").count() == 2
+
+    second = service.import_bundle(BytesIO(payload))
+    assert second.already_imported is True
+    assert second.created_runs == 0
+    assert second.dataset_analysis_id is not None
+    assert second.dataset_analysis_id != first.dataset_analysis_id
+    experiment = session.get(DatasetExperimentModel, second.dataset_analysis_id)
+    assert experiment is not None
+    assert len(_imported_experiments(session)) == 1
+    items = session.query(DatasetExperimentItemModel).filter_by(experiment_id=experiment.id).all()
+    assert len(items) == 2 and all(item.status == "completed" for item in items)
+    attempt_runs = {
+        attempt.analysis_run_id
+        for attempt in session.query(DatasetExperimentAttemptModel).join(
+            DatasetExperimentItemModel,
+            DatasetExperimentAttemptModel.experiment_item_id == DatasetExperimentItemModel.id,
+        ).filter(DatasetExperimentItemModel.experiment_id == experiment.id).all()
+    }
+    assert attempt_runs == first_run_ids  # attempts point at the existing runs
+
+
+def test_completed_bundle_must_cover_full_dataset(tmp_path):
+    """I: a completed bundle that misses Dataset members fails closed."""
+    source = _new_app(tmp_path, "partial_source")
+    _, experiment_id, _, _ = _seed_completed_analysis(
+        source, machine="psrc", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(source, experiment_id)
+    crafted = _craft_bundle(
+        payload, tmp_path, name="partial", keep_keys={"0000"}, status="completed",
+    )
+
+    target = _new_app(tmp_path, "partial_target")
+    target_session, _, _, _ = _seed_completed_analysis(
+        target, machine="ptgt", local_root="/data/SpaceNet",
+        path_for=lambda i: f"/data/SpaceNet/test/{i:04d}.bin",
+    )
+    with pytest.raises(PlatformError) as excinfo:
+        AnalysisBundleImportService(target_session, target.state.storage).import_bundle(crafted)
+    assert excinfo.value.code == "ANALYSIS_BUNDLE_INCOMPLETE_FOR_COMPLETED"
+    # Fail closed: no runs and no imported Dataset Analysis were created.
+    assert target_session.query(AnalysisRunModel).filter_by(executor="imported").count() == 0
+    assert _imported_experiments(target_session) == []
+
+
+def test_completed_with_failures_creates_failed_items_honestly(tmp_path):
+    """J: partial bundle -> failed items with a marker, no fake runs."""
+    source = _new_app(tmp_path, "cwf_source")
+    _, experiment_id, _, _ = _seed_completed_analysis(
+        source, machine="csrc", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(source, experiment_id)
+    crafted = _craft_bundle(
+        payload, tmp_path, name="cwf", keep_keys={"0000"}, status="completed_with_failures",
+    )
+
+    target = _new_app(tmp_path, "cwf_target")
+    target_session, _, _, _ = _seed_completed_analysis(
+        target, machine="ctgt", local_root="/data/SpaceNet",
+        path_for=lambda i: f"/data/SpaceNet/test/{i:04d}.bin",
+    )
+    summary = AnalysisBundleImportService(
+        target_session, target.state.storage
+    ).import_bundle(crafted)
+
+    experiment = target_session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment.status == "completed_with_failures"
+    items = target_session.query(DatasetExperimentItemModel).filter_by(
+        experiment_id=experiment.id
+    ).order_by(DatasetExperimentItemModel.manifest_order).all()
+    assert len(items) == 2
+    completed = [item for item in items if item.status == "completed"]
+    failed = [item for item in items if item.status == "failed"]
+    assert len(completed) == 1 and len(failed) == 1
+    assert failed[0].last_error_type == "ANALYSIS_BUNDLE_RESULT_UNAVAILABLE"
+    # No fake AnalysisRun for the failed member.
+    assert target_session.query(AnalysisRunModel).filter_by(
+        recording_id=failed[0].recording_id, executor="imported"
+    ).count() == 0
+    attempts = target_session.query(DatasetExperimentAttemptModel).filter_by(
+        experiment_item_id=completed[0].id
+    ).count()
+    assert attempts == 1
+    assert summary.created_runs == 1
+
+
+def test_completed_evaluation_snapshot_is_restored(tmp_path):
+    """K/L/M: linked completed evaluation is restored through existing tables."""
+    source = _new_app(tmp_path, "eval_source")
+    source_session, experiment_id, source_dataset_id, _ = _seed_completed_analysis(
+        source, machine="esrc", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    source_runs = [f"esrc_run_{index}" for index in range(2)]
+    source_dataset = source_session.get(DatasetModel, source_dataset_id)
+    _seed_source_evaluation(source_session, experiment_id, source_dataset, source_runs)
+    payload = _export(source, experiment_id)
+
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        manifest = archive.read(ANALYSIS_BUNDLE_MANIFEST_FILENAME).decode("utf-8")
+    assert '"confusion"' in manifest  # exporter carries the confusion matrix
+
+    target = _new_app(tmp_path, "eval_target")
+    target_session, _, dataset_id, _ = _seed_completed_analysis(
+        target, machine="etgt", local_root="/data/SpaceNet",
+        path_for=lambda i: f"/data/SpaceNet/test/{i:04d}.bin",
+    )
+    summary = AnalysisBundleImportService(target_session, target.state.storage).import_bundle(BytesIO(payload))
+
+    experiment = target_session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment.dataset_evaluation_id is not None
+    evaluation = target_session.get(DatasetEvaluationModel, experiment.dataset_evaluation_id)
+    assert evaluation.status == "completed"
+    assert evaluation.dataset_id == dataset_id  # L: local dataset authority
+    assert evaluation.evaluation_protocol == "physical_tf_detection_ap_v2"
+    assert evaluation.aggregate_metrics_json == {"localization": {"ap50": 0.87}}
+    assert evaluation.per_class_metrics_json == [
+        {"class_id": 9, "class_name": "LoRa 250kHz", "ap50": 0.87}
+    ]
+    assert evaluation.confusion_json == [{"gt_class_id": 9, "pred_class_id": 9, "count": 2}]
+    imported_runs = {run.id for run in target_session.query(AnalysisRunModel).filter_by(executor="imported")}
+    eval_items = target_session.query(DatasetEvaluationItemModel).filter_by(
+        evaluation_id=evaluation.id
+    ).order_by(DatasetEvaluationItemModel.manifest_order).all()
+    assert len(eval_items) == 2
+    assert {item.analysis_run_id for item in eval_items} == imported_runs  # M
+    assert all(item.status == "completed" for item in eval_items)
+
+
+def test_missing_evaluation_summary_leaves_evaluation_null(tmp_path):
+    """N: no evaluation snapshot remains a valid imported analysis."""
+    app = _new_app(tmp_path, "noeval")
+    session, experiment_id, _, _ = _seed_completed_analysis(
+        app, machine="noeval", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    payload = _export(app, experiment_id)
+    summary = AnalysisBundleImportService(session, app.state.storage).import_bundle(BytesIO(payload))
+
+    experiment = session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment is not None
+    assert experiment.dataset_evaluation_id is None
+
+
+def test_pipeline_absence_does_not_block_experiment_import(tmp_path):
+    """O: the imported Dataset Analysis exists without the pipeline installed."""
+    app = _new_app(tmp_path, "ghostshell")
+    session, experiment_id, _, _ = _seed_completed_analysis(
+        app, machine="gshell", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    # The ghost pipeline is not registered anywhere.
+    from app.core.errors import PlatformError as _PE
+    with pytest.raises(_PE):
+        app.state.pipeline_registry.get(PIPELINE_ID)
+
+    payload = _export(app, experiment_id)
+    summary = AnalysisBundleImportService(session, app.state.storage).import_bundle(BytesIO(payload))
+    experiment = session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment is not None
+    assert experiment.plugin_id == PIPELINE_ID
+    assert experiment.executor == "imported"

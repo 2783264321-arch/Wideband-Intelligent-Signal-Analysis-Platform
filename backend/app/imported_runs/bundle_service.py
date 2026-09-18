@@ -7,9 +7,18 @@ stable sample fingerprints only — never absolute filesystem paths — and crea
 ordinary completed imported ``AnalysisRunModel`` / ``DetectionResultModel`` rows
 through the existing imported-run factory. No inference is rerun, and pipeline
 availability is not required to view imported results.
+
+Import additionally restores a DURABLE first-class Dataset Analysis identity:
+an ordinary ``DatasetExperimentModel`` (executor="imported") plus its Items and
+Attempts is created/backfilled around the imported runs, so Dataset → Analyses
+lists the imported analysis and the existing detail UI works unchanged. An
+optional completed evaluation snapshot is restored through the existing
+``DatasetEvaluationModel`` rows when the bundle carries one and the local
+preconditions (complete coverage + complete ground truth) hold.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
@@ -26,13 +35,15 @@ from sqlalchemy.orm import Session
 
 from app.analysis.model import AnalysisRunModel
 from app.benchmarks.manifest import ManifestGroundTruth, ManifestRecording
-from app.benchmarks.model import DatasetEvaluationModel
+from app.benchmarks.model import DatasetEvaluationItemModel, DatasetEvaluationModel
+from app.benchmarks.service import DEFAULT_PHYSICAL_TF_PROTOCOL, resolve_protocol_config
 from app.core.errors import PlatformError
 from app.dataset_experiments.model import (
     DatasetExperimentAttemptModel,
     DatasetExperimentItemModel,
     DatasetExperimentModel,
 )
+from app.datasets.analysis_manifest import build_dataset_analysis_manifest
 from app.datasets.identity import fingerprint_for_recordings
 from app.datasets.model import DatasetModel
 from app.detections.model import DetectionResultModel
@@ -70,6 +81,22 @@ from app.recordings.model import RecordingModel
 EXPORTER_VERSION = "analysis_bundle_exporter_v1"
 COMPLETED_EXPERIMENT_STATUSES = ("completed", "completed_with_failures")
 _INTERNAL_LABEL_SPACE_FALLBACK = "__none__"
+_RESULT_UNAVAILABLE_ERROR = "ANALYSIS_BUNDLE_RESULT_UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class _BuiltEvaluation:
+    model: DatasetEvaluationModel
+    items: list[DatasetEvaluationItemModel]
+
+
+@dataclass(frozen=True)
+class _BuiltImportedExperiment:
+    """The durable imported Dataset Analysis plus all rows to persist with it."""
+
+    model: DatasetExperimentModel
+    rows: list
+    evaluation: DatasetEvaluationModel | None = None
 
 
 def invalid_bundle(message: str, *, details: dict[str, object] | None = None) -> PlatformError:
@@ -322,6 +349,7 @@ class AnalysisBundleExportService:
             "expected_recordings": evaluation.expected_recordings,
             "aggregate_metrics": dict(evaluation.aggregate_metrics_json or {}),
             "per_class_metrics": list(evaluation.per_class_metrics_json or []),
+            "confusion": list(evaluation.confusion_json or []),
         }
 
     def _render_zip(
@@ -499,8 +527,45 @@ class AnalysisBundleImportService:
         )
         import_fingerprint = build_analysis_bundle_import_fingerprint(manifest, canonical_samples)
 
+        # A durable imported Dataset Analysis is anchored to exactly one local
+        # Dataset authority; matched samples spanning several datasets is a
+        # semantic inconsistency (per-sample ambiguity is rejected above).
+        dataset = self._resolve_target_dataset(resolved)
+        local_manifest = build_dataset_analysis_manifest(self.session, dataset.id)
+        member_ids = {entry.recording_id for entry in local_manifest.entries}
+        resolved_ids = {recording.id for _, recording, _ in resolved}
+        if not resolved_ids <= member_ids:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                "Matched samples are not members of the local Dataset authority.",
+                409,
+                details={"dataset_id": dataset.id},
+            )
+        if manifest.analysis.status not in ("completed", "completed_with_failures"):
+            raise invalid_bundle(
+                "Analysis Bundle analysis status is not importable.",
+                details={"status": manifest.analysis.status},
+            )
+        if manifest.analysis.status == "completed" and resolved_ids != member_ids:
+            missing = sorted(member_ids - resolved_ids)
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_INCOMPLETE_FOR_COMPLETED",
+                "The bundle claims a complete analysis but does not cover the "
+                "full current Dataset Analysis manifest.",
+                409,
+                details={
+                    "dataset_id": dataset.id,
+                    "expected_samples": len(member_ids),
+                    "bundle_samples": len(resolved_ids),
+                    "missing_recording_ids": missing[:20],
+                },
+            )
+
         existing = self._find_existing(manifest, import_fingerprint, resolved)
         expected_keys = {sample.key for sample, _, _ in resolved}
+        run_ids_by_key: dict[str, str] = {}
+        created_runs: list[AnalysisRunModel] = []
+        detections_to_add: list[DetectionResultModel] = []
         if existing:
             if set(existing.keys()) != expected_keys or len(existing) != len(expected_keys):
                 raise PlatformError(
@@ -515,75 +580,73 @@ class AnalysisBundleImportService:
                         "Prior Analysis Bundle import maps a sample to a different Recording.",
                         409,
                     )
-            return self._summary(
-                manifest,
-                import_fingerprint,
-                archive_sha256,
-                dataset_id=resolved[0][1].dataset_id,
-                already_imported=True,
-                created_runs=0,
-                existing_runs=len(existing),
-                created_detections=0,
-                mapping=[
-                    BundleRunMapping(
-                        sample_key=sample.key,
-                        sample_name=sample.sample_name,
-                        recording_id=recording.id,
-                        analysis_run_id=existing[sample.key]["run_id"],
-                    )
-                    for sample, recording, _ in resolved
-                ],
-            )
+                run_ids_by_key[sample.key] = existing[sample.key]["run_id"]
+        else:
+            internal_label_space = label_space or _INTERNAL_LABEL_SPACE_FALLBACK
+            for sample, recording, detections in resolved:
+                run_id = f"run_{uuid4().hex}"
+                detection_ids = [f"det_{uuid4().hex}" for _ in detections]
+                package_manifest = Manifest(
+                    schema_version=1,
+                    pipeline=manifest.pipeline,
+                    label_space=internal_label_space,
+                    recording=RecordingMetadata(name=sample.key, dataset=dataset_name),
+                    execution=ExecutionMetadata(executor="imported", device=None, environment=None),
+                    results=ResultPaths(detections="detections.json"),
+                    parameters=dict(manifest.parameters),
+                )
+                built = build_imported_run_models(
+                    recording,
+                    ValidatedAnalysisPackage(manifest=package_manifest, detections=tuple(detections)),
+                    run_id=run_id,
+                    detection_ids=detection_ids,
+                )
+                built.run.parameters_json = {
+                    **built.run.parameters_json,
+                    "analysis_bundle": {
+                        "schema_version": ANALYSIS_BUNDLE_SCHEMA_VERSION,
+                        "bundle_id": manifest.bundle_id,
+                        "item_key": sample.key,
+                        "import_fingerprint": import_fingerprint,
+                        "recording_fingerprint": sample.recording_fingerprint,
+                        "archive_sha256": archive_sha256,
+                        "dataset_portable_fingerprint": fingerprint,
+                        "pipeline_id": manifest.pipeline.id,
+                        "pipeline_version": manifest.pipeline.version,
+                    },
+                }
+                created_runs.append(built.run)
+                detections_to_add.extend(built.detections)
+                run_ids_by_key[sample.key] = run_id
 
-        internal_label_space = label_space or _INTERNAL_LABEL_SPACE_FALLBACK
-        runs = []
-        detections_to_add = []
-        mapping = []
-        for sample, recording, detections in resolved:
-            run_id = f"run_{uuid4().hex}"
-            detection_ids = [f"det_{uuid4().hex}" for _ in detections]
-            package_manifest = Manifest(
-                schema_version=1,
-                pipeline=manifest.pipeline,
-                label_space=internal_label_space,
-                recording=RecordingMetadata(name=sample.key, dataset=dataset_name),
-                execution=ExecutionMetadata(executor="imported", device=None, environment=None),
-                results=ResultPaths(detections="detections.json"),
-                parameters=dict(manifest.parameters),
-            )
-            built = build_imported_run_models(
-                recording,
-                ValidatedAnalysisPackage(manifest=package_manifest, detections=tuple(detections)),
-                run_id=run_id,
-                detection_ids=detection_ids,
-            )
-            built.run.parameters_json = {
-                **built.run.parameters_json,
-                "analysis_bundle": {
-                    "schema_version": ANALYSIS_BUNDLE_SCHEMA_VERSION,
-                    "bundle_id": manifest.bundle_id,
-                    "item_key": sample.key,
-                    "import_fingerprint": import_fingerprint,
-                    "recording_fingerprint": sample.recording_fingerprint,
-                    "archive_sha256": archive_sha256,
-                    "dataset_portable_fingerprint": fingerprint,
-                    "pipeline_id": manifest.pipeline.id,
-                    "pipeline_version": manifest.pipeline.version,
-                },
-            }
-            runs.append(built.run)
-            detections_to_add.extend(built.detections)
-            mapping.append(BundleRunMapping(
+        mapping = [
+            BundleRunMapping(
                 sample_key=sample.key,
                 sample_name=sample.sample_name,
                 recording_id=recording.id,
-                analysis_run_id=run_id,
-            ))
+                analysis_run_id=run_ids_by_key[sample.key],
+            )
+            for sample, recording, _ in resolved
+        ]
+
+        experiment = self._ensure_imported_experiment(
+            dataset=dataset,
+            manifest=manifest,
+            local_manifest=local_manifest,
+            import_fingerprint=import_fingerprint,
+            archive_sha256=archive_sha256,
+            mapping=mapping,
+            resolved=dict(zip((recording.id for _, recording, _ in resolved), resolved)),
+        )
 
         try:
-            self.session.add_all(runs)
+            self.session.add_all(created_runs)
             if detections_to_add:
                 self.session.add_all(detections_to_add)
+            self.session.add_all(experiment.rows)
+            if experiment.evaluation is not None:
+                self.session.add(experiment.evaluation)
+            self.session.add(experiment.model)
             self.session.commit()
         except Exception:
             self.session.rollback()
@@ -593,13 +656,242 @@ class AnalysisBundleImportService:
             manifest,
             import_fingerprint,
             archive_sha256,
-            dataset_id=resolved[0][1].dataset_id,
-            already_imported=False,
-            created_runs=len(runs),
-            existing_runs=0,
+            dataset_id=dataset.id,
+            already_imported=bool(existing),
+            created_runs=len(created_runs),
+            existing_runs=len(run_ids_by_key) - len(created_runs),
             created_detections=len(detections_to_add),
+            dataset_analysis_id=experiment.model.id,
             mapping=mapping,
         )
+
+    def _resolve_target_dataset(
+        self, resolved: list[tuple[BundleSample, RecordingModel, tuple[PackageDetection, ...]]]
+    ) -> DatasetModel:
+        dataset_ids = {recording.dataset_id for _, recording, _ in resolved}
+        if len(dataset_ids) != 1:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                "Matched samples resolve to more than one local Dataset.",
+                409,
+                details={"dataset_ids": sorted(str(value) for value in dataset_ids)},
+            )
+        dataset = self.session.get(DatasetModel, dataset_ids.pop())
+        if dataset is None:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                "The matched local Dataset no longer exists.",
+                409,
+            )
+        return dataset
+
+    def _find_existing_experiment(self, import_fingerprint: str) -> DatasetExperimentModel | None:
+        candidates = list(
+            self.session.scalars(
+                select(DatasetExperimentModel).where(DatasetExperimentModel.executor == "imported")
+            ).all()
+        )
+        found = [
+            candidate
+            for candidate in candidates
+            if ((candidate.runtime_descriptor_json or {}).get("analysis_bundle") or {})
+            .get("import_fingerprint")
+            == import_fingerprint
+        ]
+        if not found:
+            return None
+        if len(found) > 1:
+            raise PlatformError(
+                "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                "Duplicate imported Dataset Analysis exists for this bundle fingerprint.",
+                409,
+            )
+        return found[0]
+
+    def _ensure_imported_experiment(
+        self,
+        *,
+        dataset: DatasetModel,
+        manifest: AnalysisBundleManifest,
+        local_manifest,
+        import_fingerprint: str,
+        archive_sha256: str,
+        mapping: list[BundleRunMapping],
+        resolved: dict[str, tuple[BundleSample, RecordingModel, tuple[PackageDetection, ...]]],
+    ) -> "_BuiltImportedExperiment":
+        existing = self._find_existing_experiment(import_fingerprint)
+        if existing is not None:
+            if existing.dataset_id != dataset.id:
+                raise PlatformError(
+                    "ANALYSIS_BUNDLE_STATE_INCONSISTENT",
+                    "Prior imported Dataset Analysis is bound to a different local Dataset.",
+                    409,
+                )
+            return _BuiltImportedExperiment(model=existing, rows=[])
+
+        now = datetime.now(timezone.utc)
+        order_by_recording = {entry.recording_id: entry for entry in local_manifest.entries}
+        run_by_recording = {row.recording_id: row.analysis_run_id for row in mapping}
+        protocol = self._resolve_import_protocol(manifest)
+
+        experiment = DatasetExperimentModel(
+            id=f"exp_{uuid4().hex}",
+            name=f"{manifest.analysis.name} (imported)",
+            dataset_name=dataset.name,
+            dataset_split=dataset.split,
+            dataset_label_space=dataset.label_space or "",
+            dataset_id=dataset.id,
+            recording_manifest_hash=local_manifest.recording_manifest_hash,
+            plugin_id=manifest.pipeline.id,
+            plugin_version=manifest.pipeline.version,
+            parameters_json=dict(manifest.parameters),
+            executor="imported",
+            runtime_descriptor_json={
+                "source": "analysis_bundle",
+                "analysis_bundle": {
+                    "bundle_id": manifest.bundle_id,
+                    "import_fingerprint": import_fingerprint,
+                    "archive_sha256": archive_sha256,
+                },
+            },
+            evaluation_protocol=protocol,
+            max_concurrency=1,
+            status=manifest.analysis.status,
+            created_at=now,
+            completed_at=now,
+        )
+        rows: list = []
+        for entry in local_manifest.entries:
+            run_id = run_by_recording.get(entry.recording_id)
+            item = DatasetExperimentItemModel(
+                id=f"expitem_{uuid4().hex}",
+                experiment_id=experiment.id,
+                manifest_order=entry.manifest_order,
+                recording_id=entry.recording_id,
+                status="completed" if run_id is not None else "failed",
+            )
+            if run_id is None:
+                item.last_error_type = _RESULT_UNAVAILABLE_ERROR
+                item.last_error_message = (
+                    "No result for this sample was included in the imported Analysis Bundle."
+                )
+            rows.append(item)
+            if run_id is not None:
+                rows.append(DatasetExperimentAttemptModel(
+                    id=f"expattempt_{uuid4().hex}",
+                    experiment_item_id=item.id,
+                    attempt_number=1,
+                    analysis_run_id=run_id,
+                ))
+
+        evaluation = self._build_restored_evaluation(
+            dataset=dataset,
+            manifest=manifest,
+            local_manifest=local_manifest,
+            protocol=protocol,
+            mapping=mapping,
+            resolved=resolved,
+        )
+        if evaluation is not None:
+            rows.extend(evaluation.items)
+            experiment.dataset_evaluation_id = evaluation.model.id
+
+        return _BuiltImportedExperiment(
+            model=experiment, rows=rows, evaluation=evaluation.model if evaluation else None
+        )
+
+    def _resolve_import_protocol(self, manifest: AnalysisBundleManifest) -> str:
+        summary = manifest.provenance.evaluation_summary
+        protocol = summary.get("protocol") if isinstance(summary, dict) else None
+        if isinstance(protocol, str) and protocol:
+            try:
+                resolve_protocol_config(protocol)
+                return protocol
+            except PlatformError:
+                pass
+        return DEFAULT_PHYSICAL_TF_PROTOCOL
+
+    def _build_restored_evaluation(
+        self,
+        *,
+        dataset: DatasetModel,
+        manifest: AnalysisBundleManifest,
+        local_manifest,
+        protocol: str,
+        mapping: list[BundleRunMapping],
+        resolved: dict[str, tuple[BundleSample, RecordingModel, tuple[PackageDetection, ...]]],
+    ) -> "_BuiltEvaluation | None":
+        """Restore a completed evaluation snapshot from the bundle, when safe.
+
+        Any reconstruction problem leaves the evaluation unlinked: importing the
+        analysis results itself must never fail because of the optional snapshot.
+        """
+        try:
+            summary = manifest.provenance.evaluation_summary
+            if not isinstance(summary, dict) or summary.get("status") != "completed":
+                return None
+            entries = local_manifest.entries
+            if len(mapping) != len(entries):
+                return None  # partial result set: no honest complete evaluation
+            if any(entry.gt_count == 0 for entry in entries):
+                return None  # target dataset lacks complete ground truth
+            aggregate = summary.get("aggregate_metrics")
+            if not isinstance(aggregate, dict):
+                return None
+            resolve_protocol_config(protocol)
+            now = datetime.now(timezone.utc)
+            run_by_recording = {row.recording_id: row.analysis_run_id for row in mapping}
+            evaluation = DatasetEvaluationModel(
+                id=f"eval_{uuid4().hex}",
+                name=f"{manifest.analysis.name} (imported)",
+                dataset_name=dataset.name,
+                dataset_split=dataset.split,
+                label_space=dataset.label_space or "",
+                dataset_id=dataset.id,
+                dataset_projection_id=None,
+                pipeline_id=manifest.pipeline.id,
+                pipeline_version=manifest.pipeline.version,
+                status="completed",
+                expected_recordings=len(entries),
+                evaluated_recordings=len(mapping),
+                missing_recordings=0,
+                coverage=1.0,
+                comparable=True,
+                recording_manifest_hash=local_manifest.recording_manifest_hash,
+                evaluation_protocol=protocol,
+                protocol_config_json=resolve_protocol_config(protocol),
+                aggregate_metrics_json=aggregate,
+                per_class_metrics_json=(
+                    list(summary["per_class_metrics"])
+                    if isinstance(summary.get("per_class_metrics"), list)
+                    else None
+                ),
+                confusion_json=(
+                    list(summary["confusion"])
+                    if isinstance(summary.get("confusion"), list)
+                    else None
+                ),
+                created_at=now,
+                completed_at=now,
+            )
+            items = []
+            for entry in entries:
+                run_id = run_by_recording.get(entry.recording_id)
+                detections = resolved[entry.recording_id][2] if run_id else ()
+                items.append(DatasetEvaluationItemModel(
+                    id=f"evalitem_{uuid4().hex}",
+                    evaluation_id=evaluation.id,
+                    manifest_order=entry.manifest_order,
+                    recording_id=entry.recording_id,
+                    analysis_run_id=run_id,
+                    status="completed" if run_id is not None else "missing",
+                    gt_count=entry.gt_count,
+                    prediction_count=len(detections),
+                ))
+            return _BuiltEvaluation(model=evaluation, items=items)
+        except Exception:
+            self.session.rollback()
+            return None
 
     def _find_existing(self, manifest, import_fingerprint, resolved) -> dict[str, dict]:
         recording_ids = [recording.id for _, recording, _ in resolved]
@@ -645,6 +937,7 @@ class AnalysisBundleImportService:
         existing_runs: int,
         created_detections: int,
         mapping: list[BundleRunMapping],
+        dataset_analysis_id: str | None = None,
     ) -> AnalysisBundleImportSummary:
         return AnalysisBundleImportSummary(
             schema_version=ANALYSIS_BUNDLE_SCHEMA_VERSION,
@@ -663,6 +956,7 @@ class AnalysisBundleImportService:
             created_runs=created_runs,
             existing_runs=existing_runs,
             created_detections=created_detections,
+            dataset_analysis_id=dataset_analysis_id,
             sample_run_mapping=mapping,
         )
 

@@ -72,6 +72,13 @@ export function ImportAnalysisBundleModal({
     if (imported) onImported?.();
   };
 
+  const viewImportedAnalysis = () => {
+    const analysisId = summary?.datasetAnalysisId;
+    if (!analysisId) return;
+    close();
+    navigate(`/experiments/${encodeURIComponent(analysisId)}`);
+  };
+
   const viewFirstImportedResult = () => {
     const first = summary?.sampleRunMapping[0];
     if (!first) return;
@@ -89,14 +96,23 @@ export function ImportAnalysisBundleModal({
       footer={
         summary
           ? [
+              summary.datasetAnalysisId !== null ? (
+                <Button
+                  key="view-analysis"
+                  type="primary"
+                  data-testid="analysis-bundle-view-analysis"
+                  onClick={viewImportedAnalysis}
+                >
+                  {t("analysisBundle.viewImportedAnalysis")}
+                </Button>
+              ) : null,
               summary.sampleRunMapping.length > 0 ? (
                 <Button
-                  key="view"
-                  type="primary"
+                  key="view-result"
                   data-testid="analysis-bundle-view-results"
                   onClick={viewFirstImportedResult}
                 >
-                  {t("analysisBundle.viewImportedResults")}
+                  {t("analysisBundle.viewFirstResult")}
                 </Button>
               ) : null,
               <Button key="done" data-testid="analysis-bundle-done" onClick={done}>

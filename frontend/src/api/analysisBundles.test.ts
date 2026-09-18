@@ -24,6 +24,7 @@ const summaryWire = {
   created_runs: 2,
   existing_runs: 0,
   created_detections: 3,
+  dataset_analysis_id: "exp_imported_1",
   sample_run_mapping: [
     { sample_key: "0000", sample_name: "name_0", recording_id: "rec_1", analysis_run_id: "run_1" },
   ],
@@ -114,6 +115,7 @@ test("import posts the file as multipart and maps the summary to camelCase", asy
     createdRuns: 2,
     createdDetections: 3,
     alreadyImported: false,
+    datasetAnalysisId: "exp_imported_1",
   });
   expect(summary.sampleRunMapping[0]).toEqual({
     sampleKey: "0000",
