@@ -180,9 +180,8 @@ test("samples tab uses the first-class samples endpoint and opens the Sample pag
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/samples/rec_1");
 });
 
-test("Analyses tab lists dataset analyses filtered by dataset_id", async () => {
+test("overview lists dataset analyses filtered by dataset_id", async () => {
   renderPage();
-  fireEvent.click(await screen.findByRole("tab", { name: "Analyses" }));
   const item = await screen.findByTestId("dataset-analysis-item");
   expect(item).toHaveTextContent("SpaceNet · STFT Energy Detector");
   expect(screen.getByTestId("dataset-analysis-progress")).toHaveTextContent("0 / 2500");
@@ -191,7 +190,6 @@ test("Analyses tab lists dataset analyses filtered by dataset_id", async () => {
 
 test("normal dataset UI uses Dataset Analysis wording, not projection/experiment terms", async () => {
   renderPage();
-  fireEvent.click(await screen.findByRole("tab", { name: "Analyses" }));
   expect(await screen.findByTestId("analyze-dataset-button")).toHaveTextContent("Analyze Dataset");
   expect(screen.queryByText(/Dataset Experiment/)).toBeNull();
   expect(screen.queryByText(/Projection/)).toBeNull();
@@ -199,7 +197,6 @@ test("normal dataset UI uses Dataset Analysis wording, not projection/experiment
 
 test("Analyze Dataset modal defaults to STFT Energy + Auto · Local CPU and starts create then run", async () => {
   renderPage();
-  fireEvent.click(await screen.findByRole("tab", { name: "Analyses" }));
   fireEvent.click(await screen.findByTestId("analyze-dataset-button"));
 
   // Default pipeline and execution control.
@@ -248,7 +245,6 @@ test("a zero-GT dataset with runnable Auto Local CPU enables Start Analysis", as
     return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 });
   }));
   renderPage();
-  fireEvent.click(await screen.findByRole("tab", { name: "Analyses" }));
   fireEvent.click(await screen.findByTestId("analyze-dataset-button"));
   const start = await screen.findByRole("button", { name: "Start Analysis" });
   await waitFor(() => expect(start).not.toBeDisabled());

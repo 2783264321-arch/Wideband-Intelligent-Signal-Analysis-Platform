@@ -69,33 +69,36 @@ export function DatasetDetailPage() {
         items={[
           {
             key: "overview",
-            label: t("dataLibrary.overview"),
+            label: t("dataLibrary.overviewAndAnalysis"),
             children: dataset ? (
-              <Descriptions
-                column={2}
-                data-testid="dataset-overview"
-                items={[
-                  { key: "name", label: t("dataLibrary.name"), children: dataset.name },
-                  { key: "split", label: t("dataLibrary.split"), children: dataset.split },
-                  { key: "count", label: t("dataLibrary.sampleCount"), children: dataset.sampleCount },
-                  {
-                    key: "gt",
-                    label: t("dataLibrary.groundTruth"),
-                    children: dataset.groundTruthSampleCount,
-                  },
-                  {
-                    key: "label",
-                    label: t("form.labelSpace"),
-                    children: dataset.labelSpace ?? "—",
-                  },
-                  { key: "adapter", label: t("dataLibrary.adapter"), children: dataset.adapterId },
-                  {
-                    key: "root",
-                    label: t("dataLibrary.localPath"),
-                    children: dataset.localRoot,
-                  },
-                ]}
-              />
+              <Space direction="vertical" size="large" style={{ width: "100%" }}>
+                <Descriptions
+                  column={2}
+                  data-testid="dataset-overview"
+                  items={[
+                    { key: "name", label: t("dataLibrary.name"), children: dataset.name },
+                    { key: "split", label: t("dataLibrary.split"), children: dataset.split },
+                    { key: "count", label: t("dataLibrary.sampleCount"), children: dataset.sampleCount },
+                    {
+                      key: "gt",
+                      label: t("dataLibrary.groundTruth"),
+                      children: dataset.groundTruthSampleCount,
+                    },
+                    {
+                      key: "label",
+                      label: t("form.labelSpace"),
+                      children: dataset.labelSpace ?? "—",
+                    },
+                    { key: "adapter", label: t("dataLibrary.adapter"), children: dataset.adapterId },
+                    {
+                      key: "root",
+                      label: t("dataLibrary.localPath"),
+                      children: dataset.localRoot,
+                    },
+                  ]}
+                />
+                <DatasetAnalysesPanel dataset={dataset} />
+              </Space>
             ) : (
               <Typography.Text>{t("common.loading")}</Typography.Text>
             ),
@@ -104,11 +107,6 @@ export function DatasetDetailPage() {
             key: "samples",
             label: t("dataLibrary.samples"),
             children: <DatasetSamplesTable datasetId={datasetId} />,
-          },
-          {
-            key: "analyses",
-            label: t("datasetAnalysis.analyses"),
-            children: dataset ? <DatasetAnalysesPanel dataset={dataset} /> : null,
           },
         ]}
       />

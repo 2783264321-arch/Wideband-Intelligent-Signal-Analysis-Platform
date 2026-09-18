@@ -168,7 +168,6 @@ function fetchCalls(): unknown[][] {
 
 async function openAnalyses() {
   renderPage();
-  fireEvent.click(await screen.findByRole("tab", { name: "Analyses" }));
   await screen.findAllByTestId("dataset-analysis-item");
 }
 
