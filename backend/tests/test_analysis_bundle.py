@@ -637,6 +637,59 @@ def test_missing_evaluation_summary_leaves_evaluation_null(tmp_path):
     assert experiment.dataset_evaluation_id is None
 
 
+@pytest.mark.parametrize(
+    "evaluation_summary",
+    [
+        {"status": "pending"},
+        {"status": "completed"},
+        {"status": "completed", "aggregate_metrics": "not-a-dict"},
+        {"status": "completed", "aggregate_metrics": ["not", "a", "dict"]},
+    ],
+)
+def test_malformed_evaluation_snapshot_does_not_block_import(tmp_path, evaluation_summary):
+    """P: a structurally incomplete optional evaluation snapshot never blocks import.
+
+    The transported evaluation snapshot is deliberately loose, transported data.
+    Any reconstruction problem must degrade to "analysis imported, evaluation
+    unlinked" rather than failing the whole Analysis result import.
+    """
+    import json
+
+    source = _new_app(tmp_path, "bad_eval_source")
+    source_session, experiment_id, source_dataset_id, _ = _seed_completed_analysis(
+        source, machine="bsrc", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    source_dataset = source_session.get(DatasetModel, source_dataset_id)
+    _seed_source_evaluation(
+        source_session, experiment_id, source_dataset,
+        [f"bsrc_run_{index}" for index in range(2)],
+    )
+    payload = _export(source, experiment_id)
+
+    extract_dir = tmp_path / "bad_eval_bundle"
+    with zipfile.ZipFile(BytesIO(payload)) as archive:
+        archive.extractall(extract_dir)
+    manifest_path = extract_dir / ANALYSIS_BUNDLE_MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["provenance"]["evaluation_summary"] = evaluation_summary
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    target = _new_app(tmp_path, "bad_eval_target")
+    target_session, _, _, _ = _seed_completed_analysis(
+        target, machine="btgt", local_root="/data/SpaceNet",
+        path_for=lambda i: f"/data/SpaceNet/test/{i:04d}.bin",
+    )
+    summary = AnalysisBundleImportService(
+        target_session, target.state.storage
+    ).import_bundle(_zip_bytes(extract_dir))
+
+    experiment = target_session.get(DatasetExperimentModel, summary.dataset_analysis_id)
+    assert experiment is not None
+    assert experiment.status == "completed"
+    assert experiment.dataset_evaluation_id is None
+    assert target_session.query(AnalysisRunModel).filter_by(executor="imported").count() == 2
+
+
 def test_pipeline_absence_does_not_block_experiment_import(tmp_path):
     """O: the imported Dataset Analysis exists without the pipeline installed."""
     app = _new_app(tmp_path, "ghostshell")
