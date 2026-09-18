@@ -24,6 +24,9 @@ from app.datasets.spacenet import SpaceNetAdapter
 from app.labels.service import LabelSpaceService
 
 SPACENET_UPLOAD_LABEL_SPACE = "spacenet_14"
+# SpaceNet ships little-endian float16 interleaved I/Q pairs. A SpaceNet sidecar
+# therefore pins the encoding of the uploaded .bin.
+SPACENET_UPLOAD_DATA_FORMAT = "float16_interleaved_le"
 SPACENET_UPLOAD_MEDIA_TYPES = frozenset(
     {"application/json", "text/json", "text/plain", "application/octet-stream", ""}
 )
@@ -46,6 +49,7 @@ class UploadGroundTruth:
 @dataclass(frozen=True)
 class UploadMetadata:
     sample_id: str | None = None
+    stem: str | None = None
     sample_rate_hz: float | None = None
     center_frequency_hz: float | None = None
     label_space: str | None = None
@@ -123,18 +127,23 @@ def parse_upload_metadata(
             422,
         )
 
-    # Parse with the verified adapter. The adapter infers the IQ length from the
-    # ``.bin`` size and rejects ground truth outside that duration, so the stub is
-    # sized to the REAL upload length when it is known. This keeps the standalone
-    # upload path on the exact same validation as the registered dataset path.
+    # Parse with the verified adapter. The adapter derives the duration from the
+    # ``.bin`` size and the observation-bandwidth rate, then rejects ground truth
+    # outside it. The stub is sized to the REAL upload length, and when the user
+    # supplied an explicit sampling rate the same rate is used for the stub so the
+    # duration check matches what will actually be persisted.
     probe_samples = num_samples if num_samples else _MIN_PROBE_SAMPLES
+    bandwidth_hz = (payload["observation_range"][1] - payload["observation_range"][0]) * 1e6
+    probe_bytes = 4 * probe_samples
+    if sample_rate_hz and bandwidth_hz > 0 and sample_rate_hz != bandwidth_hz:
+        probe_bytes = max(4, round(probe_samples / sample_rate_hz * bandwidth_hz) * 4)
     with TemporaryDirectory(prefix="wisa-upload-meta-") as temporary:
         root = Path(temporary)
         split_root = root / "test"
         split_root.mkdir(parents=True, exist_ok=True)
         sample_id = "sample"
         (split_root / f"{sample_id}.json").write_text(json.dumps(payload), encoding="utf-8")
-        (split_root / f"{sample_id}.bin").write_bytes(b"\x00\x00\x00\x00" * probe_samples)
+        (split_root / f"{sample_id}.bin").write_bytes(b"\x00\x00\x00\x00" * (probe_bytes // 4))
         adapter = SpaceNetAdapter(root, Path(label_space_root), SPACENET_UPLOAD_LABEL_SPACE)
         sample = adapter.load("test", sample_id)
 
@@ -151,11 +160,18 @@ def parse_upload_metadata(
     )
     return UploadMetadata(
         sample_id=sample_id,
+        stem=_sidecar_stem(payload),
         sample_rate_hz=sample.sample_rate_hz,
         center_frequency_hz=sample.center_frequency_hz,
         label_space=SPACENET_UPLOAD_LABEL_SPACE,
         ground_truth=ground_truth,
     )
+
+
+def _sidecar_stem(payload: dict) -> str | None:
+    """Optional ``stem`` hint naming the paired ``.bin`` sample."""
+    stem = payload.get("stem")
+    return stem if isinstance(stem, str) and stem.strip() else None
 
 
 def rebuild_ground_truth(

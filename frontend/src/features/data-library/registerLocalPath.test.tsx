@@ -85,10 +85,6 @@ test("upload mode sends the SpaceNet JSON metadata alongside the IQ file", async
   );
 
   fireEvent.change(screen.getByLabelText("Recording name"), { target: { value: "11" } });
-  fireEvent.change(screen.getByLabelText("Sample rate (Hz)"), { target: { value: "50000000" } });
-  fireEvent.change(screen.getByLabelText("Center frequency (Hz)"), {
-    target: { value: "2434000000" },
-  });
   const iq = new File([new Uint8Array(16)], "11.bin", { type: "application/octet-stream" });
   const iqInput = document.querySelector('input[accept=".bin,.iq,.dat"]') as HTMLInputElement;
   fireEvent.change(iqInput, { target: { files: [iq] } });
@@ -99,10 +95,74 @@ test("upload mode sends the SpaceNet JSON metadata alongside the IQ file", async
     target: { files: [sidecar] },
   });
 
+  // Fs/Fc are auto-detected and shown; the user does not type them.
+  expect(await screen.findByTestId("upload-metadata-derived")).toHaveTextContent("50.000 MHz");
+  expect(screen.getByLabelText("Sample rate (Hz)")).toHaveValue("50000000");
+
   fireEvent.click(screen.getByRole("button", { name: "Import" }));
 
   await waitFor(() => expect(uploaded).not.toBeNull());
   expect(uploaded!.get("metadata")).toBeInstanceOf(File);
   expect((uploaded!.get("metadata") as File).name).toBe("11.json");
+  expect(uploaded!.get("sample_rate_hz")).toBe("50000000");
   await waitFor(() => expect(onImported).toHaveBeenCalledWith("rec_new"));
+});
+
+test("upload with a JSON sidecar submits without hand-typed Fs/Fc", async () => {
+  let uploaded: FormData | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith("/api/recordings") && init?.method === "POST") {
+      uploaded = init.body as FormData;
+      return new Response(JSON.stringify(createdRecording), { status: 201 });
+    }
+    return new Response(JSON.stringify([]), { status: 200 });
+  }));
+
+  render(
+    renderWithLocalization(
+      <ImportStandaloneIqModal open onClose={() => {}} onImported={() => {}} />,
+    ),
+  );
+
+  const iq = new File([new Uint8Array(16)], "11.bin", { type: "application/octet-stream" });
+  fireEvent.change(document.querySelector('input[accept=".bin,.iq,.dat"]') as HTMLInputElement, {
+    target: { files: [iq] },
+  });
+  const sidecar = new File(['{"observation_range":[2409.0,2459.0],"signals":[]}'], "11.json", {
+    type: "application/json",
+  });
+  fireEvent.change(screen.getByLabelText("SpaceNet JSON Metadata (optional)"), {
+    target: { files: [sidecar] },
+  });
+  fireEvent.change(screen.getByLabelText("Recording name"), { target: { value: "11" } });
+
+  fireEvent.click(screen.getByRole("button", { name: "Import" }));
+  await waitFor(() => expect(uploaded).not.toBeNull());
+});
+
+test("upload without a JSON sidecar still requires Fs/Fc", async () => {
+  let posted = false;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith("/api/recordings") && init?.method === "POST") {
+      posted = true;
+      return new Response(JSON.stringify(createdRecording), { status: 201 });
+    }
+    return new Response(JSON.stringify([]), { status: 200 });
+  }));
+
+  render(
+    renderWithLocalization(
+      <ImportStandaloneIqModal open onClose={() => {}} onImported={() => {}} />,
+    ),
+  );
+
+  const iq = new File([new Uint8Array(16)], "11.bin", { type: "application/octet-stream" });
+  fireEvent.change(document.querySelector('input[accept=".bin,.iq,.dat"]') as HTMLInputElement, {
+    target: { files: [iq] },
+  });
+  fireEvent.change(screen.getByLabelText("Recording name"), { target: { value: "11" } });
+
+  fireEvent.click(screen.getByRole("button", { name: "Import" }));
+  await screen.findByText("Please enter Sample rate (Hz)");
+  expect(posted).toBe(false);
 });

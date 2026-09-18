@@ -34,6 +34,8 @@ export const enUS = {
   "dataLibrary.fsFcRequiredHint": "Raw IQ files do not always contain acquisition metadata, so sampling rate (Fs) and center frequency (Fc) are required.",
   "dataLibrary.uploadMetadataLabel": "SpaceNet JSON Metadata (optional)",
   "dataLibrary.uploadMetadataHint": "Upload the SpaceNet .json sidecar to derive sampling rate and center frequency from observation_range automatically, including ground truth. Values typed above override it.",
+  "dataLibrary.uploadMetadataDetected": "Sampling rate and center frequency detected from the JSON sidecar",
+  "dataLibrary.uploadMetadataInvalid": "This file is not a readable SpaceNet JSON sidecar. Enter sampling rate and center frequency manually, or pick the matching .json file.",
   "dataLibrary.overview": "Overview",
   "dataLibrary.overviewAndAnalysis": "Overview & Analysis",
   "dataLibrary.samples": "Samples",

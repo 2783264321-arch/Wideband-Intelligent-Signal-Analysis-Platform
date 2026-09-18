@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import json
+
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 
 from app.core.errors import PlatformError
@@ -7,7 +11,7 @@ from app.recordings.schema import (
     RegisterRecordingPathRequest,
 )
 from app.recordings.service import PATH_FORMAT_BYTES, RecordingService
-from app.recordings.spacenet_upload import parse_upload_metadata
+from app.recordings.spacenet_upload import SPACENET_UPLOAD_DATA_FORMAT, parse_upload_metadata
 from app.lifecycle.service import delete_standalone_recording
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -15,6 +19,26 @@ router = APIRouter(prefix="/api/recordings", tags=["recordings"])
 
 def _service(request: Request, session):
     return RecordingService(session, request.app.state.storage, request.app.state.settings.data_root)
+
+
+def _observation_range(document: str | None):
+    """Best-effort [low_mhz, high_mhz] read used only to size the GT duration check."""
+    if not document:
+        return None
+    try:
+        payload = json.loads(document.lstrip("\ufeff").strip())
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("observation_range")
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    try:
+        low, high = float(value[0]), float(value[1])
+    except (TypeError, ValueError):
+        return None
+    return (low, high) if low < high else None
 
 
 @router.post("", response_model=RecordingRead, status_code=201)
@@ -36,6 +60,11 @@ def import_recording(
     upload the SpaceNet ``.json`` sidecar as ``metadata`` so the platform derives
     sampling rate and center frequency from ``observation_range`` instead of
     trusting hand-typed values. Explicit form values always win.
+
+    A SpaceNet sidecar also pins the IQ encoding: SpaceNet ships little-endian
+    float16 I/Q pairs, so the uploaded file is read as ``float16_interleaved_le``
+    rather than the default ``complex64_le``. Reading a float16 capture as
+    complex64 halves the derived duration and mis-aligns every sample.
     """
     with request.app.state.database.session_factory() as session:
         metadata_document = None
@@ -53,22 +82,35 @@ def import_recording(
                     "Uploaded IQ metadata is not valid UTF-8 text.",
                     422,
                 ) from error
+
+        # A SpaceNet sidecar fixes the encoding; an explicit form value still wins.
+        resolved_format = data_format or (
+            SPACENET_UPLOAD_DATA_FORMAT if metadata_document else "complex64_le"
+        )
+        if resolved_format not in PATH_FORMAT_BYTES:
+            raise PlatformError(
+                "INVALID_RECORDING",
+                "Unsupported data format. Use complex64_le or float16_interleaved_le.",
+                422,
+            )
+
         # The sidecar carries no IQ length; discover it so ground-truth time
-        # bounds can be validated against the real duration.
-        data_format_for_size = data_format or "complex64_le"
-        bytes_per_sample = PATH_FORMAT_BYTES.get(data_format_for_size, 8)
+        # bounds can be validated against the real duration. An explicit Fs is
+        # used for that check so the duration matches what will be persisted.
+        bytes_per_sample = PATH_FORMAT_BYTES[resolved_format]
         position = file.file.tell()
         file.file.seek(0, 2)
         byte_size = file.file.tell()
         file.file.seek(position)
+        effective_rate = sample_rate_hz if sample_rate_hz and sample_rate_hz > 0 else None
         upload_metadata_sample_count = (
-            byte_size // bytes_per_sample if bytes_per_sample and byte_size % bytes_per_sample == 0 else None
+            byte_size // bytes_per_sample if byte_size % bytes_per_sample == 0 else None
         )
         upload_metadata = parse_upload_metadata(
             metadata_document,
             label_space_root=request.app.state.settings.label_space_root,
             num_samples=upload_metadata_sample_count,
-            sample_rate_hz=sample_rate_hz,
+            sample_rate_hz=effective_rate,
         )
 
         resolved_name = (name or "").strip() or upload_metadata.sample_id or "sample"
@@ -89,13 +131,18 @@ def import_recording(
                 422,
             )
         resolved_label_space = label_space or upload_metadata.label_space
+        resolved_name = (
+            (name or "").strip()
+            or (upload_metadata.stem if metadata_document else "")
+            or "sample"
+        )
 
-        return _service(request, session).import_complex64(
+        return _service(request, session).import_uploaded_iq(
             upload=file,
             name=resolved_name,
             sample_rate_hz=resolved_rate,
             center_frequency_hz=resolved_center,
-            data_format=data_format or "complex64_le",
+            data_format=resolved_format,
             dataset_name=dataset_name,
             dataset_split=dataset_split,
             label_space=resolved_label_space,

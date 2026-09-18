@@ -135,7 +135,7 @@ class RecordingService:
         self.session.refresh(recording)
         return recording
 
-    def import_complex64(
+    def import_uploaded_iq(
         self,
         *,
         upload: UploadFile,
@@ -148,10 +148,21 @@ class RecordingService:
         label_space: str | None = None,
         ground_truth: "Sequence | None" = None,
     ) -> RecordingModel:
+        """Persist an uploaded IQ sample managed by WISA storage.
+
+        ``complex64_le`` (the generic upload) and ``float16_interleaved_le`` (a
+        SpaceNet ``.bin`` uploaded with its sidecar) are both accepted; the bytes
+        are stored verbatim and read back through the same unified
+        ``RecordingReader`` used by registered dataset members.
+        """
         if sample_rate_hz <= 0:
             raise PlatformError("INVALID_RECORDING", "Sample rate must be positive.")
-        if data_format != "complex64_le":
-            raise PlatformError("INVALID_RECORDING", "Only complex64_le is supported by the V1 custom importer.")
+        bytes_per_sample = PATH_FORMAT_BYTES.get(data_format)
+        if bytes_per_sample is None:
+            raise PlatformError(
+                "INVALID_RECORDING",
+                "Unsupported data format. Use complex64_le or float16_interleaved_le.",
+            )
 
         token = f"upload_{uuid4().hex}"
         temp_dir = self.storage.import_temp_dir(token)
@@ -166,10 +177,13 @@ class RecordingService:
                     destination.write(chunk)
 
             byte_size = temp_path.stat().st_size
-            if byte_size == 0 or byte_size % 8 != 0:
-                raise PlatformError("INVALID_RECORDING", "complex64_le IQ must be non-empty and divisible by 8 bytes.")
+            if byte_size == 0 or byte_size % bytes_per_sample:
+                raise PlatformError(
+                    "INVALID_RECORDING",
+                    f"{data_format} IQ must be non-empty and divisible by {bytes_per_sample} bytes.",
+                )
 
-            num_samples = byte_size // 8
+            num_samples = byte_size // bytes_per_sample
             duration_s = num_samples / sample_rate_hz
             half_band = sample_rate_hz / 2
             recording_id = f"rec_{uuid4().hex}"

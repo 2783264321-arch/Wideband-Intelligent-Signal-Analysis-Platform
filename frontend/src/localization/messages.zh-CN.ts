@@ -40,6 +40,8 @@ export const zhCN: Record<MessageKey, string> = {
   "dataLibrary.fsFcRequiredHint": "原始 IQ 文件不一定包含采集元数据，因此必须填写采样率（Fs）与中心频率（Fc）。",
   "dataLibrary.uploadMetadataLabel": "SpaceNet JSON 元数据（可选）",
   "dataLibrary.uploadMetadataHint": "上传 SpaceNet 的 .json 元数据文件，平台会自动从 observation_range 推导采样率与中心频率，并导入真值标注。上方手填的值优先。",
+  "dataLibrary.uploadMetadataDetected": "已从 JSON 元数据识别采样率与中心频率",
+  "dataLibrary.uploadMetadataInvalid": "该文件不是可解析的 SpaceNet JSON 元数据。请手动填写采样率与中心频率，或选择配对的 .json 文件。",
   "dataLibrary.overview": "概览",
   "dataLibrary.overviewAndAnalysis": "概览与分析",
   "dataLibrary.samples": "样本",
