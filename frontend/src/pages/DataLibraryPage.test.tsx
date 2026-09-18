@@ -165,21 +165,21 @@ test("Add Data menu lists Register Dataset above Add Standalone IQ", async () =>
   expect(labels.indexOf("Register Dataset")).toBeLessThan(labels.indexOf("Add Standalone IQ"));
 });
 
-test("dataset import entry point offers batch and portable bundle", async () => {
+test("dataset import entry point is a single Import Results action", async () => {
   renderPage();
   const card = await screen.findByTestId("dataset-card");
-  fireEvent.mouseEnter(within(card).getByRole("button", { name: /Import Analysis Results/ }));
-  expect(await screen.findByText("Dataset Batch Analysis Result")).toBeInTheDocument();
-  expect(await screen.findByText("Analysis Bundle (Portable Results)")).toBeInTheDocument();
+  fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByText("Import Analysis Results")).toBeInTheDocument();
+  expect(within(dialog).getByTestId("analysis-bundle-file-input")).toBeInTheDocument();
 });
 
-test("standalone sample row imports results for that sample", async () => {
+test("standalone sample row imports results", async () => {
   renderPage();
   await screen.findAllByTestId("dataset-card");
   fireEvent.click(screen.getByRole("tab", { name: "Standalone Samples" }));
   const card = await screen.findByTestId("standalone-card");
   fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
   const dialog = await screen.findByRole("dialog");
-  expect(within(dialog).getByText("Import Existing Run")).toBeInTheDocument();
-  expect(within(dialog).getByText("standalone-a")).toBeInTheDocument();
+  expect(within(dialog).getByText("Import Sample Analysis Results")).toBeInTheDocument();
 });

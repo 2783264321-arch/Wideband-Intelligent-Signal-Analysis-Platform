@@ -328,6 +328,7 @@ export const enUS = {
   "analysisBundle.exported": "Downloaded",
   "analysisBundle.importEntry": "Analysis Bundle (Portable Results)",
   "analysisBundle.modalTitle": "Import Analysis Results",
+  "analysisBundle.modalTitleSample": "Import Sample Analysis Results",
   "analysisBundle.selectLabel": "Select Analysis Bundle",
   "analysisBundle.selectHint": "Supported file types: .wisa-analysis.zip, .zip",
   "analysisBundle.importHelp": "Import previously computed WISA analysis results without rerunning the pipeline.",

@@ -5,26 +5,20 @@ import { registerSpaceNetDataset } from "../api/client";
 import { toErrorText } from "../api/errors";
 import { PageHeader } from "../app/PageHeader";
 import { useLocalization } from "../localization/useLocalization";
-import { BatchImportModal } from "../features/imports/BatchImportModal";
-import { ImportRunModal } from "../features/imports/ImportRunModal";
 import { ImportAnalysisBundleModal } from "../features/analysis-bundle/ImportAnalysisBundleModal";
 import { DatasetList } from "../features/data-library/DatasetList";
 import { ImportStandaloneIqModal } from "../features/data-library/ImportStandaloneIqModal";
 import { StandaloneSampleList } from "../features/data-library/StandaloneSampleList";
 
-interface SingleImportTarget {
-  id: string;
-  name: string;
-}
+/** The data-library surface a result import was launched from. */
+type ImportTarget = "dataset" | "sample";
 
 export function DataLibraryPage() {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [iqOpen, setIqOpen] = useState(false);
   const [registerOpen, setRegisterOpen] = useState(false);
-  const [batchOpen, setBatchOpen] = useState(false);
-  const [bundleOpen, setBundleOpen] = useState(false);
-  const [singleTarget, setSingleTarget] = useState<SingleImportTarget | null>(null);
+  const [importTarget, setImportTarget] = useState<ImportTarget | null>(null);
   const [datasetPath, setDatasetPath] = useState("");
   const [registering, setRegistering] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,19 +69,14 @@ export function DataLibraryPage() {
             key: "datasets",
             label: t("dataLibrary.tabDatasets"),
             children: (
-              <DatasetList
-                onImportBatch={() => setBatchOpen(true)}
-                onImportBundle={() => setBundleOpen(true)}
-              />
+              <DatasetList onImportResults={() => setImportTarget("dataset")} />
             ),
           },
           {
             key: "standalone",
             label: t("dataLibrary.tabStandalone"),
             children: (
-              <StandaloneSampleList
-                onImportResults={(sample) => setSingleTarget({ id: sample.id, name: sample.name })}
-              />
+              <StandaloneSampleList onImportResults={() => setImportTarget("sample")} />
             ),
           },
         ]}
@@ -98,16 +87,10 @@ export function DataLibraryPage() {
         onClose={() => setIqOpen(false)}
         onImported={() => navigate(0)}
       />
-      <ImportRunModal
-        open={singleTarget !== null}
-        recordings={singleTarget ? [singleTarget] : []}
-        initialRecordingId={singleTarget?.id ?? null}
-        onClose={() => setSingleTarget(null)}
-      />
-      <BatchImportModal open={batchOpen} onClose={() => setBatchOpen(false)} />
       <ImportAnalysisBundleModal
-        open={bundleOpen}
-        onClose={() => setBundleOpen(false)}
+        open={importTarget !== null}
+        source={importTarget ?? "dataset"}
+        onClose={() => setImportTarget(null)}
         onImported={() => navigate(0)}
       />
 

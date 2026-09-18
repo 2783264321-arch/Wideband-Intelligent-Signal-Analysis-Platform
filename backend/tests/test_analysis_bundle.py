@@ -478,6 +478,40 @@ def test_same_bundle_twice_creates_one_dataset_analysis(tmp_path):
     ).filter(DatasetExperimentItemModel.experiment_id == experiments[0].id).count() == 2
 
 
+def test_re_exported_bundle_is_still_deduplicated(tmp_path):
+    """Idempotence must survive re-export.
+
+    The portable identity may not depend on the LOCAL detection primary key: an
+    exported bundle carries ``det_...`` ids, and importing regenerates them, so
+    re-exporting an already-imported analysis must still be recognized as the
+    same results (no duplicate runs / Dataset Analysis).
+    """
+    source = _new_app(tmp_path, "reexport_src")
+    _, experiment_id, _, _ = _seed_completed_analysis(
+        source, machine="rex", local_root=r"D:\SpaceNet", path_for=_windows_paths,
+    )
+    original = _export(source, experiment_id)
+
+    target = _new_app(tmp_path, "reexport_tgt")
+    target_session, _, _, _ = _seed_completed_analysis(
+        target, machine="retgt", local_root="/data/SpaceNet",
+        path_for=lambda i: f"/data/SpaceNet/test/{i:04d}.bin",
+    )
+    service = AnalysisBundleImportService(target_session, target.state.storage)
+    first = service.import_bundle(BytesIO(original))
+
+    # Re-export the IMPORTED analysis (its detections now carry fresh local ids)
+    # and import that file back: it is the same portable results.
+    re_exported = _export(target, first.dataset_analysis_id)
+    second = service.import_bundle(BytesIO(re_exported))
+
+    assert second.already_imported is True
+    assert second.created_runs == 0
+    assert second.dataset_analysis_id == first.dataset_analysis_id
+    assert len(_imported_experiments(target_session)) == 1
+    assert target_session.query(AnalysisRunModel).filter_by(executor="imported").count() == 2
+
+
 def test_backfills_shell_around_existing_imported_runs(tmp_path):
     """H: runs exist (pre-shell state) -> importing backfills the shell around them."""
     app = _new_app(tmp_path, "backfill")

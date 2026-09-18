@@ -1,5 +1,4 @@
-import { DownOutlined } from "@ant-design/icons";
-import { Button, Card, Dropdown, Empty, Space, Tag, Typography } from "antd";
+import { Button, Card, Empty, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { deleteBlockersFromError, deleteDataset, listDatasets } from "../../api/client";
@@ -10,13 +9,11 @@ import { DeleteConfirmModal } from "./DeleteConfirmModal";
 import { DeleteConflictAlert } from "./DeleteConflictAlert";
 
 export interface DatasetListProps {
-  /** Opens the dataset batch analysis result import flow. */
-  onImportBatch?: () => void;
-  /** Opens the portable Analysis Bundle import flow. */
-  onImportBundle?: () => void;
+  /** Opens the "Import Results" flow (mirror of Export Results). */
+  onImportResults?: () => void;
 }
 
-export function DatasetList({ onImportBatch, onImportBundle }: DatasetListProps) {
+export function DatasetList({ onImportResults }: DatasetListProps) {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [items, setItems] = useState<DatasetSummary[]>([]);
@@ -82,23 +79,13 @@ export function DatasetList({ onImportBatch, onImportBundle }: DatasetListProps)
             >
               {t("dataLibrary.browseSamples")}
             </Button>,
-            <Dropdown
+            <Button
               key="import"
-              menu={{
-                items: [
-                  { key: "batch", label: t("dataLibrary.importBatchResult") },
-                  { key: "bundle", label: t("analysisBundle.importEntry") },
-                ],
-                onClick: ({ key }) => {
-                  if (key === "batch") onImportBatch?.();
-                  if (key === "bundle") onImportBundle?.();
-                },
-              }}
+              type="link"
+              onClick={() => onImportResults?.()}
             >
-              <Button type="link">
-                {t("dataLibrary.importResults")} <DownOutlined />
-              </Button>
-            </Dropdown>,
+              {t("dataLibrary.importResults")}
+            </Button>,
             <Button
               key="remove"
               type="link"

@@ -12,6 +12,12 @@ import { useLocalization } from "../../localization/useLocalization";
 export interface ImportAnalysisBundleModalProps {
   open: boolean;
   onClose: () => void;
+  /**
+   * Which data-library surface launched the import, so the copy matches the
+   * user's context. The backend flow is identical either way: a bundle carries
+   * its own dataset identity and per-sample fingerprints, so it matches itself.
+   */
+  source?: "dataset" | "sample";
   /** Called when the user finishes a successful import (e.g. refresh the library). */
   onImported?: () => void;
 }
@@ -22,10 +28,15 @@ export interface ImportAnalysisBundleModalProps {
  * Results transport only: it uploads an Analysis Bundle and creates ordinary
  * completed AnalysisRuns/Detections on the backend. It never installs or checks
  * pipelines, never selects executors, and never reruns inference.
+ *
+ * This is the mirror of "Export Results": a bundle already knows which dataset
+ * and samples it belongs to, so the user never picks a target — matching is
+ * automatic and a mismatch fails closed.
  */
 export function ImportAnalysisBundleModal({
   open,
   onClose,
+  source = "dataset",
   onImported,
 }: ImportAnalysisBundleModalProps) {
   const { t } = useLocalization();
@@ -90,7 +101,7 @@ export function ImportAnalysisBundleModal({
 
   return (
     <Modal
-      title={t("analysisBundle.modalTitle")}
+      title={t(source === "dataset" ? "analysisBundle.modalTitle" : "analysisBundle.modalTitleSample")}
       open={open}
       onCancel={close}
       footer={

@@ -101,8 +101,14 @@ def build_recording_fingerprint(
 
 
 def canonical_detection_payload(item: PackageDetection) -> dict[str, object]:
+    """Canonical, machine-independent detection content.
+
+    ``PackageDetection.id`` is a LOCAL database primary key (``det_...``). It is
+    regenerated on every import, so including it would make the portable bundle
+    identity depend on which machine/run happened to export the file, breaking
+    idempotent re-import. Only physical content participates in identity.
+    """
     return {
-        "id": item.id,
         "t_start_s": canonical_number(item.t_start_s),
         "t_end_s": canonical_number(item.t_end_s),
         "f_low_hz": canonical_number(item.f_low_hz),

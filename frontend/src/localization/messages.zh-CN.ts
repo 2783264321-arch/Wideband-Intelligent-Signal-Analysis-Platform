@@ -334,6 +334,7 @@ export const zhCN: Record<MessageKey, string> = {
   "analysisBundle.exported": "已下载",
   "analysisBundle.importEntry": "分析包（可移植结果）",
   "analysisBundle.modalTitle": "导入分析结果",
+  "analysisBundle.modalTitleSample": "导入样本分析结果",
   "analysisBundle.selectLabel": "选择分析包",
   "analysisBundle.selectHint": "支持的文件类型：.wisa-analysis.zip、.zip",
   "analysisBundle.importHelp": "无需重新运行流程即可导入此前计算好的 WISA 分析结果。",
