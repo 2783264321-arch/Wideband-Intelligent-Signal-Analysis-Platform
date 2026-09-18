@@ -8,6 +8,7 @@ import { useLocalization } from "../localization/useLocalization";
 import type { RecordingDetail } from "../api/types";
 import { BatchImportModal } from "../features/imports/BatchImportModal";
 import { ImportRunModal } from "../features/imports/ImportRunModal";
+import { ImportAnalysisBundleModal } from "../features/analysis-bundle/ImportAnalysisBundleModal";
 import { DatasetList } from "../features/data-library/DatasetList";
 import { ImportStandaloneIqModal } from "../features/data-library/ImportStandaloneIqModal";
 import { StandaloneSampleList } from "../features/data-library/StandaloneSampleList";
@@ -19,6 +20,7 @@ export function DataLibraryPage() {
   const [registerOpen, setRegisterOpen] = useState(false);
   const [singleOpen, setSingleOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [bundleOpen, setBundleOpen] = useState(false);
   const [recordings, setRecordings] = useState<RecordingDetail[]>([]);
   const [datasetPath, setDatasetPath] = useState("");
   const [registering, setRegistering] = useState(false);
@@ -74,10 +76,12 @@ export function DataLibraryPage() {
               items: [
                 { key: "single", label: t("dataLibrary.importSingleResult") },
                 { key: "batch", label: t("dataLibrary.importBatchResult") },
+                { key: "bundle", label: t("analysisBundle.importEntry") },
               ],
               onClick: ({ key }) => {
                 if (key === "single") void openSingleImport();
                 if (key === "batch") setBatchOpen(true);
+                if (key === "bundle") setBundleOpen(true);
               },
             }}
           >
@@ -108,6 +112,11 @@ export function DataLibraryPage() {
       />
       <ImportRunModal open={singleOpen} recordings={recordings} onClose={() => setSingleOpen(false)} />
       <BatchImportModal open={batchOpen} onClose={() => setBatchOpen(false)} />
+      <ImportAnalysisBundleModal
+        open={bundleOpen}
+        onClose={() => setBundleOpen(false)}
+        onImported={() => navigate(0)}
+      />
 
       <Modal
         title={t("dataLibrary.registerDataset")}

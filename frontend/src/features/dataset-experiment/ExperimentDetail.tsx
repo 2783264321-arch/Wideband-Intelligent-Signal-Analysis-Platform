@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { getDatasetExperiment, PlatformApiError } from "../../api/client";
 import type { DatasetExperiment } from "../../api/types";
 import { ExperimentProgressHeader } from "./ExperimentProgressHeader";
+import { ExportAnalysisBundleButton } from "../analysis-bundle/ExportAnalysisBundleButton";
 import { ExperimentItemTable } from "./ExperimentItemTable";
 import { ExperimentAttemptsTab } from "./AttemptTimeline";
 import { LinkedEvaluationSummary } from "./LinkedEvaluationSummary";
@@ -61,6 +62,7 @@ export function ExperimentDetail({ experimentId }: { experimentId: string }) {
   return (
     <>
       <ExperimentProgressHeader experiment={experiment} />
+      <ExportAnalysisBundleButton experimentId={experiment.id} status={experiment.status} />
       <Tabs
         items={[
           { key: "items", label: t("experiment.itemsTab"), children: <ExperimentItemTable experimentId={experiment.id} /> },
