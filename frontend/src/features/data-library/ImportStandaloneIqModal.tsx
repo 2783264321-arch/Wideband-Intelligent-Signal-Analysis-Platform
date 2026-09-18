@@ -31,12 +31,14 @@ export function ImportStandaloneIqModal({ open, onClose, onImported }: ImportSta
   const [form] = Form.useForm<ImportFormValues>();
   const [mode, setMode] = useState<AddMode>("upload");
   const [file, setFile] = useState<File | null>(null);
+  const [metadataFile, setMetadataFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const reset = () => {
     form.resetFields();
     setFile(null);
+    setMetadataFile(null);
     setError(null);
   };
 
@@ -57,6 +59,7 @@ export function ImportStandaloneIqModal({ open, onClose, onImported }: ImportSta
         body.append("center_frequency_hz", String(values.centerFrequencyHz));
         body.append("data_format", "complex64_le");
         if (values.labelSpace?.trim()) body.append("label_space", values.labelSpace.trim());
+        if (metadataFile) body.append("metadata", metadataFile);
         const recording = await importRecording(body);
         reset();
         onImported?.(recording.id);
@@ -131,15 +134,27 @@ export function ImportStandaloneIqModal({ open, onClose, onImported }: ImportSta
           <Input placeholder="spacenet_14" />
         </Form.Item>
         {mode === "upload" ? (
-          <Form.Item label={t("recordings.fieldIqFile")}>
-            <input
-              type="file"
-              accept=".bin,.iq,.dat"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-            />
-          </Form.Item>
+          <>
+            <Form.Item label={t("recordings.fieldIqFile")}>
+              <input
+                type="file"
+                accept=".bin,.iq,.dat"
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              />
+            </Form.Item>
+            <Form.Item label={t("dataLibrary.uploadMetadataLabel")} tooltip={t("dataLibrary.uploadMetadataHint")}>
+              <input
+                type="file"
+                accept=".json,application/json"
+                aria-label={t("dataLibrary.uploadMetadataLabel")}
+                onChange={(event) => setMetadataFile(event.target.files?.[0] ?? null)}
+              />
+            </Form.Item>
+          </>
         ) : null}
-        <Typography.Text type="secondary">{t("dataLibrary.fsFcRequiredHint")}</Typography.Text>
+        <Typography.Text type="secondary">
+          {mode === "upload" ? t("dataLibrary.uploadMetadataHint") : t("dataLibrary.fsFcRequiredHint")}
+        </Typography.Text>
         {error ? <Typography.Paragraph type="danger">{error}</Typography.Paragraph> : null}
       </Form>
     </Modal>

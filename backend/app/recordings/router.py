@@ -1,11 +1,13 @@
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
 
+from app.core.errors import PlatformError
 from app.recordings.schema import (
     RecordingListRead,
     RecordingRead,
     RegisterRecordingPathRequest,
 )
-from app.recordings.service import RecordingService
+from app.recordings.service import PATH_FORMAT_BYTES, RecordingService
+from app.recordings.spacenet_upload import parse_upload_metadata
 from app.lifecycle.service import delete_standalone_recording
 
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
@@ -19,24 +21,85 @@ def _service(request: Request, session):
 def import_recording(
     request: Request,
     file: UploadFile = File(...),
-    name: str = Form(...),
-    sample_rate_hz: float = Form(...),
-    center_frequency_hz: float = Form(...),
-    data_format: str = Form("complex64_le"),
+    name: str | None = Form(None),
+    sample_rate_hz: float | None = Form(None),
+    center_frequency_hz: float | None = Form(None),
+    data_format: str | None = Form(None),
     dataset_name: str | None = Form(None),
     dataset_split: str | None = Form(None),
     label_space: str | None = Form(None),
+    metadata: UploadFile | None = File(None),
 ):
+    """Import a managed IQ sample.
+
+    Either supply ``sample_rate_hz`` + ``center_frequency_hz`` explicitly, or
+    upload the SpaceNet ``.json`` sidecar as ``metadata`` so the platform derives
+    sampling rate and center frequency from ``observation_range`` instead of
+    trusting hand-typed values. Explicit form values always win.
+    """
     with request.app.state.database.session_factory() as session:
+        metadata_document = None
+        if metadata is not None:
+            raw = metadata.file.read()
+            if len(raw) > 1_048_576:
+                raise PlatformError(
+                    "INVALID_RECORDING_METADATA", "Uploaded IQ metadata file is too large.", 422
+                )
+            try:
+                metadata_document = raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise PlatformError(
+                    "INVALID_RECORDING_METADATA",
+                    "Uploaded IQ metadata is not valid UTF-8 text.",
+                    422,
+                ) from error
+        # The sidecar carries no IQ length; discover it so ground-truth time
+        # bounds can be validated against the real duration.
+        data_format_for_size = data_format or "complex64_le"
+        bytes_per_sample = PATH_FORMAT_BYTES.get(data_format_for_size, 8)
+        position = file.file.tell()
+        file.file.seek(0, 2)
+        byte_size = file.file.tell()
+        file.file.seek(position)
+        upload_metadata_sample_count = (
+            byte_size // bytes_per_sample if bytes_per_sample and byte_size % bytes_per_sample == 0 else None
+        )
+        upload_metadata = parse_upload_metadata(
+            metadata_document,
+            label_space_root=request.app.state.settings.label_space_root,
+            num_samples=upload_metadata_sample_count,
+            sample_rate_hz=sample_rate_hz,
+        )
+
+        resolved_name = (name or "").strip() or upload_metadata.sample_id or "sample"
+        resolved_rate = sample_rate_hz if sample_rate_hz is not None else upload_metadata.sample_rate_hz
+        resolved_center = (
+            center_frequency_hz if center_frequency_hz is not None else upload_metadata.center_frequency_hz
+        )
+        if resolved_rate is None:
+            raise PlatformError(
+                "INVALID_RECORDING",
+                "Sample rate is required. Provide sample_rate_hz or upload the SpaceNet JSON metadata.",
+                422,
+            )
+        if resolved_center is None:
+            raise PlatformError(
+                "INVALID_RECORDING",
+                "Center frequency is required. Provide center_frequency_hz or upload the SpaceNet JSON metadata.",
+                422,
+            )
+        resolved_label_space = label_space or upload_metadata.label_space
+
         return _service(request, session).import_complex64(
             upload=file,
-            name=name,
-            sample_rate_hz=sample_rate_hz,
-            center_frequency_hz=center_frequency_hz,
-            data_format=data_format,
+            name=resolved_name,
+            sample_rate_hz=resolved_rate,
+            center_frequency_hz=resolved_center,
+            data_format=data_format or "complex64_le",
             dataset_name=dataset_name,
             dataset_split=dataset_split,
-            label_space=label_space,
+            label_space=resolved_label_space,
+            ground_truth=upload_metadata.ground_truth,
         )
 
 

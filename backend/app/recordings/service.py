@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import PlatformError
+from app.ground_truth.model import GroundTruthModel
 from app.recordings.model import RecordingModel
 from app.storage.service import StorageService
 
@@ -144,6 +146,7 @@ class RecordingService:
         dataset_name: str | None = None,
         dataset_split: str | None = None,
         label_space: str | None = None,
+        ground_truth: "Sequence | None" = None,
     ) -> RecordingModel:
         if sample_rate_hz <= 0:
             raise PlatformError("INVALID_RECORDING", "Sample rate must be positive.")
@@ -175,6 +178,9 @@ class RecordingService:
             shutil.move(str(temp_path), str(final_path))
 
             relative_path = final_path.relative_to(self.data_root).as_posix()
+            ground_truth_rows = self._ground_truth_rows(
+                ground_truth, num_samples=num_samples, sample_rate_hz=sample_rate_hz
+            )
             recording = RecordingModel(
                 id=recording_id,
                 name=name.strip() or recording_id,
@@ -189,9 +195,22 @@ class RecordingService:
                 dataset_name=dataset_name,
                 dataset_split=dataset_split,
                 label_space=label_space,
-                has_ground_truth=False,
+                has_ground_truth=bool(ground_truth_rows),
             )
             self.session.add(recording)
+            for row in ground_truth_rows:
+                self.session.add(
+                    GroundTruthModel(
+                        id=f"gt_{uuid4().hex}",
+                        recording_id=recording_id,
+                        t_start_s=row.t_start_s,
+                        t_end_s=row.t_end_s,
+                        f_low_hz=row.f_low_hz,
+                        f_high_hz=row.f_high_hz,
+                        class_id=row.class_id,
+                        class_name=row.class_name,
+                    )
+                )
             self.session.commit()
             self.session.refresh(recording)
             return recording
@@ -202,3 +221,9 @@ class RecordingService:
             raise
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _ground_truth_rows(ground_truth, *, num_samples: int, sample_rate_hz: float):
+        """Ground truth already validated by the SpaceNet adapter against the real
+        IQ duration (see ``app.recordings.spacenet_upload``)."""
+        return list(ground_truth or [])

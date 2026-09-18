@@ -32,6 +32,8 @@ export const enUS = {
   "dataLibrary.importSingleResult": "Single-sample Analysis Result",
   "dataLibrary.importBatchResult": "Dataset Batch Analysis Result",
   "dataLibrary.fsFcRequiredHint": "Raw IQ files do not always contain acquisition metadata, so sampling rate (Fs) and center frequency (Fc) are required.",
+  "dataLibrary.uploadMetadataLabel": "SpaceNet JSON Metadata (optional)",
+  "dataLibrary.uploadMetadataHint": "Upload the SpaceNet .json sidecar to derive sampling rate and center frequency from observation_range automatically, including ground truth. Values typed above override it.",
   "dataLibrary.overview": "Overview",
   "dataLibrary.overviewAndAnalysis": "Overview & Analysis",
   "dataLibrary.samples": "Samples",
