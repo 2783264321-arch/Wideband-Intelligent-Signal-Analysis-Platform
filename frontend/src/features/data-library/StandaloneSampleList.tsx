@@ -91,6 +91,14 @@ export function StandaloneSampleList({ onImportResults }: StandaloneSampleListPr
             <Button key="open" type="link" onClick={() => navigate(`/samples/${sample.id}`)}>
               {t("dataLibrary.openSample")}
             </Button>,
+            <Button
+              key="workspace"
+              type="link"
+              data-testid="standalone-open-workspace"
+              onClick={() => navigate(`/spectrum/${sample.id}`)}
+            >
+              {t("dataLibrary.timeFrequencyWorkspace")}
+            </Button>,
             <Button key="import" type="link" onClick={() => onImportResults?.(sample)}>
               {t("dataLibrary.importResults")}
             </Button>,

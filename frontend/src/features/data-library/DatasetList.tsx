@@ -1,7 +1,7 @@
 import { Button, Card, Empty, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { deleteBlockersFromError, deleteDataset, listDatasets } from "../../api/client";
+import { deleteBlockersFromError, deleteDataset, listDatasetSamples, listDatasets } from "../../api/client";
 import { toErrorText } from "../../api/errors";
 import { useLocalization } from "../../localization/useLocalization";
 import type { DatasetSummary, DeleteBlocker } from "../../api/types";
@@ -22,6 +22,7 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
   const [pendingRemove, setPendingRemove] = useState<DatasetSummary | null>(null);
   const [removing, setRemoving] = useState(false);
   const [blockers, setBlockers] = useState<DeleteBlocker[]>([]);
+  const [openingWorkspace, setOpeningWorkspace] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -57,6 +58,29 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
     }
   };
 
+  /**
+   * Jump straight into the time-frequency workspace without first opening the
+   * dataset. A Dataset has many samples, so this opens the first member (the
+   * workspace is a per-sample surface and the user can switch samples there).
+   */
+  const openWorkspace = async (dataset: DatasetSummary) => {
+    setOpeningWorkspace(dataset.id);
+    setError(null);
+    try {
+      const page = await listDatasetSamples(dataset.id, { limit: 1, offset: 0 });
+      const first = page.items[0];
+      if (!first) {
+        setError(t("dataLibrary.workspaceNoSamples"));
+        return;
+      }
+      navigate(`/spectrum/${first.id}`);
+    } catch (reason) {
+      setError(toErrorText(reason, t("dataLibrary.workspaceNoSamples")));
+    } finally {
+      setOpeningWorkspace(null);
+    }
+  };
+
   if (loading) return <Typography.Text>{t("common.loading")}</Typography.Text>;
   if (error && items.length === 0) return <Typography.Text type="danger">{error}</Typography.Text>;
   if (items.length === 0) return <Empty description={t("dataLibrary.empty")} />;
@@ -78,6 +102,15 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
               onClick={() => navigate(`/data-library/datasets/${dataset.id}`)}
             >
               {t("dataLibrary.browseSamples")}
+            </Button>,
+            <Button
+              key="workspace"
+              type="link"
+              data-testid="dataset-open-workspace"
+              loading={openingWorkspace === dataset.id}
+              onClick={() => void openWorkspace(dataset)}
+            >
+              {t("dataLibrary.timeFrequencyWorkspace")}
             </Button>,
             <Button
               key="import"

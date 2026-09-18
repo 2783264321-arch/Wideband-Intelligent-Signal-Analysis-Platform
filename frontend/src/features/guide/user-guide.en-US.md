@@ -17,13 +17,12 @@ identity is prefilled from the dataset you opened.
 
 ## Compare two pipelines
 
-Open a sample's **Analysis History**, select two completed runs, and choose
+Open a sample's **Detections**, select two completed runs, and choose
 **Compare**. Algorithm Lab opens with the two runs selected so you can inspect
 detection differences.
 
-## Import server-generated analysis results
+## Import detection results generated elsewhere
 
-Choose **Import Analysis Results** to bring in results produced elsewhere. Use
-**Single-sample Analysis Result** for one file and **Dataset Batch Analysis
-Result** for a batch package. Imported results appear in the relevant Analysis
-History.
+Choose **Import Detection Results** and pick an analysis package. The platform
+matches it against your local dataset and samples automatically and never reruns
+inference. Imported results appear in the relevant **Detections** list.

@@ -49,6 +49,26 @@ function route(url: string, init?: RequestInit): Response {
   if (url.includes("/api/data-library/standalone-samples")) {
     return new Response(JSON.stringify({ items: [standalone], total: 1 }), { status: 200 });
   }
+  if (url.includes("/api/datasets/ds_1/samples")) {
+    const sample = {
+      id: "rec_sample_1",
+      name: "0",
+      sample_key: "0",
+      data_format: "float16_interleaved_le",
+      sample_rate_hz: 5e7,
+      center_frequency_hz: 2.434e9,
+      frequency_low_hz: 2.409e9,
+      frequency_high_hz: 2.459e9,
+      num_samples: 2_000_000,
+      duration_s: 0.04,
+      has_ground_truth: true,
+      analysis_count: 0,
+    };
+    return new Response(
+      JSON.stringify({ dataset_id: "ds_1", items: [sample], total: 1 }),
+      { status: 200 },
+    );
+  }
   if (url.includes("/api/datasets")) {
     return new Response(JSON.stringify({ items: [dataset], total: 1 }), { status: 200 });
   }
@@ -67,6 +87,7 @@ function renderPage() {
         <Routes>
           <Route path="/data-library" element={<DataLibraryPage />} />
           <Route path="/samples/:recordingId" element={<LocationProbe />} />
+          <Route path="/spectrum/:recordingId" element={<LocationProbe />} />
           <Route path="/data-library/datasets/:datasetId" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
@@ -182,10 +203,10 @@ test("Add Data menu lists Register Dataset above Add Standalone IQ", async () =>
   expect(labels.indexOf("Register Dataset")).toBeLessThan(labels.indexOf("Add Standalone IQ"));
 });
 
-test("dataset import entry point is a single Import Results action", async () => {
+test("dataset import entry point is a single Import Detection Results action", async () => {
   renderPage();
   const card = await screen.findByTestId("dataset-card");
-  fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
+  fireEvent.click(within(card).getByRole("button", { name: "Import Detection Results" }));
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText("Import Analysis Results")).toBeInTheDocument();
   expect(within(dialog).getByTestId("analysis-bundle-file-input")).toBeInTheDocument();
@@ -196,7 +217,23 @@ test("standalone sample row imports results", async () => {
   await screen.findAllByTestId("dataset-card");
   fireEvent.click(screen.getByRole("tab", { name: "Standalone Samples" }));
   const card = await screen.findByTestId("standalone-card");
-  fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
+  fireEvent.click(within(card).getByRole("button", { name: "Import Detection Results" }));
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText("Import Sample Analysis Results")).toBeInTheDocument();
+});
+
+test("standalone sample opens the time-frequency workspace directly", async () => {
+  renderPage();
+  await screen.findAllByTestId("dataset-card");
+  fireEvent.click(screen.getByRole("tab", { name: "Standalone Samples" }));
+  const card = await screen.findByTestId("standalone-card");
+  fireEvent.click(within(card).getByTestId("standalone-open-workspace"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_s1");
+});
+
+test("dataset opens the time-frequency workspace of its first sample", async () => {
+  renderPage();
+  const card = await screen.findByTestId("dataset-card");
+  fireEvent.click(within(card).getByTestId("dataset-open-workspace"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_sample_1");
 });
