@@ -171,6 +171,13 @@ test("overview shows first-class dataset metadata", async () => {
   expect(fetchCalls().some((call) => String(call[0]).includes("/api/datasets/ds_1"))).toBe(true);
 });
 
+test("top-right Back returns to the Data Library Datasets tab", async () => {
+  renderPage();
+  await screen.findByTestId("dataset-overview");
+  fireEvent.click(screen.getByTestId("dataset-back"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/data-library?tab=datasets");
+});
+
 test("samples tab uses the first-class samples endpoint and opens the Sample page", async () => {
   renderPage();
   fireEvent.click(await screen.findByRole("tab", { name: "Samples" }));

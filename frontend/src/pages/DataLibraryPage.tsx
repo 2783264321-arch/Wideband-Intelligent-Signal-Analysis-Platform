@@ -1,6 +1,6 @@
 import { Button, Dropdown, Input, Modal, Space, Tabs, Typography } from "antd";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { registerSpaceNetDataset } from "../api/client";
 import { toErrorText } from "../api/errors";
 import { PageHeader } from "../app/PageHeader";
@@ -13,9 +13,14 @@ import { StandaloneSampleList } from "../features/data-library/StandaloneSampleL
 /** The data-library surface a result import was launched from. */
 type ImportTarget = "dataset" | "sample";
 
+/** The library tab key carried in the ?tab= query parameter. */
+export type DataLibraryTab = "datasets" | "standalone";
+
 export function DataLibraryPage() {
   const { t } = useLocalization();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const tab: DataLibraryTab = params.get("tab") === "standalone" ? "standalone" : "datasets";
   const [iqOpen, setIqOpen] = useState(false);
   const [registerOpen, setRegisterOpen] = useState(false);
   const [importTarget, setImportTarget] = useState<ImportTarget | null>(null);
@@ -64,6 +69,8 @@ export function DataLibraryPage() {
       {error ? <Typography.Text type="danger">{error}</Typography.Text> : null}
 
       <Tabs
+        activeKey={tab}
+        onChange={(key) => setParams({ tab: key }, { replace: true })}
         items={[
           {
             key: "datasets",

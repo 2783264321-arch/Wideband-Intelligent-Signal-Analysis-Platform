@@ -52,15 +52,20 @@ export function DatasetDetailPage() {
         <Typography.Title level={3} style={{ marginBottom: 0 }}>
           {dataset ? `${dataset.name} · ${dataset.split}` : t("dataLibrary.title")}
         </Typography.Title>
-        <Button
-          danger
-          onClick={() => {
-            setBlockers([]);
-            setConfirmOpen(true);
-          }}
-        >
-          {t("dataLibrary.removeDataset")}
-        </Button>
+        <Space>
+          <Button data-testid="dataset-back" onClick={() => navigate("/data-library?tab=datasets")}>
+            {t("common.backToLibrary")}
+          </Button>
+          <Button
+            danger
+            onClick={() => {
+              setBlockers([]);
+              setConfirmOpen(true);
+            }}
+          >
+            {t("dataLibrary.removeDataset")}
+          </Button>
+        </Space>
       </div>
 
       <DeleteConflictAlert blockers={blockers} />

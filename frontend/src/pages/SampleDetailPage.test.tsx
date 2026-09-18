@@ -209,3 +209,18 @@ test("Analyze opens the real spectrum workspace", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Analyze" }));
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_1");
 });
+
+test("standalone sample Back returns to the Standalone Samples tab", async () => {
+  renderPage();
+  await screen.findByText("sample-a");
+  fireEvent.click(screen.getByTestId("sample-back"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/data-library?tab=standalone");
+});
+
+test("dataset member sample Back returns to the Datasets tab", async () => {
+  currentRecording = recordingWire({ dataset_name: "SpaceNet", dataset_split: "test", dataset_id: "ds_1", sample_key: "a" });
+  renderPage();
+  await screen.findByText("sample-a");
+  fireEvent.click(screen.getByTestId("sample-back"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/data-library?tab=datasets");
+});

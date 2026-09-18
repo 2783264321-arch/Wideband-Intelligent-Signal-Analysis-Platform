@@ -176,6 +176,12 @@ export function SampleDetailPage() {
           ) : null}
         </div>
         <Space>
+          <Button
+            data-testid="sample-back"
+            onClick={() => navigate(isDatasetMember ? "/data-library?tab=datasets" : "/data-library?tab=standalone")}
+          >
+            {t("common.backToLibrary")}
+          </Button>
           <Button type="primary" onClick={() => navigate(`/spectrum/${recordingId}`)}>
             {t("dataLibrary.analyze")}
           </Button>

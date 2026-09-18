@@ -62,6 +62,7 @@ export const enUS = {
   "samples.sourceLocal": "Local analysis",
   "samples.sourceImported": "Imported",
   "common.backTo": "Back",
+  "common.backToLibrary": "Data Library",
   "algorithmLab.comparingFor": "Single-recording A/B comparison workspace.",
   "dataLibrary.openSample": "Open Sample",
   "dataLibrary.name": "Name",

@@ -68,6 +68,7 @@ export const zhCN: Record<MessageKey, string> = {
   "samples.sourceLocal": "本平台检测",
   "samples.sourceImported": "外部导入",
   "common.backTo": "返回样本",
+  "common.backToLibrary": "返回数据管理",
   "algorithmLab.comparingFor": "单记录 A/B 对比工作台。",
   "dataLibrary.openSample": "打开样本",
   "dataLibrary.name": "名称",

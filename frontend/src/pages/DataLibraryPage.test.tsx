@@ -102,6 +102,23 @@ test("standalone tab requests server-side pagination", async () => {
   expect(fetchCalls().some((call) => String(call[0]).includes("standalone-samples?limit=20&offset=0"))).toBe(true);
 });
 
+test("the tab is carried in the query string both ways", async () => {
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/data-library?tab=standalone"]}>
+        <Routes>
+          <Route path="/data-library" element={<DataLibraryPage />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
+  );
+  // A deep link with ?tab=standalone opens that tab directly.
+  expect(await screen.findByRole("tab", { name: "Standalone Samples" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
 test("dataset removal confirmation states external files are not deleted", async () => {
   renderPage();
   await screen.findAllByTestId("dataset-card");
