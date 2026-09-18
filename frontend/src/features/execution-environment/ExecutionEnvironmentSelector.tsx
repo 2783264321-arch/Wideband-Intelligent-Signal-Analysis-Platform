@@ -1,5 +1,6 @@
 import { Alert, Button, Select, Typography } from "antd";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { getDiscoveredLocalRuntimes, type DiscoveredLocalRuntime } from "../../api/client";
 import { optionsFromSelection, type ExecutorOptionKey, type ExecutorOptionState, type ExecutorOptionStateKind } from "./executionEnvironment";
 import { useLocalization } from "../../localization/useLocalization";
 import type { MessageKey } from "../../localization/types";
@@ -41,12 +42,30 @@ export function ExecutionEnvironmentSelector({
   value,
   onChange,
   disabled,
+  compact = false,
 }: ExecutionEnvironmentSelectorProps) {
   const { t } = useLocalization();
   const [showDetails, setShowDetails] = useState(false);
 
   const options = useMemo(() => optionsFromSelection(selection), [selection]);
   const locked = disabled === true || loading || error !== null;
+  const [runtimes, setRuntimes] = useState<DiscoveredLocalRuntime[]>([]);
+
+  // Discovered runtimes load only when details are opened (lazy diagnostic).
+  useEffect(() => {
+    if (!showDetails || runtimes.length > 0) return;
+    let active = true;
+    getDiscoveredLocalRuntimes()
+      .then((items) => {
+        if (items.length > 0) setRuntimes(items);
+      })
+      .catch(() => {
+        /* diagnostic only: absence is fine */
+      });
+    return () => {
+      active = false;
+    };
+  }, [showDetails, runtimes.length]);
 
   const labelFor = (option: ExecutorOptionState): string => t(optionLabelKey[option.key]);
 
@@ -75,13 +94,15 @@ export function ExecutionEnvironmentSelector({
 
   return (
     <div data-testid="execution-environment-selector">
-      <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>
-        {t("executionEnv.fieldLabel")}
-      </Typography.Text>
+      {compact ? null : (
+        <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>
+          {t("executionEnv.fieldLabel")}
+        </Typography.Text>
+      )}
       <Select
         data-testid="execution-environment-select"
         aria-label={t("executionEnv.title")}
-        style={{ minWidth: 220 }}
+        style={{ minWidth: compact ? 170 : 220 }}
         value={loading ? undefined : selectedKey}
         placeholder={loading ? t("executionEnv.checking") : undefined}
         loading={loading}
@@ -96,7 +117,7 @@ export function ExecutionEnvironmentSelector({
           {error}
         </Typography.Text>
       ) : null}
-      {noRunnable ? (
+      {noRunnable && !compact ? (
         <Alert
           type="warning"
           showIcon
@@ -108,11 +129,11 @@ export function ExecutionEnvironmentSelector({
       ) : null}
       <div>
         <Button type="link" size="small" style={{ paddingLeft: 0 }} onClick={() => setShowDetails((current) => !current)}>
-          {t("executionEnv.details")}
+          {noRunnable ? t("executionEnv.whyNotRunnable") : t("executionEnv.details")}
         </Button>
       </div>
       {showDetails ? (
-        <div data-testid="execution-environment-details" style={{ maxWidth: 320 }}>
+        <div data-testid="execution-environment-details" style={{ maxWidth: 340 }}>
           {selection !== null && selection.reasonCode !== null ? (
             <Typography.Text type="secondary" data-testid="execution-environment-reason-code">
               {selection.reasonCode}
@@ -126,6 +147,28 @@ export function ExecutionEnvironmentSelector({
               </li>
             ))}
           </ul>
+          {runtimes.length > 0 ? (
+            <>
+              <Typography.Text type="secondary" style={{ display: "block", marginTop: 8 }}>
+                {t("executionEnv.discoveredTitle")}
+              </Typography.Text>
+              <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                {runtimes.map((runtime) => (
+                  <li key={runtime.pythonPath} data-testid="execution-runtime-discovered">
+                    {runtime.version !== null ? `Python ${runtime.version}` : "Python"}
+                    {": "}
+                    {[runtime.torch ? "torch" : null, runtime.ultralytics ? "ultralytics" : null]
+                      .filter(Boolean)
+                      .join(" + ") || t("executionEnv.discoveredNoMl")}
+                    {runtime.isConfiguredLocalCpu ? ` (${t("executionEnv.discoveredWired")})` : ""}
+                  </li>
+                ))}
+              </ul>
+              <Typography.Text type="secondary" style={{ display: "block", marginTop: 6 }}>
+                {t("executionEnv.discoveredHint")}
+              </Typography.Text>
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>

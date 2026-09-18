@@ -143,8 +143,8 @@ export function SpectrogramViewer({
                   {...geometry}
                   fill="transparent"
                   stroke={token.colorSuccess}
-                  strokeWidth={0.45}
-                  strokeDasharray="1.4 1"
+                  strokeWidth={2}
+                  strokeDasharray="6 3"
                   vectorEffect="non-scaling-stroke"
                   aria-label={t("spectrum.groundTruthBox", { id: item.id })}
                 />
@@ -168,14 +168,24 @@ export function SpectrogramViewer({
                   }}
                   style={{ cursor: "pointer" }}
                 >
+                  {selected ? (
+                    <rect
+                      data-testid={`overlay-det-glow-${detection.id}`}
+                      {...geometry}
+                      fill={token.colorError}
+                      fillOpacity={0.14}
+                      stroke="none"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ) : null}
                   <rect
                     data-testid={`overlay-det-${detection.id}`}
                     data-overlay="prediction"
                     data-selected={selected ? "true" : "false"}
                     {...geometry}
-                    fill="transparent"
+                    fill={selected ? "rgba(0,0,0,0)" : "transparent"}
                     stroke={selected ? token.colorError : token.colorWarning}
-                    strokeWidth={selected ? 0.9 : 0.45}
+                    strokeWidth={selected ? 3 : 2}
                     vectorEffect="non-scaling-stroke"
                   />
                 </g>
@@ -192,7 +202,7 @@ export function SpectrogramViewer({
         <span>{t("spectrum.legend")}</span>
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <svg width="18" height="8" aria-hidden="true">
-            <rect x="1" y="1" width="16" height="6" fill="transparent" stroke={token.colorSuccess} strokeWidth="2" strokeDasharray="3 2" />
+            <rect x="1" y="1" width="16" height="6" fill="transparent" stroke={token.colorSuccess} strokeWidth="2" strokeDasharray="4 2" />
           </svg>
           {t("spectrum.legendGroundTruth")}
         </span>
@@ -204,7 +214,7 @@ export function SpectrogramViewer({
         </span>
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <svg width="18" height="8" aria-hidden="true">
-            <rect x="1" y="1" width="16" height="6" fill="transparent" stroke={token.colorError} strokeWidth="3" />
+            <rect x="1" y="1" width="16" height="6" fill={token.colorError} fillOpacity={0.14} stroke={token.colorError} strokeWidth="3" />
           </svg>
           {t("spectrum.legendSelected")}
         </span>

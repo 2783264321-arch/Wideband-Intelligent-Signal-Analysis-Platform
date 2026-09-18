@@ -231,6 +231,33 @@ export async function importRecording(form: FormData): Promise<RecordingDetail> 
   return mapRecording(await response.json() as RecordingWire);
 }
 
+export interface DiscoveredLocalRuntime {
+  pythonPath: string;
+  available: boolean;
+  version: string | null;
+  torch: boolean;
+  ultralytics: boolean;
+  isControlPlane: boolean;
+  isConfiguredLocalCpu: boolean;
+}
+
+/**
+ * Operator diagnostic: which local interpreters can actually run pytorch
+ * inference. Read-only, never identity material, safe to fail silently.
+ */
+export async function getDiscoveredLocalRuntimes(): Promise<DiscoveredLocalRuntime[]> {
+  const wire = await apiGet<{ runtimes: Array<Record<string, unknown>> }>("/api/runtime-discovery");
+  return wire.runtimes.map((item) => ({
+    pythonPath: String(item.python_path ?? ""),
+    available: Boolean(item.available),
+    version: typeof item.version === "string" ? item.version : null,
+    torch: Boolean(item.torch),
+    ultralytics: Boolean(item.ultralytics),
+    isControlPlane: Boolean(item.is_control_plane),
+    isConfiguredLocalCpu: Boolean(item.is_configured_local_cpu),
+  }));
+}
+
 export interface RegisterRecordingPathRequest {
   path: string;
   name: string;

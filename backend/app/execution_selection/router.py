@@ -12,10 +12,37 @@ from app.datasets.analysis_manifest import build_dataset_analysis_manifest
 from app.execution_selection.resolver import resolve_auto_execution
 from app.execution_selection.schema import ExecutionCandidateRead, ExecutorSelectionRead
 from app.recordings.model import RecordingModel
+from app.runtime_qualification.doctor import discover_local_runtimes
 
 router = APIRouter(tags=["executor-selection"])
 
 _SCOPE_INVALID = "EXECUTION_SELECTION_REQUEST_INVALID"
+
+
+@router.get("/api/runtime-discovery")
+def runtime_discovery(request: Request):
+    """Operator diagnostic: which local interpreters can run pytorch inference.
+
+    Read-only, bounded and diagnostic-only: it returns importability of the ML
+    stack per candidate interpreter, never identity material and never anything
+    from the operator's filesystem beyond interpreter paths + versions.
+    """
+    settings = request.app.state.settings
+    runtimes = discover_local_runtimes(settings)
+    return {
+        "runtimes": [
+            {
+                "python_path": item.python_path,
+                "available": item.available,
+                "version": item.version,
+                "torch": item.torch,
+                "ultralytics": item.ultralytics,
+                "is_control_plane": item.is_control_plane,
+                "is_configured_local_cpu": item.is_configured_local_cpu,
+            }
+            for item in runtimes
+        ]
+    }
 
 
 def _resolve_release(definition, requested, model_release_store):

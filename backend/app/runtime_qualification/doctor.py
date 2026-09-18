@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import platform as _platform
+import json
 import shutil
 import subprocess
 import sys
@@ -61,6 +62,24 @@ class ProviderSpec:
     device_type: str
     precision: str
     identity_scheme: str = IDENTITY_UNAVAILABLE
+
+
+@dataclass(frozen=True)
+class DiscoveredRuntime:
+    """One candidate local interpreter and the ML stack actually importable on it.
+
+    Diagnostic-only (operator help), never identity material: discovery helps an
+    operator point ``WSP_LOCAL_CPU_PYTHON_PATH`` at an interpreter that actually
+    has pytorch installed, instead of a generic python that does not.
+    """
+
+    python_path: str
+    available: bool
+    version: str | None
+    torch: bool
+    ultralytics: bool
+    is_control_plane: bool
+    is_configured_local_cpu: bool
 
 
 @dataclass(frozen=True)
@@ -127,9 +146,87 @@ class SubprocessInterpreterProbe:
         return InterpreterReport(True, lines[-1] if lines else None, str(path))
 
 
+_DISCOVERY_PROBE_SNIPPET = (
+    "import json, sys\n"
+    "import importlib.util as u\n"
+    "print(json.dumps({'python': sys.version.split()[0],"
+    " 'torch': u.find_spec('torch') is not None,"
+    " 'ultralytics': u.find_spec('ultralytics') is not None}))\n"
+)
+
+
+def _inspect_ml_stack(python_path: Path) -> DiscoveredRuntime:
+    """Best-effort read-only ML-stack inspection; never crashes the doctor."""
+    payload = {"python": None, "torch": False, "ultralytics": False}
+    available = False
+    try:
+        result = subprocess.run(
+            [str(python_path), "-c", _DISCOVERY_PROBE_SNIPPET],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        available = result.returncode == 0
+        for line in reversed((result.stdout or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    parsed = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    payload = parsed
+                    available = payload.get("python") is not None
+                    break
+    except (OSError, subprocess.SubprocessError):
+        available = False
+    return DiscoveredRuntime(
+        python_path=str(python_path),
+        available=available,
+        version=payload.get("python") if available else None,
+        torch=bool(payload.get("torch")),
+        ultralytics=bool(payload.get("ultralytics")),
+        is_control_plane=False,
+        is_configured_local_cpu=False,
+    )
+
+
+def discover_local_runtimes(settings: Settings) -> list[DiscoveredRuntime]:
+    """Best-effort scan for local interpreters that can run pytorch inference.
+
+    Diagnostics only: it never imports torch into this process and never rewrites
+    configuration. Results help the operator decide where each pipeline can run.
+    """
+    candidates: list[tuple[Path, bool]] = []
+    if settings.local_cpu_python_path is not None:
+        candidates.append((Path(settings.local_cpu_python_path), True))
+    candidates.append((Path(sys.executable), True))
+    seen: set[str] = set()
+    discovered: list[DiscoveredRuntime] = []
+    for path, is_configured in candidates:
+        key = str(path).lower()
+        if key in seen or not path.is_file():
+            continue
+        seen.add(key)
+        report = _inspect_ml_stack(path)
+        if report.available:
+            discovered.append(
+                DiscoveredRuntime(
+                    python_path=report.python_path,
+                    available=True,
+                    version=report.version,
+                    torch=report.torch,
+                    ultralytics=report.ultralytics,
+                    is_control_plane=not is_configured,
+                    is_configured_local_cpu=is_configured,
+                )
+            )
+    return discovered
+
+
 class NvidiaSmiGpuProbe:
     """Optional CUDA diagnostic only. Absence of ``nvidia-smi`` is safe."""
-
     def inspect(self) -> GpuReport:
         exe = shutil.which("nvidia-smi")
         if exe is None:

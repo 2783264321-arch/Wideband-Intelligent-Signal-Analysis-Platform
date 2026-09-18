@@ -15,4 +15,7 @@ export interface ExecutionEnvironmentSelectorProps {
   value: ExecutionEnvironmentValue;
   onChange: (value: ExecutionEnvironmentValue) => void;
   disabled?: boolean;
+  /** Hides the field label and the standing "not runnable" banner; the link
+   *  remains so reasons are still reachable. Used on dense workspaces. */
+  compact?: boolean;
 }

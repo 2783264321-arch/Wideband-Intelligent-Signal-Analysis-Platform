@@ -193,16 +193,13 @@ export function SpectrumAnalysisPage() {
         </div>
         <Space wrap size="middle" align="end">
           <div>
-            <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>{t("spectrum.algorithmLabel")}</Typography.Text>
-            <Space>
-              <Select value="stft" style={{ width: 96 }} options={[{ value: "stft", label: "STFT" }]} />
-              <Select
-                value={pipelineId}
-                style={{ width: 320 }}
-                onChange={setPipelineId}
-                options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
-              />
-            </Space>
+            <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>{t("spectrum.pipelineLabel")}</Typography.Text>
+            <Select
+              value={pipelineId}
+              style={{ width: 320 }}
+              onChange={setPipelineId}
+              options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
+            />
           </div>
           <ExecutionEnvironmentSelector
             selection={effectiveSelection}
@@ -211,6 +208,7 @@ export function SpectrumAnalysisPage() {
             value={environment}
             onChange={setEnvironment}
             disabled={runActive}
+            compact
           />
           <Button type="primary" loading={runActive} disabled={!canRun} onClick={() => void runAnalysis()}>
             {runActive ? t("common.analyzing") : t("common.runAnalysis")}

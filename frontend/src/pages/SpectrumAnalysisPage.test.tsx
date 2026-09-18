@@ -257,7 +257,10 @@ test("an unavailable executor disables the run with the backend reason and no fa
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
   const button = await screen.findByRole("button", { name: "Run Analysis" });
   await waitFor(() => expect(button).toBeDisabled());
-  expect(screen.getByTestId("execution-environment-no-runnable")).toHaveTextContent("This algorithm cannot run right now.");
+  // The standing banner is compacted behind the why-link on this dense page.
+  expect(screen.getByRole("button", { name: /Why can't this pipeline run/i })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /Why can't this pipeline run/i }));
+  expect(screen.getByTestId("execution-option-remote_gpu")).toBeInTheDocument();
 });
 
 test("stale executor-selection response from the previous pipeline is ignored", async () => {
@@ -275,7 +278,9 @@ test("stale executor-selection response from the previous pipeline is ignored", 
   fireEvent.mouseDown(screen.getByText("Remote A · GPU"));
   fireEvent.click(await screen.findByTitle("Remote B · GPU"));
   await waitFor(() => expect(selectionCalls).toEqual(["pA", "pB"]));
-  await waitFor(() => expect(screen.getByTestId("execution-environment-no-runnable")).toBeInTheDocument());
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /Why can't this pipeline run/i })).toBeInTheDocument(),
+  );
   expect(screen.getByRole("button", { name: "Run Analysis" })).toBeDisabled();
 
   // A's deferred selection resolves now, but must not be applied (stale).
@@ -283,7 +288,7 @@ test("stale executor-selection response from the previous pipeline is ignored", 
     resolveDeferred()?.(new Response(JSON.stringify(selectionRemoteAvailable)));
     await Promise.resolve();
   });
-  expect(screen.getByTestId("execution-environment-no-runnable")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /Why can't this pipeline run/i })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Run Analysis" })).toBeDisabled();
 });
 
@@ -500,10 +505,13 @@ test("localizes the spectrum workspace shell and run controls in zh-CN while pre
   expect(screen.queryByRole("button", { name: "Run Analysis" })).toBeNull();
   expect(screen.getByText("检测结果")).toBeInTheDocument();
   expect(screen.getByText("真值标注（GT）")).toBeInTheDocument();
-  // Technical presentation is unchanged: Fs/Fc units and the STFT token.
+  // Technical presentation is unchanged: Fs/Fc units retain their tokens.
   expect(screen.getByText(/Fs 1\.000 MHz/)).toBeInTheDocument();
   expect(screen.getByText(/Fc 2\.441000 GHz/)).toBeInTheDocument();
-  expect(screen.getByText("STFT")).toBeInTheDocument();
+  // The STFT representation selector is removed; the pipeline select is labeled
+  // 算法流水线 and there is exactly one visible pipeline select control.
+  expect(screen.getByText("算法流水线")).toBeInTheDocument();
+  expect(screen.queryByText("STFT")).toBeNull();
 });
 
 test("localizes the active run control in zh-CN", async () => {

@@ -193,6 +193,31 @@ test("no-runnable state is concise and keeps details accessible", () => {
   render(
     renderWithLocalization(
       <ExecutionEnvironmentSelector
+        compact
+        selection={selection({
+          resolvedExecutor: null,
+          reasonCode: "AUTO_NO_RUNNABLE_EXECUTOR",
+          reason: "No runnable executor.",
+          candidates: [candidate({ executor: "local_cpu", configured: false, certified: false, available: false })],
+        })}
+        loading={false}
+        error={null}
+        value={AUTO_VALUE}
+        onChange={() => {}}
+      />,
+    ),
+  );
+  // Compact mode removes the standing banner; the reason stays one click away
+  // behind the why-link.
+  expect(screen.queryByTestId("execution-environment-no-runnable")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Why can't this pipeline run/i }));
+  expect(screen.getByTestId("execution-option-local_cpu")).toHaveTextContent("Not configured");
+});
+
+test("non-compact mode keeps the standing not-runnable banner visible", () => {
+  render(
+    renderWithLocalization(
+      <ExecutionEnvironmentSelector
         selection={selection({
           resolvedExecutor: null,
           reasonCode: "AUTO_NO_RUNNABLE_EXECUTOR",
@@ -207,10 +232,6 @@ test("no-runnable state is concise and keeps details accessible", () => {
     ),
   );
   expect(screen.getByTestId("execution-environment-no-runnable")).toHaveTextContent("This algorithm cannot run right now.");
-  expect(screen.getByTestId("execution-environment-no-runnable")).toHaveTextContent("The local execution environment is unavailable.");
-  expect(screen.queryByTestId("execution-environment-details")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Environment details" }));
-  expect(screen.getByTestId("execution-option-local_cpu")).toHaveTextContent("Not configured");
 });
 
 test("a certified-but-unavailable manual executor is not offered and never falls back", () => {

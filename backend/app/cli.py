@@ -10,7 +10,7 @@ Also runnable as ``python -m app.cli``. No HTTP API, no frontend.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import sys
@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime = sub.add_parser("runtime")
     runtime_sub = runtime.add_subparsers(dest="runtime_command")
     runtime_sub.add_parser("doctor")
+    runtime_sub.add_parser("discover")
 
     qualify = sub.add_parser("qualify")
     qualify.add_argument("--plugin", required=True)
@@ -183,6 +184,17 @@ def _cmd_runtime_doctor(ctx: CliContext, out) -> int:
         identity_resolver=_make_identity_resolver(repo_provenance),
     )
     print(json.dumps(report.to_operator_json(), indent=2), file=out)
+    return 0
+
+
+def _cmd_runtime_discover(ctx: CliContext, out) -> int:
+    """Report local interpreters that can actually run pytorch inference.
+
+    Diagnostic-only: helps an operator pick ``WSP_LOCAL_CPU_PYTHON_PATH`` when a
+    pipeline reports "cannot run" despite being technically CPU-capable.
+    """
+    discovered = doctor_module.discover_local_runtimes(ctx.settings)
+    print(json.dumps({"runtimes": [asdict(item) for item in discovered]}, indent=2), file=out)
     return 0
 
 
@@ -306,6 +318,8 @@ def main(
         ctx = (context_factory or _default_context)(Settings())
         if args.command == "runtime" and args.runtime_command == "doctor":
             return _cmd_runtime_doctor(ctx, out)
+        if args.command == "runtime" and args.runtime_command == "discover":
+            return _cmd_runtime_discover(ctx, out)
         if args.command == "qualify":
             return _cmd_qualify(ctx, args, out)
         if args.command == "certificate" and args.certificate_command == "install":
