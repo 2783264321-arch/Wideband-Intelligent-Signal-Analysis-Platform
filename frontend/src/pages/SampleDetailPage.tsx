@@ -20,6 +20,9 @@ import { SampleSpectrogramView } from "../features/representations/SampleSpectro
  * One product workspace for BOTH Dataset samples and Standalone samples.
  * Dataset membership comes from ``recording.datasetId``. Representations are
  * lazy: each tab fetches only when first activated and caches for the session.
+ *
+ * Tabs follow the user's mental model: 基本信息 (what is this sample) →
+ * 可视化 (what does it look like) → 检测记录 (what did we find, and from where).
  */
 export function SampleDetailPage() {
   const { recordingId = "" } = useParams();
@@ -56,37 +59,41 @@ export function SampleDetailPage() {
 
   const isDatasetMember = recording?.datasetId != null;
 
-  const overview = recording ? (
-    <Descriptions
-      column={2}
-      data-testid="sample-overview"
-      items={[
-        { key: "fs", label: "Fs", children: `${(recording.sampleRateHz / 1e6).toFixed(3)} MHz` },
-        {
-          key: "fc",
-          label: "Fc",
-          children: `${(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz`,
-        },
-        {
-          key: "range",
-          label: t("dataLibrary.frequencyRange"),
-          children: `${(recording.frequencyLowHz / 1e6).toFixed(3)}–${(recording.frequencyHighHz / 1e6).toFixed(3)} MHz`,
-        },
-        { key: "duration", label: "Duration", children: `${recording.durationS.toFixed(6)} s` },
-        { key: "format", label: "Format", children: recording.dataFormat },
-        {
-          key: "gt",
-          label: t("common.groundTruth"),
-          children: recording.hasGroundTruth ? "✓" : "—",
-        },
-        { key: "count", label: t("dataLibrary.analysisHistory"), children: runs.length },
-      ]}
-    />
+  const info = recording ? (
+    <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+      <Descriptions
+        column={1}
+        data-testid="sample-overview"
+        style={{ minWidth: 260 }}
+        items={[
+          {
+            key: "shape",
+            label: t("samples.dataShape"),
+            children: `${recording.numSamples.toLocaleString()} 样本`,
+          },
+          { key: "duration", label: t("samples.duration"), children: `${recording.durationS.toFixed(6)} s` },
+          { key: "format", label: t("samples.format"), children: recording.dataFormat },
+        ]}
+      />
+      <Descriptions
+        column={1}
+        data-testid="sample-info-right"
+        items={[
+          {
+            key: "range",
+            label: t("dataLibrary.frequencyRange"),
+            children: `${(recording.frequencyLowHz / 1e6).toFixed(3)}–${(recording.frequencyHighHz / 1e6).toFixed(3)} MHz`,
+          },
+          { key: "fs", label: "Fs", children: `${(recording.sampleRateHz / 1e6).toFixed(3)} MHz` },
+          { key: "fc", label: "Fc", children: `${(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz` },
+        ]}
+      />
+    </div>
   ) : (
     <Typography.Text>{t("common.loading")}</Typography.Text>
   );
 
-  const history = (
+  const detections = (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       <List
         dataSource={runs}
@@ -95,15 +102,30 @@ export function SampleDetailPage() {
           <List.Item
             data-testid="run-history-item"
             actions={[
-              <Button key="view" type="link" onClick={() => navigate(`/signals/${run.id}`)}>
-                {t("dataLibrary.viewResults")}
-              </Button>,
+              run.status === "completed" ? (
+                <Button key="view" type="link" onClick={() => navigate(`/spectrum/${recordingId}?run=${run.id}`)}>
+                  {t("dataLibrary.viewResults")}
+                </Button>
+              ) : null,
             ]}
           >
-            <Space wrap>
-              <Tag>{run.pipelineId}</Tag>
-              <Tag>{run.status}</Tag>
-              <span>{run.id}</span>
+            <Space wrap size={12}>
+              <span data-testid="run-history-time">
+                {run.startedAt ? new Date(run.startedAt).toLocaleString() : run.createdAt ? new Date(run.createdAt).toLocaleString() : "—"}
+              </span>
+              <Tag data-testid="run-history-pipeline">{run.pipelineId}</Tag>
+              {run.executor === "imported" ? (
+                <Tag color="purple" data-testid="run-history-source">
+                  {t("samples.sourceImported")}
+                </Tag>
+              ) : (
+                <Tag color="green" data-testid="run-history-source">
+                  {t("samples.sourceLocal")}
+                </Tag>
+              )}
+              {run.status !== "completed" ? (
+                <Tag>{run.status}</Tag>
+              ) : null}
             </Space>
           </List.Item>
         )}
@@ -175,25 +197,34 @@ export function SampleDetailPage() {
 
       <Tabs
         items={[
-          { key: "overview", label: t("dataLibrary.overview"), children: overview },
+          { key: "info", label: t("samples.tabInfo"), children: info },
           {
-            key: "time",
-            label: t("representation.timeDomain"),
+            key: "visualize",
+            label: t("samples.tabVisualize"),
             children: recording ? (
-              <TimeDomainView recordingId={recordingId} durationS={recording.durationS} />
+              <Tabs
+                type="card"
+                items={[
+                  {
+                    key: "time",
+                    label: t("representation.timeDomain"),
+                    children: <TimeDomainView recordingId={recordingId} durationS={recording.durationS} />,
+                  },
+                  {
+                    key: "spectrum",
+                    label: t("representation.spectrum"),
+                    children: <SpectrumView recordingId={recordingId} />,
+                  },
+                  {
+                    key: "spectrogram",
+                    label: t("representation.spectrogram"),
+                    children: <SampleSpectrogramView recordingId={recordingId} />,
+                  },
+                ]}
+              />
             ) : null,
           },
-          {
-            key: "spectrum",
-            label: t("representation.spectrum"),
-            children: <SpectrumView recordingId={recordingId} />,
-          },
-          {
-            key: "spectrogram",
-            label: t("representation.spectrogram"),
-            children: <SampleSpectrogramView recordingId={recordingId} />,
-          },
-          { key: "history", label: t("dataLibrary.analysisHistory"), children: history },
+          { key: "detections", label: t("samples.tabDetections"), children: detections },
         ]}
       />
 

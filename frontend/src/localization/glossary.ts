@@ -7,7 +7,7 @@ export const DOMAIN_GLOSSARY = {
   recordings: { en: "Recordings", zh: "信号记录" },
   dataLibrary: { en: "Data Library", zh: "数据管理" },
   userGuide: { en: "User Guide", zh: "使用指南" },
-  spectrumAnalysis: { en: "Spectrum Analysis", zh: "频谱分析" },
+  spectrumAnalysis: { en: "Signal Time-Frequency Localization & ID", zh: "信号时频定位与识别" },
   spectrogram: { en: "Spectrogram", zh: "时频图" },
   signals: { en: "Signals", zh: "信号检测结果" },
   signalDetail: { en: "Signal Detail", zh: "检测结果详情" },

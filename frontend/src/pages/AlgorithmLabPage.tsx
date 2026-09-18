@@ -1,4 +1,4 @@
-import { Tabs } from "antd";
+import { Button, Space, Tabs, Typography } from "antd";
 import { useLocalization } from "../localization/useLocalization";
 import { useEffect } from "react";
 import { useNavigate, useSearchParams, useLocation } from "react-router-dom";
@@ -10,6 +10,9 @@ import { rememberAlgorithmLabRoute } from "../app/workspaceMemory";
  * Dataset-level benchmarks were re-homed under the Experiments destination; the
  * legacy `/algorithm-lab?tab=benchmarks&benchmark=<id>` links are redirected to
  * `/experiments?tab=benchmarks&benchmark=<id>` for compatibility.
+ *
+ * The workspace always offers a way back to the sample it came from, so a
+ * comparison deep-link is never a dead end.
  */
 export function AlgorithmLabPage() {
   const { t } = useLocalization();
@@ -43,24 +46,34 @@ export function AlgorithmLabPage() {
   };
 
   return (
-    <Tabs
-      activeKey="case"
-      items={[
-        {
-          key: "case",
-          label: t("algorithmLab.caseAnalysisTab"),
-          children: (
-            <CaseAnalysisView
-              recordingId={recordingId}
-              runAId={runAId}
-              runBId={runBId}
-              onRecordingChange={(id) => patch({ recording: id, runA: undefined, runB: undefined })}
-              onRunAChange={(id) => patch({ runA: id })}
-              onRunBChange={(id) => patch({ runB: id })}
-            />
-          ),
-        },
-      ]}
-    />
+    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+      {recordingId ? (
+        <Space wrap>
+          <Button data-testid="algorithm-lab-back" onClick={() => navigate(`/samples/${recordingId}`)}>
+            {t("common.backTo")}
+          </Button>
+          <Typography.Text type="secondary">{t("algorithmLab.comparingFor")}</Typography.Text>
+        </Space>
+      ) : null}
+      <Tabs
+        activeKey="case"
+        items={[
+          {
+            key: "case",
+            label: t("algorithmLab.caseAnalysisTab"),
+            children: (
+              <CaseAnalysisView
+                recordingId={recordingId}
+                runAId={runAId}
+                runBId={runBId}
+                onRecordingChange={(id) => patch({ recording: id, runA: undefined, runB: undefined })}
+                onRunAChange={(id) => patch({ runA: id })}
+                onRunBChange={(id) => patch({ runB: id })}
+              />
+            ),
+          },
+        ]}
+      />
+    </Space>
   );
 }

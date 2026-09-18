@@ -181,8 +181,13 @@ export function SpectrumAnalysisPage() {
       {error ? <Alert type="error" showIcon message={t("spectrum.warning")} description={error} closable onClose={() => setError(null)} /> : null}
       <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
         <div>
-          <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>
-          <Typography.Text type="secondary">
+          <Space wrap>
+            <Button data-testid="spectrum-back" onClick={() => navigate(`/samples/${recordingId}`)}>
+              {t("common.backTo")}
+            </Button>
+            <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>
+          </Space>
+          <Typography.Text type="secondary" style={{ display: "block" }}>
             Fs {(recording.sampleRateHz / 1e6).toFixed(3)} MHz · Fc {(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz · {recording.durationS.toFixed(6)} s
           </Typography.Text>
         </div>

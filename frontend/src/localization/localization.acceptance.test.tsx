@@ -143,7 +143,7 @@ test("primary navigation is exactly the five intended destinations in both local
 const TERMINOLOGY: Array<[MessageKey, string, string]> = [
   ["app.title", "Wideband Signal Lab", "宽带智能信号分析平台"],
   ["nav.recordings", "Recordings", "信号记录"],
-  ["spectrum.title", "Spectrum Analysis", "频谱分析"],
+  ["spectrum.title", "Signal Time-Frequency Localization & ID", "信号时频定位与识别"],
   ["signals.title", "Signals", "信号检测结果"],
   ["signalDetail.title", "Signal Detail", "检测结果详情"],
   ["common.groundTruth", "Ground Truth", "真值标注（GT）"],

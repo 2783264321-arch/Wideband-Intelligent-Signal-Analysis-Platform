@@ -99,22 +99,31 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-test("renders the five representation tabs", async () => {
+test("renders the three user-facing tabs with the representation sub-tabs", async () => {
   renderPage();
   await screen.findByText("sample-a");
-  for (const label of ["Overview", "Time Domain", "Spectrum", "Spectrogram", "Analysis History"]) {
+  for (const label of ["Sample Info", "Visualize", "Detections"]) {
+    expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
+  }
+  expect(screen.queryByRole("tab", { name: "Overview" })).toBeNull();
+
+  // Representation sub-tabs live inside the Visualize tab.
+  fireEvent.click(screen.getByRole("tab", { name: "Visualize" }));
+  await screen.findByRole("tab", { name: "Time Domain" });
+  for (const label of ["Time Domain", "Spectrum", "Spectrogram"]) {
     expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
   }
 });
 
-test("representations are lazy: nothing fetched until its tab is opened", async () => {
+test("representations are lazy: nothing fetched until its sub-tab is opened", async () => {
   renderPage();
   await screen.findByText("sample-a");
   expect(fetchCalls().some((url) => url.includes("/waveform"))).toBe(false);
   expect(fetchCalls().some((url) => url.includes("/spectrum"))).toBe(false);
   expect(fetchCalls().some((url) => url.includes("/spectrogram"))).toBe(false);
 
-  fireEvent.click(screen.getByRole("tab", { name: "Time Domain" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Visualize" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Time Domain" }));
   await screen.findByTestId("line-series-I");
   expect(fetchCalls().some((url) => url.includes("/waveform"))).toBe(true);
   expect(fetchCalls().some((url) => url.includes("/spectrum"))).toBe(false);
@@ -131,6 +140,7 @@ test("representations are lazy: nothing fetched until its tab is opened", async 
 
 test("Time Domain I/Q renders two series; Magnitude and Phase derive client-side", async () => {
   renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Visualize" }));
   fireEvent.click(await screen.findByRole("tab", { name: "Time Domain" }));
   expect(await screen.findByTestId("line-series-I")).toBeInTheDocument();
   expect(screen.getByTestId("line-series-Q")).toBeInTheDocument();
@@ -145,6 +155,7 @@ test("Time Domain I/Q renders two series; Magnitude and Phase derive client-side
 
 test("Spectrum renders frequency/power data with a secondary FFT summary", async () => {
   renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Visualize" }));
   fireEvent.click(await screen.findByRole("tab", { name: "Spectrum" }));
   expect(await screen.findByTestId("spectrum-plot")).toBeInTheDocument();
   expect(screen.getByTestId("spectrum-summary")).toHaveTextContent("FFT 4096 · 8 segments");
@@ -153,6 +164,7 @@ test("Spectrum renders frequency/power data with a secondary FFT summary", async
 
 test("pure Spectrogram never shows the overlay legend", async () => {
   renderPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "Visualize" }));
   fireEvent.click(await screen.findByRole("tab", { name: "Spectrogram" }));
   await screen.findByTestId("sample-spectrogram");
   expect(screen.queryByTestId("spectrogram-legend")).toBeNull();
@@ -179,13 +191,17 @@ test("renders a standalone member with Delete and Analyze", async () => {
   expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
 });
 
-test("Analysis History tab shows prior runs with View Results", async () => {
+test("Detections tab is user-friendly: time, pipeline, source, and spectrum view", async () => {
   renderPage();
-  fireEvent.click(await screen.findByRole("tab", { name: "Analysis History" }));
+  fireEvent.click(await screen.findByRole("tab", { name: "Detections" }));
   const item = await screen.findByTestId("run-history-item");
   expect(item).toHaveTextContent("stft_energy_detector");
+  expect(item).toHaveTextContent("Local analysis");
+  expect(item).toHaveTextContent(/2026|—/);
+  // No machine hash exposed to the user.
+  expect(item.textContent).not.toContain("run_1");
   fireEvent.click(within(item).getByRole("button", { name: "View Results" }));
-  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/signals/run_1");
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_1?run=run_1");
 });
 
 test("Analyze opens the real spectrum workspace", async () => {

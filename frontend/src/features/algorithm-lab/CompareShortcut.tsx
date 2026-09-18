@@ -35,6 +35,7 @@ export function CompareShortcut({ recordingId, hasGroundTruth, runs, onCompare }
     <Space direction="vertical" style={{ width: "100%" }}>
       {runs.map((run) => {
         const selectable = run.status === "completed" && run.recordingId === recordingId;
+        const when = run.startedAt ?? run.createdAt;
         return (
           <Checkbox
             key={run.id}
@@ -43,7 +44,7 @@ export function CompareShortcut({ recordingId, hasGroundTruth, runs, onCompare }
             aria-label={run.id}
             onChange={(event) => toggle(run.id, event.target.checked)}
           >
-            {`${run.id} · ${run.pipelineId} · ${run.status}`}
+            {`${when ? new Date(when).toLocaleString() : "—"} · ${run.pipelineId}`}
           </Checkbox>
         );
       })}
