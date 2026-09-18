@@ -36,6 +36,13 @@ export function SampleDifferencesTable({ result }: SampleDifferencesTableProps) 
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<ComparisonFilter>("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  const changeFilter = (next: ComparisonFilter) => {
+    setFilter(next);
+    setPage(1);
+  };
 
   const rows = result.recordings.filter((row) => filter === "all" || row.comparison === filter);
   const aDetected = (row: DatasetBenchmarkCompareResult["recordings"][number]) =>
@@ -57,7 +64,7 @@ export function SampleDifferencesTable({ result }: SampleDifferencesTableProps) 
       <Typography.Title level={5} style={{ margin: 0 }}>{t("sampleDifferences.title")}</Typography.Title>
       <Radio.Group
         value={filter}
-        onChange={(event) => setFilter(event.target.value as ComparisonFilter)}
+        onChange={(event) => changeFilter(event.target.value as ComparisonFilter)}
         aria-label={t("sampleDifferences.title")}
       >
         <Radio.Button value="all">{t("sampleDifferences.filterAll")}</Radio.Button>
@@ -68,7 +75,22 @@ export function SampleDifferencesTable({ result }: SampleDifferencesTableProps) 
       </Radio.Group>
       <Table
         rowKey={(row) => row.recordingId}
-        pagination={false}
+        pagination={{
+          current: page,
+          pageSize,
+          defaultPageSize: 50,
+          showSizeChanger: true,
+          pageSizeOptions: [25, 50, 100, 200],
+          showTotal: (total) => `${total} samples`,
+          onChange: (nextPage, nextPageSize) => {
+            if (nextPageSize !== pageSize) {
+              setPageSize(nextPageSize);
+              setPage(1);
+            } else {
+              setPage(nextPage);
+            }
+          },
+        }}
         size="small"
         dataSource={rows}
         locale={{ emptyText: t("sampleDifferences.empty") }}
