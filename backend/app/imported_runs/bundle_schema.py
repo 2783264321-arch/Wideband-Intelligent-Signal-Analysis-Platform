@@ -97,4 +97,6 @@ class AnalysisBundleImportSummary(PackageObject):
     created_runs: Annotated[int, Field(ge=0)]
     existing_runs: Annotated[int, Field(ge=0)]
     created_detections: Annotated[int, Field(ge=0)]
+    # Durable first-class Dataset Analysis (imported DatasetExperiment) id.
+    dataset_analysis_id: str | None = None
     sample_run_mapping: list[BundleRunMapping]

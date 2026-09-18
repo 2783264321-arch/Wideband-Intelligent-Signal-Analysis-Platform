@@ -35,6 +35,8 @@ export interface AnalysisBundleImportSummary {
   createdRuns: number;
   existingRuns: number;
   createdDetections: number;
+  /** Durable first-class Dataset Analysis (imported DatasetExperiment) id. */
+  datasetAnalysisId: string | null;
   sampleRunMapping: AnalysisBundleRunMapping[];
 }
 
@@ -62,6 +64,7 @@ interface AnalysisBundleImportSummaryWire {
   created_runs: number;
   existing_runs: number;
   created_detections: number;
+  dataset_analysis_id: string | null;
   sample_run_mapping: AnalysisBundleRunMappingWire[];
 }
 
@@ -179,6 +182,7 @@ function mapImportSummary(wire: AnalysisBundleImportSummaryWire): AnalysisBundle
     createdRuns: wire.created_runs,
     existingRuns: wire.existing_runs,
     createdDetections: wire.created_detections,
+    datasetAnalysisId: wire.dataset_analysis_id,
     sampleRunMapping: wire.sample_run_mapping.map((row) => ({
       sampleKey: row.sample_key,
       sampleName: row.sample_name,
