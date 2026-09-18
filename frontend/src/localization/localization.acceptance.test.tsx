@@ -73,14 +73,14 @@ test("the header switch changes to en-US live, without reload, and persists", as
   renderApp();
   await screen.findByRole("menuitem", { name: /数据管理/ });
 
-  fireEvent.click(screen.getByText("EN"));
+  fireEvent.click(screen.getByRole("button", { name: "EN" }));
 
   expect(await screen.findByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
   expect(screen.queryByRole("menuitem", { name: /数据管理/ })).toBeNull();
   expect(document.documentElement.lang).toBe("en-US");
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("en-US");
 
-  fireEvent.click(screen.getByText("中文"));
+  fireEvent.click(screen.getByRole("button", { name: "中文" }));
   expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
   expect(window.localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("zh-CN");
 });

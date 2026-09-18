@@ -1,13 +1,17 @@
 import {
+  ApartmentOutlined,
   ExperimentOutlined,
   FolderOpenOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  MoonOutlined,
   QuestionCircleOutlined,
   RadarChartOutlined,
   SettingOutlined,
+  SunOutlined,
+  TranslationOutlined,
 } from "@ant-design/icons";
-import { Button, Layout, Menu, Radio, Segmented, Space, Typography, theme } from "antd";
+import { Button, Layout, Menu, Space, Tooltip, Typography, theme } from "antd";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useLocalization } from "../localization/useLocalization";
 import type { Locale } from "../localization/types";
@@ -18,6 +22,12 @@ import { useSidebarCollapsed } from "./useSidebarCollapsed";
 import { readAlgorithmLabRoute } from "./workspaceMemory";
 
 const { Header, Sider, Content } = Layout;
+
+function themeButtonStyle(active: boolean, token: ReturnType<typeof theme.useToken>["token"]) {
+  return active
+    ? { background: token.colorPrimaryBg, color: token.colorPrimary }
+    : { color: token.colorTextSecondary };
+}
 
 const NAV_PATHS: Record<string, string> = {
   dataLibrary: "/data-library",
@@ -91,7 +101,7 @@ export function MainLayout() {
           }}
         >
           <span data-testid="sidebar-brand-icon" style={{ display: "inline-flex", flexShrink: 0 }}>
-            <RadarChartOutlined style={{ fontSize: 20 }} />
+            <ApartmentOutlined style={{ fontSize: 20 }} />
           </span>
           <Typography.Text
             strong
@@ -121,7 +131,15 @@ export function MainLayout() {
             { key: "settings", icon: <SettingOutlined />, label: t("nav.settings") },
           ]}
         />
-        <div style={{ padding: 8 }}>
+        <div
+          style={{
+            padding: "8px 14px",
+            // Align the fold/expand control with the 14px menu glyph column
+            // (antd menu icon box) plus the sider's 22px padding.
+            paddingInlineStart: 22,
+            marginTop: 8,
+          }}
+        >
           <Button
             data-testid="sidebar-toggle"
             type="text"
@@ -146,34 +164,74 @@ export function MainLayout() {
           <Typography.Text data-testid="header-context">
             {t(sectionTitleKey(location.pathname))}
           </Typography.Text>
-          <Space size={12} align="center">
-            <Segmented
-              data-testid="header-theme"
-              size="small"
-              value={preference}
-              onChange={(value) => setPreference(value as ThemePreference)}
-              options={[
-                { label: t("theme.system"), value: "system" },
-                { label: t("theme.light"), value: "light" },
-                { label: t("theme.dark"), value: "dark" },
-              ]}
+          <Space size={4} align="center">
+            <Tooltip title={t("theme.system")}>
+              <Button
+                data-testid="header-theme-system"
+                type="text"
+                size="small"
+                aria-label={t("theme.system")}
+                icon={
+                  <span style={{ fontSize: 11, lineHeight: "22px" }}>
+                    {t("theme.systemIcon")}
+                  </span>
+                }
+                onClick={() => setPreference("system")}
+                style={themeButtonStyle(preference === "system", token)}
+              />
+            </Tooltip>
+            <Tooltip title={t("theme.light")}>
+              <Button
+                data-testid="header-theme-light"
+                type="text"
+                size="small"
+                aria-label={t("theme.light")}
+                icon={<SunOutlined style={{ color: token.colorWarning }} />}
+                onClick={() => setPreference("light")}
+                style={themeButtonStyle(preference === "light", token)}
+              />
+            </Tooltip>
+            <Tooltip title={t("theme.dark")}>
+              <Button
+                data-testid="header-theme-dark"
+                type="text"
+                size="small"
+                aria-label={t("theme.dark")}
+                icon={<MoonOutlined />}
+                onClick={() => setPreference("dark")}
+                style={themeButtonStyle(preference === "dark", token)}
+              />
+            </Tooltip>
+            <span
+              style={{ width: 1, height: 16, background: token.colorBorder, display: "inline-block" }}
             />
-            <Typography.Text type="secondary">{t("language.switchLabel")}</Typography.Text>
-            <Radio.Group
-              data-testid="header-language"
-              size="small"
-              optionType="button"
-              buttonStyle="solid"
-              aria-label={t("language.switchLabel")}
-              value={locale}
-              onChange={(event) => setLocale(event.target.value as Locale)}
-            >
-              <Radio.Button value="zh-CN">{t("language.zh")}</Radio.Button>
-              <Radio.Button value="en-US">{t("language.en")}</Radio.Button>
-            </Radio.Group>
-            <Link data-testid="header-guide" to="/guide" aria-label={t("guide.open")}>
-              <QuestionCircleOutlined />
-            </Link>
+            <Tooltip title={t("language.switchLabel")}>
+              <Button
+                data-testid="header-language-zh"
+                type="text"
+                size="small"
+                aria-label={t("language.zh")}
+                icon={<span style={{ fontWeight: 600 }}>中</span>}
+                onClick={() => setLocale("zh-CN")}
+                style={themeButtonStyle(locale === "zh-CN", token)}
+              />
+            </Tooltip>
+            <Tooltip title={t("language.en")}>
+              <Button
+                data-testid="header-language-en"
+                type="text"
+                size="small"
+                aria-label={t("language.en")}
+                icon={<span style={{ fontWeight: 600 }}>EN</span>}
+                onClick={() => setLocale("en-US")}
+                style={themeButtonStyle(locale === "en-US", token)}
+              />
+            </Tooltip>
+            <Tooltip title={t("guide.open")}>
+              <Link data-testid="header-guide" to="/guide" aria-label={t("guide.open")}>
+                <Button type="text" size="small" icon={<QuestionCircleOutlined />} />
+              </Link>
+            </Tooltip>
           </Space>
         </Header>
         <Content

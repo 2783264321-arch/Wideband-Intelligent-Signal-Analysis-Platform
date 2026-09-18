@@ -100,6 +100,7 @@ export const enUS = {
 
   "theme.title": "Theme",
   "theme.system": "System",
+  "theme.systemIcon": "A",
   "theme.light": "Light",
   "theme.dark": "Dark",
 

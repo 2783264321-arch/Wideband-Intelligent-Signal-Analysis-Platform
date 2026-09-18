@@ -106,6 +106,7 @@ export const zhCN: Record<MessageKey, string> = {
 
   "theme.title": "主题",
   "theme.system": "跟随系统",
+  "theme.systemIcon": "A",
   "theme.light": "浅色",
   "theme.dark": "深色",
 

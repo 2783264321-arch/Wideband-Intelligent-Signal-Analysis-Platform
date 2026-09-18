@@ -123,9 +123,8 @@ test("the header language switch is present and accessible", async () => {
       <AppWithLocale locale="zh-CN" />
     </MemoryRouter>,
   );
-  expect(await screen.findByLabelText("语言")).toBeInTheDocument();
-  expect(screen.getByText("中文")).toBeInTheDocument();
-  expect(screen.getByText("EN")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "中文" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "EN" })).toBeInTheDocument();
 });
 
 test("Algorithm Lab workspace is restored after leaving via the sidebar", async () => {
