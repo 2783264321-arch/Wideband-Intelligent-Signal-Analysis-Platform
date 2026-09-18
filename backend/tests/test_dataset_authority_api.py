@@ -82,3 +82,40 @@ def test_legacy_data_library_endpoint_still_works_alongside_authority(client, se
     authority = client.get("/api/datasets").json()
     assert authority["total"] == 1
     assert authority["items"][0]["id"] == dataset.id
+
+
+def _add_named_samples(session, *, name, stems):
+    dataset = DatasetModel(
+        id=f"ds_order_{name}", name=name, split="test", adapter_id="spacenet",
+        label_space="spacenet_14", local_root=f"D:/{name}", portable_fingerprint="c" * 64,
+        sample_count=len(stems), ground_truth_sample_count=0,
+    )
+    session.add(dataset)
+    for stem in stems:
+        session.add(RecordingModel(
+            id=f"rec_{name}_{stem}", name=stem, data_path=f"D:/{name}/test/{stem}.bin",
+            data_format="float16_interleaved_le", source="spacenet",
+            external_path=f"D:/{name}/test/{stem}.bin",
+            sample_rate_hz=1.0, center_frequency_hz=2.0, frequency_low_hz=1.5,
+            frequency_high_hz=2.5, num_samples=4, duration_s=0.4, dataset_name=name,
+            dataset_split="test", label_space="spacenet_14", has_ground_truth=False,
+            dataset_id=dataset.id, sample_key=stem,
+        ))
+    return dataset
+
+
+def test_samples_ordered_numerically_not_lexicographically(client, session):
+    """SpaceNet stems are integers: the list must read 0,1,2,10,100 not 0,1,10,100."""
+    dataset = _add_named_samples(session, name="Numeric", stems=["0", "1", "10", "100", "2"])
+    session.commit()
+
+    items = client.get(f"/api/datasets/{dataset.id}/samples?limit=50").json()["items"]
+    assert [item["name"] for item in items] == ["0", "1", "2", "10", "100"]
+
+
+def test_non_numeric_sample_names_keep_lexicographic_order(client, session):
+    dataset = _add_named_samples(session, name="Text", stems=["beta", "alpha", "gamma"])
+    session.commit()
+
+    items = client.get(f"/api/datasets/{dataset.id}/samples?limit=50").json()["items"]
+    assert [item["name"] for item in items] == ["alpha", "beta", "gamma"]

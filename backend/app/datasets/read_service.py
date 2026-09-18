@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.analysis.model import AnalysisRunModel
 from app.core.errors import PlatformError
 from app.datasets.model import DatasetModel
+from app.datasets.ordering import numeric_aware_order
 from app.datasets.schema import DatasetRead, DatasetSampleRead
 from app.recordings.model import RecordingModel
 
@@ -63,7 +64,9 @@ class DatasetReadService:
         )
         rows = list(
             self.session.scalars(
-                statement.order_by(RecordingModel.name, RecordingModel.id)
+                statement.order_by(
+                    *numeric_aware_order(RecordingModel.name), RecordingModel.id
+                )
                 .limit(limit)
                 .offset(offset)
             ).all()
