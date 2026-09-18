@@ -1,4 +1,5 @@
-import { Button, Card, Empty, Space, Tag, Typography } from "antd";
+import { DownOutlined } from "@ant-design/icons";
+import { Button, Card, Dropdown, Empty, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { deleteBlockersFromError, deleteDataset, listDatasets } from "../../api/client";
@@ -9,10 +10,13 @@ import { DeleteConfirmModal } from "./DeleteConfirmModal";
 import { DeleteConflictAlert } from "./DeleteConflictAlert";
 
 export interface DatasetListProps {
-  onImportResults?: (datasetId: string) => void;
+  /** Opens the dataset batch analysis result import flow. */
+  onImportBatch?: () => void;
+  /** Opens the portable Analysis Bundle import flow. */
+  onImportBundle?: () => void;
 }
 
-export function DatasetList({ onImportResults }: DatasetListProps) {
+export function DatasetList({ onImportBatch, onImportBundle }: DatasetListProps) {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [items, setItems] = useState<DatasetSummary[]>([]);
@@ -78,9 +82,23 @@ export function DatasetList({ onImportResults }: DatasetListProps) {
             >
               {t("dataLibrary.browseSamples")}
             </Button>,
-            <Button key="import" type="link" onClick={() => onImportResults?.(dataset.id)}>
-              {t("dataLibrary.importResults")}
-            </Button>,
+            <Dropdown
+              key="import"
+              menu={{
+                items: [
+                  { key: "batch", label: t("dataLibrary.importBatchResult") },
+                  { key: "bundle", label: t("analysisBundle.importEntry") },
+                ],
+                onClick: ({ key }) => {
+                  if (key === "batch") onImportBatch?.();
+                  if (key === "bundle") onImportBundle?.();
+                },
+              }}
+            >
+              <Button type="link">
+                {t("dataLibrary.importResults")} <DownOutlined />
+              </Button>
+            </Dropdown>,
             <Button
               key="remove"
               type="link"

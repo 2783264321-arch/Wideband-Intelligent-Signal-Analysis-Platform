@@ -1,23 +1,31 @@
 import { Alert, Button, Form, Modal, Select, Typography } from "antd";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { importAnalysisPackage } from "../../api/client";
 import { toErrorText } from "../../api/errors";
-import type { AnalysisRun, RecordingDetail } from "../../api/types";
+import type { AnalysisRun } from "../../api/types";
 import { spectrumPathForRun } from "../signals/spectrumNavigation";
 import { useLocalization } from "../../localization/useLocalization";
 
 interface Props {
   open: boolean;
-  recordings: RecordingDetail[];
+  recordings: { id: string; name: string }[];
+  /** Pre-selects the target recording (used when importing from a sample row). */
+  initialRecordingId?: string | null;
   onClose: () => void;
 }
 
-export function ImportRunModal({ open, recordings, onClose }: Props) {
+export function ImportRunModal({ open, recordings, initialRecordingId, onClose }: Props) {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [form] = Form.useForm<{ recordingId: string }>();
   const recordingId = Form.useWatch("recordingId", form);
+
+  useEffect(() => {
+    if (open) {
+      form.setFieldsValue({ recordingId: initialRecordingId ?? undefined });
+    }
+  }, [open, initialRecordingId, form]);
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);

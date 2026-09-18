@@ -10,7 +10,12 @@ import { DeleteConflictAlert } from "./DeleteConflictAlert";
 
 const PAGE_SIZE = 20;
 
-export function StandaloneSampleList() {
+export interface StandaloneSampleListProps {
+  /** Opens the single-sample analysis result import flow for one sample. */
+  onImportResults?: (sample: StandaloneSample) => void;
+}
+
+export function StandaloneSampleList({ onImportResults }: StandaloneSampleListProps) {
   const { t } = useLocalization();
   const navigate = useNavigate();
   const [items, setItems] = useState<StandaloneSample[]>([]);
@@ -85,6 +90,9 @@ export function StandaloneSampleList() {
           actions={[
             <Button key="open" type="link" onClick={() => navigate(`/samples/${sample.id}`)}>
               {t("dataLibrary.openSample")}
+            </Button>,
+            <Button key="import" type="link" onClick={() => onImportResults?.(sample)}>
+              {t("dataLibrary.importResults")}
             </Button>,
             <Button
               key="delete"

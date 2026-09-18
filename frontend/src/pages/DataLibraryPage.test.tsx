@@ -122,10 +122,10 @@ test("blocked removal uses the datasetId endpoint and renders the structured blo
   expect(deleteCall).toBeDefined();
 });
 
-test("dataset Browse Samples navigates with datasetId", async () => {
+test("dataset Browse & Analyze Samples navigates with datasetId", async () => {
   renderPage();
   const card = await screen.findByTestId("dataset-card");
-  fireEvent.click(within(card).getByRole("button", { name: "Browse Samples" }));
+  fireEvent.click(within(card).getByRole("button", { name: "Browse & Analyze Samples" }));
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/data-library/datasets/ds_1");
 });
 
@@ -147,4 +147,39 @@ test("Add Standalone IQ switches between Upload File and Register Local Path", a
   fireEvent.click(screen.getByRole("tab", { name: "Register Local Path" }));
   expect(await screen.findByLabelText("Local path")).toBeInTheDocument();
   expect(screen.getByText("Data format")).toBeInTheDocument();
+});
+
+test("global header no longer exposes a single import results entry point", async () => {
+  renderPage();
+  await screen.findAllByTestId("dataset-card");
+  expect(screen.queryByTestId("import-results-button")).not.toBeInTheDocument();
+});
+
+test("Add Data menu lists Register Dataset above Add Standalone IQ", async () => {
+  renderPage();
+  await screen.findAllByTestId("dataset-card");
+  fireEvent.mouseEnter(screen.getByTestId("add-data-button"));
+  await screen.findByText("Register Dataset");
+  const labels = screen.getAllByRole("menuitem").map((item) => item.textContent);
+  expect(labels.indexOf("Register Dataset")).toBeGreaterThanOrEqual(0);
+  expect(labels.indexOf("Register Dataset")).toBeLessThan(labels.indexOf("Add Standalone IQ"));
+});
+
+test("dataset import entry point offers batch and portable bundle", async () => {
+  renderPage();
+  const card = await screen.findByTestId("dataset-card");
+  fireEvent.mouseEnter(within(card).getByRole("button", { name: /Import Analysis Results/ }));
+  expect(await screen.findByText("Dataset Batch Analysis Result")).toBeInTheDocument();
+  expect(await screen.findByText("Analysis Bundle (Portable Results)")).toBeInTheDocument();
+});
+
+test("standalone sample row imports results for that sample", async () => {
+  renderPage();
+  await screen.findAllByTestId("dataset-card");
+  fireEvent.click(screen.getByRole("tab", { name: "Standalone Samples" }));
+  const card = await screen.findByTestId("standalone-card");
+  fireEvent.click(within(card).getByRole("button", { name: "Import Analysis Results" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByText("Import Existing Run")).toBeInTheDocument();
+  expect(within(dialog).getByText("standalone-a")).toBeInTheDocument();
 });
