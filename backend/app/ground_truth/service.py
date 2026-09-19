@@ -17,10 +17,27 @@ class GroundTruthService:
         self.label_service = label_service
 
     def list(self, recording_id: str) -> list[GroundTruthModel]:
+        """Ground truth in a stable physical order.
+
+        Ordering by id (a uuid) made the returned order random, which leaked into
+        the single-recording A/B comparison: the comparison table rows shuffled
+        per request, and the Hungarian matcher's tie-breaking could change with
+        the input order. Physical ordering keeps display natural and the matcher
+        input deterministic.
+        """
         recording = self.session.get(RecordingModel, recording_id)
         if recording is None:
             raise PlatformError("RECORDING_NOT_FOUND", "Recording was not found.", 404)
-        statement = select(GroundTruthModel).where(GroundTruthModel.recording_id == recording_id).order_by(GroundTruthModel.id)
+        statement = (
+            select(GroundTruthModel)
+            .where(GroundTruthModel.recording_id == recording_id)
+            .order_by(
+                GroundTruthModel.t_start_s,
+                GroundTruthModel.f_low_hz,
+                GroundTruthModel.class_id,
+                GroundTruthModel.id,
+            )
+        )
         return list(self.session.scalars(statement).all())
 
     def replace(self, recording_id: str, payload: GroundTruthImport) -> list[GroundTruthModel]:

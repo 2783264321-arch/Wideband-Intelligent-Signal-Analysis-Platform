@@ -130,9 +130,18 @@ class AlgorithmLabComparisonService:
             if run.status != "completed":
                 raise PlatformError("INVALID_COMPARISON", "Analysis run must be completed before comparison.", 422)
 
+        # Physical order (never uuid order): the comparison table rows and the
+        # Hungarian matcher input must be deterministic across identical requests.
         gt_rows = list(
             self.session.scalars(
-                select(GroundTruthModel).where(GroundTruthModel.recording_id == recording_id).order_by(GroundTruthModel.id)
+                select(GroundTruthModel)
+                .where(GroundTruthModel.recording_id == recording_id)
+                .order_by(
+                    GroundTruthModel.t_start_s,
+                    GroundTruthModel.f_low_hz,
+                    GroundTruthModel.class_id,
+                    GroundTruthModel.id,
+                )
             ).all()
         )
         if not gt_rows:

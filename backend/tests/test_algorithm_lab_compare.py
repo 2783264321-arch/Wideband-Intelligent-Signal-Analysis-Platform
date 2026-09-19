@@ -344,3 +344,43 @@ def test_cases_include_class_fields_and_correctness(client):
     missed = next(c for c in response2.json()["cases"] if c["ground_truth_id"] == "gt1")
     assert missed["run_a"]["matched"] is False
     assert missed["run_a"]["class_correct"] is None
+
+
+def test_ground_truth_and_case_order_is_physical_not_uuid(client):
+    """GT ids that sort opposite to physical position must not shuffle output.
+
+    Ordering by uuid made both the ground-truth list and the comparison table
+    order random per request, and fed a non-deterministic order into the matcher.
+    """
+    database = client.app.state.database
+    with database.session_factory() as session:
+        _add_recording(session, rec_id="rec_ord")
+        _add_run(session, run_id="run_ord_a", rec_id="rec_ord")
+        _add_run(session, run_id="run_ord_b", rec_id="rec_ord")
+        # Ids are deliberately reverse-sorted versus time order.
+        _add_gt(session, gt_id="gt_zzz_late", rec_id="rec_ord",
+                t0=0.04, t1=0.06, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=6)
+        _add_gt(session, gt_id="gt_aaa_early", rec_id="rec_ord",
+                t0=0.00, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0, class_id=9)
+        _add_detection(session, det_id="det_ord_a", run_id="run_ord_a",
+                       t0=0.00, t1=0.02, f0=2_440_000_000.0, f1=2_441_000_000.0)
+        _add_detection(session, det_id="det_ord_b", run_id="run_ord_b",
+                       t0=0.04, t1=0.06, f0=2_440_000_000.0, f1=2_441_000_000.0)
+        session.commit()
+
+    ground_truth = client.get("/api/recordings/rec_ord/ground-truth").json()
+    assert [row["id"] for row in ground_truth] == ["gt_aaa_early", "gt_zzz_late"]
+
+    compare = client.post(
+        "/api/algorithm-lab/compare",
+        json={
+            "recording_id": "rec_ord",
+            "run_a_id": "run_ord_a",
+            "run_b_id": "run_ord_b",
+            "iou_threshold": 0.5,
+        },
+    ).json()
+    assert [case["ground_truth_id"] for case in compare["cases"]] == [
+        "gt_aaa_early",
+        "gt_zzz_late",
+    ]
