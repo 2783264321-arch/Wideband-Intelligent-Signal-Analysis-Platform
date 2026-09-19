@@ -90,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_sub = runtime.add_subparsers(dest="runtime_command")
     runtime_sub.add_parser("doctor")
     runtime_sub.add_parser("discover")
+    runtime_ref = runtime_sub.add_parser("ref")
+    runtime_ref.add_argument("--python", required=True)
+    runtime_ref.add_argument("--family", required=True)
 
     qualify = sub.add_parser("qualify")
     qualify.add_argument("--plugin", required=True)
@@ -195,6 +198,39 @@ def _cmd_runtime_discover(ctx: CliContext, out) -> int:
     """
     discovered = doctor_module.discover_local_runtimes(ctx.settings)
     print(json.dumps({"runtimes": [asdict(item) for item in discovered]}, indent=2), file=out)
+    return 0
+
+
+def _cmd_runtime_ref(ctx: CliContext, args, out) -> int:
+    """Derive the exact local_cpu runtime_ref for an interpreter.
+
+    ``runtime_ref`` is a pure function of the interpreter's declared identity
+    material, so an operator cannot invent it; this prints the value to configure
+    WSP_LOCAL_CPU_RUNTIME_REF. The probe runs INSIDE the given interpreter (never
+    the control plane) and fails closed if any material is missing.
+    """
+    material = identity_module.collect_identity_material(
+        Path(args.python), scheme=identity_module.LOCAL_CPU_V1
+    )
+    generation = identity_module.derive_generation_for_scheme(
+        scheme=identity_module.LOCAL_CPU_V1, material=material
+    )
+    runtime_ref = identity_module.derive_local_runtime_ref(
+        family=args.family, kind="cpu", generation=generation
+    )
+    print(
+        json.dumps(
+            {
+                "python": args.python,
+                "family": args.family,
+                "generation": generation,
+                "runtime_ref": runtime_ref,
+                "material": material,
+            },
+            indent=2,
+        ),
+        file=out,
+    )
     return 0
 
 
@@ -320,6 +356,8 @@ def main(
             return _cmd_runtime_doctor(ctx, out)
         if args.command == "runtime" and args.runtime_command == "discover":
             return _cmd_runtime_discover(ctx, out)
+        if args.command == "runtime" and args.runtime_command == "ref":
+            return _cmd_runtime_ref(ctx, args, out)
         if args.command == "qualify":
             return _cmd_qualify(ctx, args, out)
         if args.command == "certificate" and args.certificate_command == "install":

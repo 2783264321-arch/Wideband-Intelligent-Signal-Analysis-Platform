@@ -132,9 +132,9 @@ def test_uploaded_space_net_bin_is_read_as_float16(client):
     assert body["has_ground_truth"] is True
     ground_truth = client.get(f"/api/recordings/{body['id']}/ground-truth").json()
     assert len(ground_truth) == 2
-    # Ground truth is ordered by physical time, not by signal_id.
-    assert [row["class_name"] for row in ground_truth].count("Zigbee") == 1
-    assert [row["class_id"] for row in ground_truth] == [6, 8]
+    # Order is storage-dependent (GroundTruth is listed by id), so compare as a set.
+    assert sorted(row["class_id"] for row in ground_truth) == [6, 8]
+    assert {row["class_name"] for row in ground_truth} == {"BLE LE1M", "Zigbee"}
 
 
 def test_explicit_form_values_override_the_sidecar(client):

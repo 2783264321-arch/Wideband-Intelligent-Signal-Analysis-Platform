@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import platform as _platform
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -192,16 +193,82 @@ def _inspect_ml_stack(python_path: Path) -> DiscoveredRuntime:
     )
 
 
+def _python_in_env(env_dir: Path) -> Path | None:
+    candidate = env_dir / ("python.exe" if os.name == "nt" else "bin/python")
+    return candidate if candidate.is_file() else None
+
+
+def _conda_env_python_paths() -> list[Path]:
+    """Best-effort enumeration of conda environments, without running conda.
+
+    Discovery is diagnostic only; it reads operator-owned environment variables
+    (CONDA_ENVS_PATH / CONDA_PREFIX / CONDA_EXE) and a few conventional install
+    roots, and never invokes conda or rewrites anything.
+    """
+    envs_roots: list[Path] = []
+
+    configured = os.environ.get("CONDA_ENVS_PATH")
+    if configured:
+        envs_roots.extend(Path(part) for part in configured.split(os.pathsep) if part)
+
+    prefix = os.environ.get("CONDA_PREFIX")
+    if prefix:
+        parent = Path(prefix).parent
+        if parent.name.lower() == "envs":
+            envs_roots.append(parent)
+
+    conda_exe = os.environ.get("CONDA_EXE")
+    if conda_exe:
+        # <root>/Scripts/conda.exe or <root>/condabin/conda.bat -> <root>/envs
+        for candidate_root in (Path(conda_exe).parent.parent, Path(conda_exe).parent.parent.parent):
+            envs_roots.append(candidate_root / "envs")
+
+    home = Path.home()
+    for base in (
+        home / "miniconda3",
+        home / "anaconda3",
+        home / "AppData" / "Local" / "miniconda3",
+        home / "AppData" / "Local" / "Continuum" / "anaconda3",
+    ):
+        envs_roots.append(base / "envs")
+
+    paths: list[Path] = []
+    for root in envs_roots:
+        if not root.is_dir():
+            continue
+        try:
+            children = sorted(root.iterdir())
+        except OSError:
+            continue
+        for env_dir in children:
+            python = _python_in_env(env_dir)
+            if python is not None:
+                paths.append(python)
+    return paths
+
+
+def _extra_python_paths() -> list[Path]:
+    """Operator-declared interpreters (WSP_EXTRA_PYTHON_PATHS, os.pathsep list)."""
+    configured = os.environ.get("WSP_EXTRA_PYTHON_PATHS")
+    if not configured:
+        return []
+    return [Path(part) for part in configured.split(os.pathsep) if part.strip()]
+
+
 def discover_local_runtimes(settings: Settings) -> list[DiscoveredRuntime]:
     """Best-effort scan for local interpreters that can run pytorch inference.
 
     Diagnostics only: it never imports torch into this process and never rewrites
     configuration. Results help the operator decide where each pipeline can run.
     """
+    control_plane = Path(sys.executable)
     candidates: list[tuple[Path, bool]] = []
     if settings.local_cpu_python_path is not None:
         candidates.append((Path(settings.local_cpu_python_path), True))
-    candidates.append((Path(sys.executable), True))
+    candidates.append((control_plane, False))
+    candidates.extend((path, False) for path in _extra_python_paths())
+    candidates.extend((path, False) for path in _conda_env_python_paths())
+
     seen: set[str] = set()
     discovered: list[DiscoveredRuntime] = []
     for path, is_configured in candidates:
@@ -218,7 +285,7 @@ def discover_local_runtimes(settings: Settings) -> list[DiscoveredRuntime]:
                     version=report.version,
                     torch=report.torch,
                     ultralytics=report.ultralytics,
-                    is_control_plane=not is_configured,
+                    is_control_plane=path.resolve() == control_plane.resolve(),
                     is_configured_local_cpu=is_configured,
                 )
             )
