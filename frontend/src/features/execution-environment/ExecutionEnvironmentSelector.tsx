@@ -43,6 +43,7 @@ export function ExecutionEnvironmentSelector({
   onChange,
   disabled,
   compact = false,
+  showSelector = true,
 }: ExecutionEnvironmentSelectorProps) {
   const { t } = useLocalization();
   const [showDetails, setShowDetails] = useState(false);
@@ -94,24 +95,26 @@ export function ExecutionEnvironmentSelector({
 
   return (
     <div data-testid="execution-environment-selector">
-      {compact ? null : (
+      {showSelector && !compact ? (
         <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>
           {t("executionEnv.fieldLabel")}
         </Typography.Text>
-      )}
-      <Select
-        data-testid="execution-environment-select"
-        aria-label={t("executionEnv.title")}
-        style={{ minWidth: compact ? 170 : 220 }}
-        value={loading ? undefined : selectedKey}
-        placeholder={loading ? t("executionEnv.checking") : undefined}
-        loading={loading}
-        disabled={locked}
-        onChange={(next: string) => {
-          onChange(next === "auto" ? { mode: "auto", executor: null } : { mode: "manual", executor: next });
-        }}
-        options={selectOptions}
-      />
+      ) : null}
+      {showSelector ? (
+        <Select
+          data-testid="execution-environment-select"
+          aria-label={t("executionEnv.title")}
+          style={{ minWidth: compact ? 170 : 220 }}
+          value={loading ? undefined : selectedKey}
+          placeholder={loading ? t("executionEnv.checking") : undefined}
+          loading={loading}
+          disabled={locked}
+          onChange={(next: string) => {
+            onChange(next === "auto" ? { mode: "auto", executor: null } : { mode: "manual", executor: next });
+          }}
+          options={selectOptions}
+        />
+      ) : null}
       {error !== null ? (
         <Typography.Text type="danger" style={{ display: "block" }} data-testid="execution-environment-error">
           {error}

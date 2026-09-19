@@ -209,25 +209,21 @@ function setup(options: SetupOptions = {}) {
   return { posted, selectionCalls, resolveDeferred: () => resolveDeferred };
 }
 
-test("the spectrum page renders the execution environment selector and never calls executor-availability", async () => {
+test("the spectrum page resolves execution internally and never shows an environment selector", async () => {
   const { selectionCalls } = setup({ selection: selectionLocalAvailable, pipelines: [localPipeline, detectorPipeline] });
   await screen.findByText("Burst Demo");
-  await waitFor(() => expect(screen.getByTestId("execution-environment-selector")).toBeInTheDocument());
   await waitFor(() => expect(selectionCalls.length).toBeGreaterThan(0));
+  expect(screen.queryByTestId("execution-environment-selector")).toBeNull();
+  expect(screen.queryByTestId("execution-environment-select")).toBeNull();
 });
-
-async function chooseExecution(title: string) {
-  fireEvent.mouseDown(screen.getByLabelText("Execution Environment"));
-  const options = await screen.findAllByTitle(title);
-  fireEvent.click(options[options.length - 1]);
-}
 
 test("default Auto submits execution_mode auto with no executor", async () => {
   const { posted } = setup();
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
-  await screen.findByText("Auto · Remote GPU");
+  const button = await screen.findByRole("button", { name: "Run Analysis" });
+  await waitFor(() => expect(button).not.toBeDisabled());
 
-  fireEvent.click(screen.getByRole("button", { name: "Run Analysis" }));
+  fireEvent.click(button);
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({
     pipeline_id: "zoomspec_yolo26n_aug_combined_frn_v3",
@@ -235,21 +231,6 @@ test("default Auto submits execution_mode auto with no executor", async () => {
     parameters: {},
   });
   expect(posted[0]).not.toHaveProperty("executor");
-});
-
-test("an explicit manual selection submits the exact executor and no auto mode", async () => {
-  const { posted } = setup({ selection: selectionDual, pipelines: [remotePipeline] });
-  await screen.findByText("ZoomSpec Frozen V3 · GPU");
-  await screen.findByText("Auto · Local CPU");
-
-  await chooseExecution("Local GPU");
-  const button = screen.getByRole("button", { name: "Run Analysis" });
-  await waitFor(() => expect(button).not.toBeDisabled());
-  fireEvent.click(button);
-
-  await waitFor(() => expect(posted.length).toBe(1));
-  expect(posted[0]).toMatchObject({ executor: "local_gpu", parameters: {} });
-  expect(posted[0]).not.toHaveProperty("execution_mode");
 });
 
 test("an unavailable executor disables the run with the backend reason and no fallback", async () => {
@@ -335,7 +316,7 @@ test("remote pending run polls to completed and renders detections", async () =>
   expect(screen.getByText("Completed")).toBeInTheDocument();
 });
 
-test("completed remote run renders allowlisted metadata only", async () => {
+test("a completed run shows status and export, and no execution-environment chrome", async () => {
   const completedRemoteRun = runWire({
     id: "run_r",
     executor: "remote_gpu",
@@ -364,16 +345,16 @@ test("completed remote run renders allowlisted metadata only", async () => {
   await screen.findByText("ZoomSpec Frozen V3 · GPU");
   await screen.findByText("Completed");
 
-  expect(screen.getByText(/Executor: remote_gpu/)).toBeInTheDocument();
-  expect(screen.getByText(/Remote execution configuration: autodl_primary/)).toBeInTheDocument();
-  expect(screen.getByText(/Device: NVIDIA GeForce RTX 5090/)).toBeInTheDocument();
-  expect(screen.getByText(/Runtime commit version: 6f24f379/)).toBeInTheDocument();
-  expect(screen.getByText(/Payload SHA: 20b8130a/)).toBeInTheDocument();
-
+  // The execution environment is an internal detail: neither the selector nor any
+  // provenance chrome (executor / remote profile / payload hash) reaches the user.
+  expect(screen.queryByTestId("run-provenance-card")).toBeNull();
+  expect(screen.queryByText(/Executor:/)).toBeNull();
+  expect(screen.queryByText(/autodl_primary/)).toBeNull();
+  expect(screen.queryByText(/Payload SHA/)).toBeNull();
   expect(screen.queryByText(/coordinator_token/)).toBeNull();
-  expect(screen.queryByText("coord_abc123")).toBeNull();
-  expect(screen.queryByText(/required_remote_runtime_commit/)).toBeNull();
-  expect(screen.queryByText(/execution_metadata_json/)).toBeNull();
+
+  // The result export action stays available for a completed run.
+  expect(await screen.findByTestId("export-analysis-run-button")).toBeInTheDocument();
 });
 
 test("exposes STFT Energy Detector with detection-only copy and submits its id", async () => {

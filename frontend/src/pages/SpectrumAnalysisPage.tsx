@@ -5,9 +5,8 @@ import { createAnalysisRun, getAnalysisRun, getDetections, getExecutorSelection,
 import { toErrorText } from "../api/errors";
 import type { AnalysisRun, DetectionResult, ExecutorSelection, GroundTruthResult, PipelineDefinition, RecordingDetail, SpectrogramMeta } from "../api/types";
 import { buildAnalysisRunRequest } from "../features/analysis-run/requestBuilder";
-import { RunProvenanceCard } from "../features/analysis-run/RunProvenanceCard";
-import { ExportAnalysisRunButton } from "../features/analysis-bundle/ExportAnalysisRunButton";
 import { RunStatusBadge } from "../features/analysis-run/RunStatusBadge";
+import { ExportAnalysisRunButton } from "../features/analysis-bundle/ExportAnalysisRunButton";
 import { useRunPolling } from "../features/analysis-run/useRunPolling";
 import { useLocalization } from "../localization/useLocalization";
 import type { MessageKey } from "../localization/types";
@@ -66,8 +65,8 @@ export function SpectrumAnalysisPage() {
   const [selectionError, setSelectionError] = useState<string | null>(null);
   // A stale selection (different scope) can never authorize the current request.
   const effectiveSelection = effectiveSelectionForScope(boundSelection, selectionScopeKey);
-  // User's explicit execution environment value. Auto stays Auto across the request boundary.
-  const [environment, setEnvironment] = useState<ExecutionEnvironmentValue>({ mode: "auto", executor: null });
+  // Execution is always automatic on this page; the backend resolves the executor.
+  const [environment] = useState<ExecutionEnvironmentValue>({ mode: "auto", executor: null });
   const { t } = useLocalization();
 
   useEffect(() => {
@@ -105,7 +104,6 @@ export function SpectrumAnalysisPage() {
     setBoundSelection(null);
     setSelectionError(null);
     setSelectionLoading(false);
-    setEnvironment({ mode: "auto", executor: null });
     if (!recording || !pipelines.length || !pipelineId) return undefined;
     const scopeKey = scopeKeyFor(recordingId, pipelineId);
     let active = true;
@@ -146,6 +144,9 @@ export function SpectrumAnalysisPage() {
     [environmentOptions, environment.mode, environment.executor],
   );
   const canRun = !runActive && selectedEnvironmentOption?.enabled === true;
+  // Execution stays automatic; the environment is never a user-facing choice here.
+  const noRunnableExecutor =
+    !selectionLoading && effectiveSelection !== null && !environmentOptions.some((option) => option.enabled);
 
   const selectDetection = (id: string) => {
     setSelectedId(id);
@@ -179,49 +180,59 @@ export function SpectrumAnalysisPage() {
   return (
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error ? <Alert type="error" showIcon message={t("spectrum.warning")} description={error} closable onClose={() => setError(null)} /> : null}
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
-        <div>
-          <Space wrap>
-            <Button data-testid="spectrum-back" onClick={() => navigate(`/samples/${recordingId}`)}>
-              {t("common.backTo")}
-            </Button>
-            <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>
-          </Space>
-          <Typography.Text type="secondary" style={{ display: "block" }}>
-            Fs {(recording.sampleRateHz / 1e6).toFixed(3)} MHz · Fc {(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz · {recording.durationS.toFixed(6)} s
-          </Typography.Text>
-        </div>
-        <Space wrap size="middle" align="end">
+      <div>
+        <Button
+          data-testid="spectrum-back"
+          onClick={() => navigate(`/samples/${recordingId}`)}
+          style={{ marginBottom: 10 }}
+        >
+          {t("common.backTo")}
+        </Button>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div>
-            <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>{t("spectrum.pipelineLabel")}</Typography.Text>
-            <Select
-              value={pipelineId}
-              style={{ width: 320 }}
-              onChange={setPipelineId}
-              options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
-            />
+            <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>
+            <Typography.Text type="secondary" style={{ display: "block" }}>
+              Fs {(recording.sampleRateHz / 1e6).toFixed(3)} MHz · Fc {(recording.centerFrequencyHz / 1e9).toFixed(6)} GHz · {recording.durationS.toFixed(6)} s
+            </Typography.Text>
           </div>
-          <ExecutionEnvironmentSelector
-            selection={effectiveSelection}
-            loading={selectionLoading}
-            error={selectionError}
-            value={environment}
-            onChange={setEnvironment}
-            disabled={runActive}
-            compact
-          />
-          <Button type="primary" loading={runActive} disabled={!canRun} onClick={() => void runAnalysis()}>
-            {runActive ? t("common.analyzing") : t("common.runAnalysis")}
-          </Button>
-        </Space>
+          <Space wrap size="middle" align="end">
+            <div>
+              <Typography.Text type="secondary" style={{ display: "block", fontSize: 12 }}>{t("spectrum.pipelineLabel")}</Typography.Text>
+              <Select
+                value={pipelineId}
+                style={{ width: 320 }}
+                onChange={setPipelineId}
+                options={pipelines.map((item) => ({ value: item.id, label: pipelineOptionLabel(item, t) }))}
+              />
+            </div>
+            <Button type="primary" loading={runActive} disabled={!canRun} onClick={() => void runAnalysis()}>
+              {runActive ? t("common.analyzing") : t("common.runAnalysis")}
+            </Button>
+          </Space>
+        </div>
       </div>
+      {/*
+        Execution environment is an internal resolution detail: it is never shown
+        as a selector. It only surfaces, compactly, when NOTHING can run locally,
+        so a disabled Run button is never unexplained.
+      */}
+      {noRunnableExecutor ? (
+        <ExecutionEnvironmentSelector
+          selection={effectiveSelection}
+          loading={selectionLoading}
+          error={selectionError}
+          value={environment}
+          onChange={() => {}}
+          disabled={runActive}
+          showSelector={false}
+        />
+      ) : null}
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>{t("common.prediction")}</Checkbox>
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t("common.groundTruth")}</Checkbox>
         {currentRun ? (
           <RunStatusBadge status={currentRun.status} errorType={currentRun.errorType} errorMessage={currentRun.errorMessage} />
         ) : <Typography.Text type="secondary">{t("common.noRunSelected")}</Typography.Text>}
-        {currentRun ? <RunProvenanceCard run={currentRun} /> : null}
         {currentRun ? (
           <ExportAnalysisRunButton runId={currentRun.id} status={currentRun.status} />
         ) : null}

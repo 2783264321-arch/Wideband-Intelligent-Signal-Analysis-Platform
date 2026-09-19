@@ -18,4 +18,7 @@ export interface ExecutionEnvironmentSelectorProps {
   /** Hides the field label and the standing "not runnable" banner; the link
    *  remains so reasons are still reachable. Used on dense workspaces. */
   compact?: boolean;
+  /** When false, never render the executor Select at all (execution is automatic
+   *  and the environment is an internal detail); only diagnostics remain. */
+  showSelector?: boolean;
 }
