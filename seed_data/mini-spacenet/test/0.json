@@ -1,0 +1,56 @@
+{
+  "signals": [
+    {
+      "signal_id": 0,
+      "start_frequency": 2471.85,
+      "end_frequency": 2472.15,
+      "start_time": 14.0,
+      "end_time": 54.0,
+      "class": 10
+    },
+    {
+      "signal_id": 1,
+      "start_frequency": 2472.875,
+      "end_frequency": 2473.125,
+      "start_time": 130.0,
+      "end_time": 150.0,
+      "class": 9
+    },
+    {
+      "signal_id": 2,
+      "start_frequency": 2437.0,
+      "end_frequency": 2477.0,
+      "start_time": 82.0,
+      "end_time": 150.0,
+      "class": 3
+    },
+    {
+      "signal_id": 3,
+      "start_frequency": 2446.0,
+      "end_frequency": 2448.0,
+      "start_time": 113.0,
+      "end_time": 150.0,
+      "class": 8
+    },
+    {
+      "signal_id": 4,
+      "start_frequency": 2456.97385,
+      "end_frequency": 2457.02615,
+      "start_time": 5.0,
+      "end_time": 11.99955,
+      "class": 9
+    },
+    {
+      "signal_id": 5,
+      "start_frequency": 2459.0,
+      "end_frequency": 2461.0,
+      "start_time": 106.0,
+      "end_time": 150.0,
+      "class": 7
+    }
+  ],
+  "observation_range": [
+    2430.0,
+    2480.0
+  ]
+}

@@ -42,6 +42,11 @@ from app.remote_execution.runtime import (
 from app.runtime_qualification.install import (
     build_certificate_store as _build_merged_certificate_store,
 )
+from app.seed.builtin import seed_builtin_data
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _build_certificate_store(settings) -> ExecutionCertificateStore:
@@ -162,6 +167,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             executor_registry=app.state.executor_registry,
             startup_recovery_cutoff=startup_recovery_cutoff,
         )
+
+    # Delivery data: a three-sample Mini-SpaceNet dataset plus standalone sample 3,
+    # bundled under seed_data/. Idempotent and best-effort — a delivery machine
+    # without the SpaceNet corpus still gets an immediately usable platform, and a
+    # broken/missing seed directory never blocks startup.
+    try:
+        with app.state.database.session_factory() as seed_session:
+            seed_builtin_data(
+                seed_session,
+                project_root=settings.project_root,
+                label_space_root=settings.label_space_root,
+            )
+    except Exception:  # never fail startup because of optional seed data
+        logger.exception("Built-in seed data could not be registered.")
 
     app.add_middleware(
         CORSMiddleware,

@@ -41,7 +41,9 @@ class SpaceNetRegistrationService:
         self.session = session
         self.label_space_root = Path(label_space_root)
 
-    def register_directory(self, dataset_path: str, split: str = "test") -> RegistrationSummary:
+    def register_directory(
+        self, dataset_path: str, split: str = "test", name: str = DATASET_NAME
+    ) -> RegistrationSummary:
         root = Path(dataset_path).resolve()
         if root.name in ("train", "test"):
             split = root.name
@@ -59,7 +61,7 @@ class SpaceNetRegistrationService:
             adapter_id=ADAPTER_ID,
             split=split,
             local_root=local_root,
-            name=DATASET_NAME,
+            name=name,
             label_space=LABEL_SPACE,
         )
 
@@ -76,7 +78,7 @@ class SpaceNetRegistrationService:
             existing = self.session.scalar(
                 select(RecordingModel).where(RecordingModel.external_path == external_path))
             if existing is not None:
-                self._link_member(existing, dataset.id, stem, split)
+                self._link_member(existing, dataset.id, stem, split, name)
                 skipped += 1
                 continue
 
@@ -94,7 +96,7 @@ class SpaceNetRegistrationService:
                 frequency_high_hz=sample.frequency_high_hz,
                 num_samples=sample.num_samples,
                 duration_s=sample.duration_s,
-                dataset_name=DATASET_NAME,
+                dataset_name=name,
                 dataset_split=split,
                 label_space=LABEL_SPACE,
                 has_ground_truth=bool(sample.signals),
@@ -133,14 +135,14 @@ class SpaceNetRegistrationService:
 
     @staticmethod
     def _link_member(
-        recording: RecordingModel, dataset_id: str, sample_key: str, split: str
+        recording: RecordingModel, dataset_id: str, sample_key: str, split: str, name: str = DATASET_NAME
     ) -> None:
         recording.dataset_id = dataset_id
         if not recording.sample_key:
             recording.sample_key = sample_key
         # Keep legacy display fields consistent during the transition.
         if recording.dataset_name is None:
-            recording.dataset_name = DATASET_NAME
+            recording.dataset_name = name
         if recording.dataset_split is None:
             recording.dataset_split = split
         if recording.label_space is None:
