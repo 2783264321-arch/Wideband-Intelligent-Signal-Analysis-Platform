@@ -259,7 +259,8 @@ export function SpectrumAnalysisPage() {
         <Card data-testid="spectrum-viewer-pane" style={{ flex: "1 1 520px", minWidth: 0 }}>
           <SpectrogramViewer
             meta={spectrogram}
-            detections={showPredictions ? detections : []}
+            detections={detections}
+            showDetections={showPredictions}
             groundTruth={showGroundTruth ? groundTruth : []}
             selectedDetectionId={selectedId}
             onSelectDetection={selectDetection}

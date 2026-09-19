@@ -116,6 +116,8 @@ test("renders distinct ground-truth, prediction, and selected overlays with a le
   const selected = screen.getByTestId("overlay-det-det_002");
   expect(gt).toHaveAttribute("data-overlay", "ground-truth");
   expect(gt).toHaveAttribute("stroke-dasharray");
+  // Ground truth must read as white, not the spectrogram's own green.
+  expect(gt.getAttribute("stroke")).toMatch(/fff|white/i);
   expect(selected).toHaveAttribute("data-overlay", "prediction");
   expect(selected).toHaveAttribute("data-selected", "true");
   expect(Number(selected.getAttribute("stroke-width"))).toBeGreaterThan(
@@ -125,6 +127,57 @@ test("renders distinct ground-truth, prediction, and selected overlays with a le
   expect(legend).toHaveTextContent("Ground Truth");
   expect(legend).toHaveTextContent("Prediction");
   expect(legend).toHaveTextContent("Selected prediction");
+});
+
+test("numbers every ground-truth box so the signal count is visible", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer
+        meta={meta}
+        detections={[]}
+        groundTruth={[groundTruth("gt_1"), groundTruth("gt_2"), groundTruth("gt_3")]}
+      />,
+    ),
+  );
+  const layer = screen.getByTestId("ground-truth-index-layer");
+  expect(layer).toBeInTheDocument();
+  expect(screen.getByTestId("overlay-gt-index-gt_1")).toHaveTextContent("1");
+  expect(screen.getByTestId("overlay-gt-index-gt_2")).toHaveTextContent("2");
+  expect(screen.getByTestId("overlay-gt-index-gt_3")).toHaveTextContent("3");
+});
+
+test("no ground-truth index layer when ground truth is hidden", () => {
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} groundTruth={[]} />));
+  expect(screen.queryByTestId("ground-truth-index-layer")).toBeNull();
+});
+
+test("the detection toggle hides orange boxes but never the selected highlight", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer
+        meta={meta}
+        detections={detections}
+        groundTruth={[]}
+        selectedDetectionId="det_002"
+        showDetections={false}
+      />,
+    ),
+  );
+  // The selected box survives the toggle and keeps its selected (red) styling.
+  const selected = screen.getByTestId("overlay-det-det_002");
+  expect(selected).toHaveAttribute("data-selected", "true");
+  expect(screen.getByTestId("overlay-det-glow-det_002")).toBeInTheDocument();
+  // The prediction legend entry is not advertised while predictions are hidden.
+  expect(screen.getByTestId("spectrogram-legend")).not.toHaveTextContent("Prediction");
+});
+
+test("with the detection toggle on, non-selected boxes are drawn as predictions", () => {
+  render(
+    renderWithLocalization(<SpectrogramViewer meta={meta} detections={detections} groundTruth={[]} />),
+  );
+  const box = screen.getByTestId("overlay-det-det_002");
+  expect(box).toHaveAttribute("data-selected", "false");
+  expect(screen.getByTestId("spectrogram-legend")).toHaveTextContent("Prediction");
 });
 
 test("analysis viewport height is substantial and independent of the raster natural aspect", () => {

@@ -18,6 +18,13 @@ interface SpectrogramViewerProps {
   onSelectDetection?: (id: string) => void;
   /** Pure representation hides the GT/Prediction/Selected overlay legend. */
   showOverlayLegend?: boolean;
+  /**
+   * Whether the orange prediction boxes are drawn. The SELECTED-detection
+   * highlight (red) is intentionally independent of this toggle: selecting a row
+   * in the results list must always be visible on the spectrogram, even when the
+   * user has turned the general detection overlay off.
+   */
+  showDetections?: boolean;
 }
 
 // Size concepts (do not conflate):
@@ -54,6 +61,7 @@ export function SpectrogramViewer({
   selectedDetectionId,
   onSelectDetection,
   showOverlayLegend = true,
+  showDetections = true,
 }: SpectrogramViewerProps) {
   const { t } = useLocalization();
   const { token } = theme.useToken();
@@ -142,7 +150,7 @@ export function SpectrogramViewer({
                   data-overlay="ground-truth"
                   {...geometry}
                   fill="transparent"
-                  stroke={token.colorSuccess}
+                  stroke={token.colorWhite}
                   strokeWidth={2}
                   strokeDasharray="6 3"
                   vectorEffect="non-scaling-stroke"
@@ -153,6 +161,7 @@ export function SpectrogramViewer({
             {detections.map((detection) => {
               const geometry = boxGeometry(detection, meta);
               const selected = detection.id === selectedDetectionId;
+              if (!selected && !showDetections) return null;
               return (
                 <g
                   key={detection.id}
@@ -192,26 +201,69 @@ export function SpectrogramViewer({
               );
             })}
           </svg>
+          {/*
+            Ground-truth index chips. GT order is the backend's stable physical
+            order, so the numbers are reproducible; they let a user see how many
+            labelled signals a sample actually contains. Rendered as HTML (not SVG
+            text) because the overlay SVG is non-uniformly scaled.
+          */}
+          {groundTruth.length > 0 ? (
+            <div
+              data-testid="ground-truth-index-layer"
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            >
+              {groundTruth.map((item, index) => {
+                const geometry = boxGeometry(item, meta);
+                return (
+                  <span
+                    key={`gt-index-${item.id}`}
+                    data-testid={`overlay-gt-index-${item.id}`}
+                    style={{
+                      position: "absolute",
+                      left: `${geometry.x}%`,
+                      top: `${geometry.y}%`,
+                      transform: geometry.y < 4 ? "translateY(0)" : "translateY(-100%)",
+                      color: token.colorWhite,
+                      background: "rgba(0, 0, 0, 0.6)",
+                      border: `1px solid ${token.colorWhite}`,
+                      borderRadius: 3,
+                      fontSize: 11,
+                      lineHeight: "13px",
+                      padding: "0 4px",
+                      whiteSpace: "nowrap",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {index + 1}
+                  </span>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
       </div>
-      {showOverlayLegend ? (
+      {showOverlayLegend && (groundTruth.length > 0 || detections.length > 0) ? (
       <div
         data-testid="spectrogram-legend"
         style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 8, color: token.colorTextSecondary, fontSize: 12 }}
       >
         <span>{t("spectrum.legend")}</span>
+        {groundTruth.length > 0 ? (
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <svg width="18" height="8" aria-hidden="true">
-            <rect x="1" y="1" width="16" height="6" fill="transparent" stroke={token.colorSuccess} strokeWidth="2" strokeDasharray="4 2" />
+            <rect x="1" y="1" width="16" height="6" fill="transparent" stroke={token.colorWhite} strokeWidth="2" strokeDasharray="4 2" />
           </svg>
           {t("spectrum.legendGroundTruth")}
         </span>
+        ) : null}
+        {showDetections && detections.length > 0 ? (
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <svg width="18" height="8" aria-hidden="true">
             <rect x="1" y="1" width="16" height="6" fill="transparent" stroke={token.colorWarning} strokeWidth="2" />
           </svg>
           {t("spectrum.legendPrediction")}
         </span>
+        ) : null}
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <svg width="18" height="8" aria-hidden="true">
             <rect x="1" y="1" width="16" height="6" fill={token.colorError} fillOpacity={0.14} stroke={token.colorError} strokeWidth="3" />

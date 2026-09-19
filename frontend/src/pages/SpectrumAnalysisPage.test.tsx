@@ -402,6 +402,55 @@ test("starting an analysis refreshes detections once the run completes", async (
   expect(screen.getByText("Completed")).toBeInTheDocument();
 });
 
+test("a selected detection stays highlighted with the detection overlay switched off", async () => {
+  const detectionWire = {
+    id: "det_1",
+    run_id: "run_r",
+    recording_id: "rec_1",
+    t_start_s: 0.01,
+    t_end_s: 0.02,
+    f_low_hz: 2440600000,
+    f_high_hz: 2440700000,
+    class_id: 9,
+    class_name: "LoRa 250kHz",
+    confidence: 0.94,
+    scores_json: null,
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify([localPipeline, detectorPipeline]));
+    if (url.endsWith("/api/recordings/rec_1")) return new Response(JSON.stringify(recording));
+    if (url.includes("/spectrogram")) return new Response(JSON.stringify(spectrogram));
+    if (url.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionLocalAvailable));
+    if (url.endsWith("/api/analysis-runs/run_r")) {
+      return new Response(JSON.stringify(runWire({ id: "run_r", status: "completed" })));
+    }
+    if (url.endsWith("/api/analysis-runs/run_r/detections")) {
+      return new Response(JSON.stringify([detectionWire]));
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/spectrum/rec_1?run=run_r"]}>
+        <Routes>
+          <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
+  );
+
+  await screen.findByText("Burst Demo");
+  // Turn the general detection overlay OFF: no orange boxes remain.
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Prediction" }));
+  await waitFor(() => expect(screen.queryByTestId("overlay-det-det_1")).toBeNull());
+
+  // Selecting the row must still show the selected (red) box.
+  fireEvent.click((await screen.findAllByText(/LoRa 250kHz/))[0]);
+  await waitFor(() =>
+    expect(screen.getByTestId("overlay-det-det_1")).toHaveAttribute("data-selected", "true"),
+  );
+});
+
 test("a completed run shows status and export, and no execution-environment chrome", async () => {
   const completedRemoteRun = runWire({
     id: "run_r",
