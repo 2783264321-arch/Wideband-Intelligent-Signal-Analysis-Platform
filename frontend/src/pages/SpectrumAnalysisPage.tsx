@@ -79,11 +79,16 @@ export function SpectrumAnalysisPage() {
         setSpectrogram(nextSpectrogram);
         setPipelines(nextPipelines);
         if (nextPipelines.length) setPipelineId((current) => preferredPipelineId(nextPipelines, current));
-        const [nextDetections, nextGroundTruth, nextRun] = await Promise.all([
-          runId ? getDetections(runId) : Promise.resolve([]),
+        const [nextGroundTruth, nextRun] = await Promise.all([
           nextRecording.hasGroundTruth ? getGroundTruth(recordingId) : Promise.resolve([]),
           runId ? getAnalysisRun(runId) : Promise.resolve(null),
         ]);
+        if (!active) return;
+        // Only a terminal run has stable results. A pending/running run is owned
+        // by the polling lifecycle, so fetching here would race it with an empty
+        // result set.
+        const nextDetections =
+          runId && nextRun?.status === "completed" ? await getDetections(runId) : [];
         if (!active) return;
         setDetections(nextDetections);
         setGroundTruth(nextGroundTruth);
@@ -181,13 +186,23 @@ export function SpectrumAnalysisPage() {
     <Space direction="vertical" size="middle" style={{ width: "100%" }}>
       {error ? <Alert type="error" showIcon message={t("spectrum.warning")} description={error} closable onClose={() => setError(null)} /> : null}
       <div>
-        <Button
-          data-testid="spectrum-back"
-          onClick={() => navigate(`/samples/${recordingId}`)}
-          style={{ marginBottom: 10 }}
-        >
-          {t("common.backTo")}
-        </Button>
+        <Space style={{ marginBottom: 10 }}>
+          <Button
+            data-testid="spectrum-back-library"
+            onClick={() =>
+              navigate(
+                recording.datasetId != null
+                  ? "/data-library?tab=datasets"
+                  : "/data-library?tab=standalone",
+              )
+            }
+          >
+            {t("common.backToLibrary")}
+          </Button>
+          <Button data-testid="spectrum-back" onClick={() => navigate(`/samples/${recordingId}`)}>
+            {t("common.backTo")}
+          </Button>
+        </Space>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div>
             <Typography.Title level={3} style={{ margin: 0 }}>{recording.name}</Typography.Title>

@@ -179,16 +179,16 @@ test("renders a dataset member with dataset context and no Delete action", async
   const context = await screen.findByTestId("sample-context");
   expect(context).toHaveTextContent("Dataset Sample");
   expect(context).toHaveTextContent("SpaceNet");
-  expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Time-Frequency Localization & ID" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 });
 
-test("renders a standalone member with Delete and Analyze", async () => {
+test("renders a standalone member with Delete and the workspace action", async () => {
   renderPage();
   expect(await screen.findByText("sample-a")).toBeInTheDocument();
   expect(await screen.findByTestId("sample-context")).toHaveTextContent("Standalone Sample");
   expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Time-Frequency Localization & ID" })).toBeInTheDocument();
 });
 
 test("Detections tab is user-friendly: time, pipeline, source, and spectrum view", async () => {
@@ -204,9 +204,9 @@ test("Detections tab is user-friendly: time, pipeline, source, and spectrum view
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_1?run=run_1");
 });
 
-test("Analyze opens the real spectrum workspace", async () => {
+test("the workspace action opens the real spectrum workspace", async () => {
   renderPage();
-  fireEvent.click(await screen.findByRole("button", { name: "Analyze" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Time-Frequency Localization & ID" }));
   expect(await screen.findByTestId("location-probe")).toHaveTextContent("/spectrum/rec_1");
 });
 

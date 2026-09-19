@@ -182,8 +182,11 @@ export function SampleDetailPage() {
           >
             {t("common.backToLibrary")}
           </Button>
-          <Button type="primary" onClick={() => navigate(`/spectrum/${recordingId}`)}>
-            {t("dataLibrary.analyze")}
+          <Button
+            type="primary"
+            onClick={() => navigate(`/spectrum/${recordingId}`)}
+          >
+            {t("dataLibrary.timeFrequencyWorkspace")}
           </Button>
           {recording && !isDatasetMember ? (
             <Button

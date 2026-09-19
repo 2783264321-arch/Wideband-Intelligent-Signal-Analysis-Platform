@@ -67,25 +67,33 @@ export function useRunPolling({ runId, onRun, onDetections, onError }: UseRunPol
         return;
       }
       if (!active) return;
-      onRunRef.current(run);
 
       if (ACTIVE_STATUSES.has(run.status)) {
+        onRunRef.current(run);
         schedule();
         return;
       }
 
       // Terminal: stop run polling.
       clear();
-      if (run.status === "completed") {
-        try {
-          const detections = await getDetections(boundRunId);
-          if (!active) return;
-          onDetectionsRef.current(detections);
-        } catch (reason) {
-          if (!active) return;
-          onErrorRef.current(reason);
-        }
+      if (run.status !== "completed") {
+        onRunRef.current(run);
+        return;
       }
+
+      // Fetch the results BEFORE publishing the terminal status. Publishing a
+      // terminal run makes the owner stop passing `runId`, which tears this
+      // lifecycle down (active=false) and would silently discard the results
+      // fetched afterwards — the run would show as completed with no detections.
+      let detections: DetectionResult[] | null = null;
+      try {
+        detections = await getDetections(boundRunId);
+      } catch (reason) {
+        if (active) onErrorRef.current(reason);
+      }
+      if (!active) return;
+      onRunRef.current(run);
+      if (detections !== null) onDetectionsRef.current(detections);
     };
 
     schedule();

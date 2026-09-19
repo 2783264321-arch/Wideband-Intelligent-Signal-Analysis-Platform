@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { SpectrumAnalysisPage } from "./SpectrumAnalysisPage";
 import { renderWithLocalization } from "../test-utils/renderWithLocalization";
 
@@ -201,6 +201,8 @@ function setup(options: SetupOptions = {}) {
       <MemoryRouter initialEntries={[initialPath]}>
         <Routes>
           <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+          <Route path="/samples/:recordingId" element={<LocationProbe />} />
+          <Route path="/data-library" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
       { locale },
@@ -208,6 +210,29 @@ function setup(options: SetupOptions = {}) {
   );
   return { posted, selectionCalls, resolveDeferred: () => resolveDeferred };
 }
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location-probe">{`${location.pathname}${location.search}`}</div>;
+}
+
+test("the workspace offers back-to-library and back-to-sample", async () => {
+  setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable });
+  await screen.findByText("Burst Demo");
+
+  fireEvent.click(screen.getByTestId("spectrum-back"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent("/samples/rec_1");
+});
+
+test("back-to-library targets the Standalone tab for a standalone sample", async () => {
+  setup({ pipelines: [localPipeline, detectorPipeline], selection: selectionLocalAvailable });
+  await screen.findByText("Burst Demo");
+
+  fireEvent.click(screen.getByTestId("spectrum-back-library"));
+  expect(await screen.findByTestId("location-probe")).toHaveTextContent(
+    "/data-library?tab=standalone",
+  );
+});
 
 test("the spectrum page resolves execution internally and never shows an environment selector", async () => {
   const { selectionCalls } = setup({ selection: selectionLocalAvailable, pipelines: [localPipeline, detectorPipeline] });
@@ -313,6 +338,67 @@ test("remote pending run polls to completed and renders detections", async () =>
   await waitFor(() => expect(screen.getByRole("button", { name: "Run Analysis" })).not.toBeDisabled());
   fireEvent.click(screen.getByRole("button", { name: "Run Analysis" }));
   await waitFor(() => expect(screen.getByText(/LoRa 250kHz/)).toBeInTheDocument(), { timeout: 4000 });
+  expect(screen.getByText("Completed")).toBeInTheDocument();
+});
+
+test("starting an analysis refreshes detections once the run completes", async () => {
+  // A pending run genuinely has NO detections yet; only the completed run does.
+  // The page's own post-create fetch therefore returns [] and must never win over
+  // the polling result.
+  const detectionWire = {
+    id: "det_1",
+    run_id: "run_r",
+    recording_id: "rec_1",
+    t_start_s: 0.01,
+    t_end_s: 0.02,
+    f_low_hz: 2440600000,
+    f_high_hz: 2440700000,
+    class_id: 9,
+    class_name: "LoRa 250kHz",
+    confidence: 0.94,
+    scores_json: null,
+  };
+  const pendingRun = runWire({ id: "run_r", status: "pending" });
+  const completedRun = runWire({ id: "run_r", status: "completed" });
+  let completed = false;
+  let runPolls = 0;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, fetchOptions?: RequestInit) => {
+    if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify([localPipeline, detectorPipeline]));
+    if (url.endsWith("/api/recordings/rec_1")) return new Response(JSON.stringify(recording));
+    if (url.includes("/spectrogram")) return new Response(JSON.stringify(spectrogram));
+    if (url.includes("/api/executor-selection")) return new Response(JSON.stringify(selectionLocalAvailable));
+    if (url.endsWith("/api/analysis-runs") && fetchOptions?.method === "POST") {
+      return new Response(JSON.stringify(pendingRun), { status: 201 });
+    }
+    if (url.endsWith("/api/analysis-runs/run_r")) {
+      runPolls += 1;
+      if (runPolls >= 2) completed = true;
+      return new Response(JSON.stringify(completed ? completedRun : pendingRun));
+    }
+    if (url.endsWith("/api/analysis-runs/run_r/detections")) {
+      // Emulate a real round-trip so React can re-render (and tear down the
+      // polling effect) before this resolves.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return new Response(JSON.stringify(completed ? [detectionWire] : []));
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(
+    renderWithLocalization(
+      <MemoryRouter initialEntries={["/spectrum/rec_1"]}>
+        <Routes>
+          <Route path="/spectrum/:recordingId" element={<SpectrumAnalysisPage />} />
+        </Routes>
+      </MemoryRouter>,
+    ),
+  );
+
+  await screen.findByText("Burst Demo");
+  const runButton = await screen.findByRole("button", { name: "Run Analysis" });
+  await waitFor(() => expect(runButton).not.toBeDisabled());
+  fireEvent.click(runButton);
+
+  expect(await screen.findByText(/LoRa 250kHz/, {}, { timeout: 5000 })).toBeInTheDocument();
   expect(screen.getByText("Completed")).toBeInTheDocument();
 });
 
