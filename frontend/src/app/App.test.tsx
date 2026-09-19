@@ -27,7 +27,7 @@ test("renders the task-oriented navigation and defaults to the Data Library", as
   );
 
   expect(screen.getByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
-  expect(screen.getByText("Dataset Analysis")).toBeInTheDocument();
+  expect(screen.getByText("Analysis Overview")).toBeInTheDocument();
   expect(screen.getByText("Algorithm Lab")).toBeInTheDocument();
   expect(screen.getByText("User Guide")).toBeInTheDocument();
   expect(screen.getByText("Settings")).toBeInTheDocument();

@@ -64,16 +64,18 @@ export function DatasetBenchmarksView({ selectedBenchmarkId, onBenchmarkOpen, on
 
   if (selectedBenchmarkId) {
     return (
-      <BenchmarkDetailView
-        evaluationId={selectedBenchmarkId}
-        onBack={() => onBenchmarkOpen(undefined)}
-        onOpenCase={onOpenCase}
-      />
+      <div data-testid="dataset-benchmarks-view">
+        <BenchmarkDetailView
+          evaluationId={selectedBenchmarkId}
+          onBack={() => onBenchmarkOpen(undefined)}
+          onOpenCase={onOpenCase}
+        />
+      </div>
     );
   }
 
   return (
-    <Space direction="vertical" style={{ width: "100%" }}>
+    <Space direction="vertical" style={{ width: "100%" }} data-testid="dataset-benchmarks-view">
       <Space>
         <Typography.Title level={3} style={{ margin: 0 }}>{t("benchmarks.title")}</Typography.Title>
         <Button onClick={() => setCreating(true)}>{t("common.newBenchmark")}</Button>

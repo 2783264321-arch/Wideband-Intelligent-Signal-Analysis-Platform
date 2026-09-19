@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
-test("primary navigation is exactly Data Library | Dataset Analysis | Algorithm Lab | User Guide | Settings", () => {
+test("primary navigation is exactly Data Library | Analysis Overview | Algorithm Lab | User Guide | Settings", () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <AppWithLocale />
@@ -39,7 +39,7 @@ test("primary navigation is exactly Data Library | Dataset Analysis | Algorithm 
   const items = screen.getAllByRole("menuitem");
   expect(items).toHaveLength(5);
   expect(screen.getByRole("menuitem", { name: /Data Library/ })).toBeInTheDocument();
-  expect(screen.getByRole("menuitem", { name: /Dataset Analysis/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /Analysis Overview/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /Algorithm Lab/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /User Guide/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /Settings/ })).toBeInTheDocument();
@@ -48,17 +48,21 @@ test("primary navigation is exactly Data Library | Dataset Analysis | Algorithm 
   expect(screen.queryByText("Spectrum Analysis")).toBeNull();
 });
 
-test("the Experiments route renders the Experiments tab shell", async () => {
+test("the Analysis Overview route shows the cross-dataset title and no duplicated tabs", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments"]}>
       <AppWithLocale />
     </MemoryRouter>,
   );
-  expect(await screen.findByRole("tab", { name: "Dataset Analysis" })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "Compare" })).toBeInTheDocument();
+  expect(
+    await screen.findByRole("heading", { name: "All Dataset Analyses" }),
+  ).toBeInTheDocument();
+  // Compare / Benchmarks belong to other surfaces now; they are not advertised here.
+  expect(screen.queryByRole("tab", { name: "Compare" })).toBeNull();
+  expect(screen.queryByRole("tab", { name: "Benchmarks" })).toBeNull();
 });
 
-test("?tab=compare shows the Compare tab", async () => {
+test("?tab=compare deep link still renders the compare workspace", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments?tab=compare"]}>
       <AppWithLocale />
@@ -76,13 +80,13 @@ test("the experiment detail route renders", async () => {
   expect(await screen.findByTestId("experiment-detail-page")).toBeInTheDocument();
 });
 
-test("dataset benchmarks are reachable under Experiments", async () => {
+test("dataset benchmarks remain reachable via the ?tab=benchmarks deep link", async () => {
   render(
     <MemoryRouter initialEntries={["/experiments?tab=benchmarks"]}>
       <AppWithLocale />
     </MemoryRouter>,
   );
-  expect((await screen.findAllByText("Benchmarks")).length).toBeGreaterThan(0);
+  expect(await screen.findByTestId("dataset-benchmarks-view")).toBeInTheDocument();
 });
 
 test("legacy algorithm-lab benchmark links redirect to Experiments", async () => {
@@ -91,7 +95,7 @@ test("legacy algorithm-lab benchmark links redirect to Experiments", async () =>
       <AppWithLocale />
     </MemoryRouter>,
   );
-  expect((await screen.findAllByText("Benchmarks")).length).toBeGreaterThan(0);
+  expect(await screen.findByTestId("dataset-benchmarks-view")).toBeInTheDocument();
 });
 
 test("algorithm-lab query drilldown still loads the case comparison workspace", async () => {
@@ -110,7 +114,7 @@ test("fresh UI defaults to Simplified Chinese primary navigation", async () => {
     </MemoryRouter>,
   );
   expect(await screen.findByRole("menuitem", { name: /数据管理/ })).toBeInTheDocument();
-  expect(screen.getByRole("menuitem", { name: /数据集分析/ })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: /分析总览/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /算法评测实验室/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /使用指南/ })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: /设置/ })).toBeInTheDocument();
