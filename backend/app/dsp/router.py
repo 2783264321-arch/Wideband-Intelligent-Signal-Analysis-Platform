@@ -22,6 +22,7 @@ class SpectrogramRead(BaseModel):
     t_end_s: float
     f_low_hz: float
     f_high_hz: float
+    num_frames: int = 0
 
 
 @router.get("/{recording_id}/spectrogram", response_model=SpectrogramRead)
@@ -29,9 +30,13 @@ def get_spectrogram(
     recording_id: str,
     request: Request,
     representation: Literal["stft"] = Query("stft"),
+    t_start_s: float | None = Query(None, ge=0),
+    t_end_s: float | None = Query(None, gt=0),
 ):
     if representation != "stft":
         raise PlatformError("INVALID_REPRESENTATION", "Only STFT is implemented in the core slice.")
+    if (t_start_s is None) != (t_end_s is None):
+        raise PlatformError("INVALID_RECORDING", "t_start_s and t_end_s must be given together.")
 
     with request.app.state.database.session_factory() as session:
         recording = RecordingService(
@@ -39,11 +44,16 @@ def get_spectrogram(
             request.app.state.storage,
             request.app.state.settings.data_root,
         ).get(recording_id)
-        return get_or_create_stft_preview(
-            recording,
-            data_root=request.app.state.settings.data_root,
-            storage=request.app.state.storage,
-        )
+        try:
+            return get_or_create_stft_preview(
+                recording,
+                data_root=request.app.state.settings.data_root,
+                storage=request.app.state.storage,
+                t_start_s=t_start_s,
+                t_end_s=t_end_s,
+            )
+        except ValueError as error:
+            raise PlatformError("INVALID_RECORDING", str(error)) from error
 
 
 class SpectrumRead(BaseModel):

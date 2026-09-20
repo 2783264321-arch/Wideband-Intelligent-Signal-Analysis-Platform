@@ -112,6 +112,101 @@ def test_spectrogram_preview_bounds_frames_for_long_recordings(tmp_path: Path):
     assert result.time_axis_s[-1] > duration_s * 0.9
 
 
+def test_compute_decimated_stft_window_shifts_axis_and_raises_resolution(tmp_path: Path):
+    path = tmp_path / "long.iq"
+    samples = 2_000_000
+    np.zeros(samples, dtype="<c8").tofile(path)
+
+    overview = compute_decimated_stft(
+        path,
+        "complex64_le",
+        sample_rate_hz=1_000_000.0,
+        center_frequency_hz=2_441_000_000.0,
+        num_samples=samples,
+        nperseg=512,
+        noverlap=256,
+        nfft=512,
+    )
+    window = compute_decimated_stft(
+        path,
+        "complex64_le",
+        sample_rate_hz=1_000_000.0,
+        center_frequency_hz=2_441_000_000.0,
+        num_samples=100_000,
+        nperseg=512,
+        noverlap=256,
+        nfft=512,
+        start_sample=1_000_000,
+    )
+
+    # Same bounded column budget...
+    assert window.magnitude_db.shape[1] <= MAX_PREVIEW_FRAMES
+    # ...but the windowed axis is absolute and confined to [1.0 s, 1.1 s].
+    assert window.time_axis_s[0] >= 0.99
+    assert window.time_axis_s[-1] <= 1.11
+    # A 20x shorter span spends the same budget on finer columns.
+    overview_step = overview.time_axis_s[1] - overview.time_axis_s[0]
+    window_step = window.time_axis_s[1] - window.time_axis_s[0]
+    assert window_step < overview_step
+
+
+def test_spectrogram_window_returns_bounds_and_separate_cache(client, tmp_path: Path):
+    path = tmp_path / "long.iq"
+    np.zeros(2_000_000, dtype="<c8").tofile(path)
+    registered = client.post(
+        "/api/recordings/register-path",
+        json={
+            "path": str(path),
+            "name": "long-spectrogram",
+            "data_format": "complex64_le",
+            "sample_rate_hz": 1_000_000.0,
+            "center_frequency_hz": 2_441_000_000.0,
+        },
+    ).json()
+    recording_id = registered["id"]
+
+    overview = client.get(f"/api/recordings/{recording_id}/spectrogram").json()
+    assert overview["t_start_s"] == 0.0
+    assert np.isclose(overview["t_end_s"], 2.0)
+
+    window = client.get(
+        f"/api/recordings/{recording_id}/spectrogram?t_start_s=0.5&t_end_s=0.7"
+    ).json()
+    assert np.isclose(window["t_start_s"], 0.5)
+    assert np.isclose(window["t_end_s"], 0.7)
+    assert window["image_url"] != overview["image_url"]
+
+    # Only a bounded PNG is cached per window, never the magnitude array.
+    cache_dir = client.app.state.settings.data_root / "cache" / "spectrograms"
+    assert len(list(cache_dir.glob("*.png"))) >= 2
+    assert not any(cache_dir.glob("*.npz"))
+
+
+def test_spectrogram_window_rejects_out_of_range(client, tmp_path: Path):
+    path = tmp_path / "long.iq"
+    np.zeros(2_000_000, dtype="<c8").tofile(path)
+    recording_id = client.post(
+        "/api/recordings/register-path",
+        json={
+            "path": str(path),
+            "name": "long-spectrogram-bad",
+            "data_format": "complex64_le",
+            "sample_rate_hz": 1_000_000.0,
+            "center_frequency_hz": 2_441_000_000.0,
+        },
+    ).json()["id"]
+
+    assert client.get(f"/api/recordings/{recording_id}/spectrogram?t_start_s=0.5").status_code == 400
+    assert (
+        client.get(f"/api/recordings/{recording_id}/spectrogram?t_start_s=0.5&t_end_s=9.0").status_code
+        == 400
+    )
+    assert (
+        client.get(f"/api/recordings/{recording_id}/spectrogram?t_start_s=0.7&t_end_s=0.5").status_code
+        == 400
+    )
+
+
 def test_waveform_preview_decimates_instead_of_reading_everything(client, tmp_path: Path):
     path = tmp_path / "long.iq"
     samples = 2_000_000

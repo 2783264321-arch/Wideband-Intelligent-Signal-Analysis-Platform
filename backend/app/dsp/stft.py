@@ -35,6 +35,7 @@ class SpectrogramPreview:
     t_end_s: float
     f_low_hz: float
     f_high_hz: float
+    num_frames: int = 0
 
 
 def compute_stft(
@@ -76,9 +77,23 @@ def compute_stft(
     )
 
 
-def _cache_key(recording_id: str, nperseg: int, noverlap: int, nfft: int) -> str:
-    payload = f"{recording_id}:stft:{nperseg}:{noverlap}:{nfft}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:24]
+def _window_cache_token(start_sample: int, end_sample: int) -> str:
+    # Round to a 1 ms grid so tiny float noise does not spawn a new cache file per
+    # request, while distinct windows stay distinct.
+    return f"{start_sample // 1000}:{end_sample // 1000}"
+
+
+def _cache_key(
+    recording_id: str,
+    nperseg: int,
+    noverlap: int,
+    nfft: int,
+    window: str | None = None,
+) -> str:
+    payload = f"{recording_id}:stft:{nperseg}:{noverlap}:{nfft}"
+    if window is not None:
+        payload = f"{payload}:{window}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
 def compute_decimated_stft(
@@ -92,27 +107,37 @@ def compute_decimated_stft(
     noverlap: int = 256,
     nfft: int = 512,
     target_frames: int = MAX_PREVIEW_FRAMES,
+    start_sample: int = 0,
 ) -> SpectrogramResult:
     """STFT preview that never loads the whole recording.
 
     A 20 s, 100 MHz recording has ~7.8M frames: computing (and caching) all of them
     needs tens of GB. The display cannot show them anyway, so the preview keeps at
-    most ``target_frames`` columns, evenly spaced over the FULL duration, and reads
-    only those windows (``target_frames * nperseg`` samples). The time axis therefore
-    still spans the whole recording, which keeps the overlay mapping exact.
+    most ``target_frames`` columns, evenly spaced over the requested span, and reads
+    only those windows (``target_frames * nperseg`` samples).
+
+    ``start_sample`` shifts the span into the recording: with ``start_sample=0`` and
+    ``num_samples`` = the whole file the preview spans the full duration (the overview
+    case). Passing a sub-range (``start_sample`` + in-window ``num_samples``) raises the
+    column resolution for that window by the same factor, which is how a long recording
+    stays inspectable. The returned time axis is absolute (recording clock), so overlay
+    mapping stays exact either way.
     """
     if num_samples <= 0:
         raise ValueError("Recording has no samples.")
+    if start_sample < 0:
+        raise ValueError("start_sample must be non-negative.")
     hop = max(nperseg - noverlap, 1)
     total_frames = max(1, 1 + (num_samples - nperseg) // hop) if num_samples >= nperseg else 1
     frame_stride = max(1, math.ceil(total_frames / max(target_frames, 1)))
     frame_positions = np.arange(0, total_frames, frame_stride, dtype=np.int64)[:target_frames]
     starts = frame_positions * hop
     starts = np.minimum(starts, max(num_samples - nperseg, 0))
+    starts = starts + start_sample
 
     # One bounded gather: frames x nperseg samples (never the whole file).
     window_indices = (starts[:, None] + np.arange(nperseg, dtype=np.int64)[None, :]).ravel()
-    window_indices = np.clip(window_indices, 0, max(num_samples - 1, 0))
+    window_indices = np.clip(window_indices, 0, max(start_sample + num_samples - 1, 0))
     block = read_samples_at_from_path(path, data_format, window_indices)
     frames = block.reshape(starts.size, nperseg)
 
@@ -141,9 +166,37 @@ def get_or_create_stft_preview(
     nperseg: int = 512,
     noverlap: int = 256,
     nfft: int = 512,
+    t_start_s: float | None = None,
+    t_end_s: float | None = None,
 ) -> SpectrogramPreview:
+    """Full-duration overview when no window is given; a high-resolution slice otherwise.
+
+    A window (``t_start_s``/``t_end_s``) keeps the same column budget but spends it on a
+    shorter span, so the per-column time resolution improves by ``duration / window``.
+    Results are cached per window.
+    """
+    duration_s = float(recording.duration_s)
+    if duration_s <= 0:
+        raise ValueError("Recording has no duration.")
+    start_s = 0.0 if t_start_s is None else max(0.0, float(t_start_s))
+    end_s = duration_s if t_end_s is None else float(t_end_s)
+    if not (0.0 <= start_s < end_s <= duration_s):
+        raise ValueError("Requested window must satisfy 0 <= t_start_s < t_end_s <= duration.")
+    if end_s - start_s < nperseg / recording.sample_rate_hz:
+        raise ValueError("Requested window is shorter than a single STFT frame.")
+
+    is_overview = start_s <= 0.0 and end_s >= duration_s
+    start_sample = 0 if is_overview else int(round(start_s * recording.sample_rate_hz))
+    window_samples = (
+        int(recording.num_samples)
+        if is_overview
+        else max(nperseg, int(round((end_s - start_s) * recording.sample_rate_hz)))
+    )
+    window_samples = min(window_samples, int(recording.num_samples) - start_sample)
+
+    window_token = None if is_overview else _window_cache_token(start_sample, start_sample + window_samples)
     cache_dir = storage.spectrogram_cache_dir()
-    key = _cache_key(recording.id, nperseg, noverlap, nfft)
+    key = _cache_key(recording.id, nperseg, noverlap, nfft, window_token)
     png_path = cache_dir / f"{key}.png"
 
     if not png_path.exists():
@@ -153,19 +206,28 @@ def get_or_create_stft_preview(
             recording.data_format,
             sample_rate_hz=recording.sample_rate_hz,
             center_frequency_hz=recording.center_frequency_hz,
-            num_samples=int(recording.num_samples),
+            num_samples=window_samples,
             nperseg=nperseg,
             noverlap=noverlap,
             nfft=nfft,
+            start_sample=start_sample,
         )
         cache_dir.mkdir(parents=True, exist_ok=True)
         _write_preview_png(png_path, result.magnitude_db)
+        num_frames = int(result.time_axis_s.size)
+    else:
+        num_frames = 0
 
+    actual_start_s = (start_sample / recording.sample_rate_hz) if not is_overview else 0.0
+    actual_end_s = (
+        (start_sample + window_samples) / recording.sample_rate_hz if not is_overview else duration_s
+    )
     return SpectrogramPreview(
         representation="stft",
         image_url=f"/media/spectrograms/{png_path.name}",
-        t_start_s=0.0,
-        t_end_s=recording.duration_s,
+        t_start_s=min(actual_start_s, duration_s),
+        t_end_s=min(actual_end_s, duration_s),
         f_low_hz=recording.frequency_low_hz,
         f_high_hz=recording.frequency_high_hz,
+        num_frames=num_frames,
     )
