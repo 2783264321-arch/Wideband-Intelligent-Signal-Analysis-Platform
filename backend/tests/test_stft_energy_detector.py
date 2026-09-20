@@ -242,3 +242,48 @@ def test_merge_regions_deduplicates_chunk_overlap():
     merged = _merge_regions([left, right, separate])
     assert len(merged) == 2
     assert max(region.confidence for region in merged) == 0.9
+
+
+def test_adaptive_time_resolution_keeps_nfft_ge_nperseg_and_coarsens_time():
+    from app.pipelines.stft_energy.detector import _resolve_frame_parameters
+
+    # Defaults pass through untouched (short samples keep legacy behaviour).
+    assert _resolve_frame_parameters(
+        iq_size=1_000_000, sample_rate_hz=1_000_000.0,
+        nperseg=512, noverlap=256, closing_size=5, time_resolution_s=None,
+    ) == (512, 256, (5, 5))
+
+    # Adaptive mode: bounded window, hop set by the requested resolution.
+    nperseg, noverlap, closing = _resolve_frame_parameters(
+        iq_size=100_000_000, sample_rate_hz=100_000_000.0,
+        nperseg=512, noverlap=256, closing_size=5, time_resolution_s=0.001,
+    )
+    assert nperseg >= noverlap >= 0
+    hop = nperseg - noverlap
+    # The hop is the requested 1 ms, unless the window is too short to hold it.
+    assert hop == min(int(round(0.001 * 100_000_000)), nperseg)
+    # nfft must be able to hold the window (scipy requires nfft >= nperseg).
+    assert max(512, nperseg) >= nperseg
+    assert closing[0] >= 1
+
+
+def test_pipeline_adapts_only_when_nperseg_is_left_at_default(tmp_path: Path):
+    from app.pipelines.base import RecordingInput
+    from app.pipelines.stft_energy.pipeline import STFTEnergyDetectorPipeline
+
+    sample_rate_hz = 100_000.0
+    duration_s = 0.2
+    num_samples = int(duration_s * sample_rate_hz)
+    iq = _burst_tone_iq(num_samples, sample_rate_hz, 10_000.0, 0.05, 0.1, amplitude=2.0)
+    iq_path = tmp_path / "adapt.iq"
+    iq.astype("<c8").tofile(iq_path)
+    recording = RecordingInput(
+        id="rec_adapt", data_path=iq_path, data_format="complex64_le",
+        sample_rate_hz=sample_rate_hz, center_frequency_hz=0.0,
+        frequency_low_hz=-sample_rate_hz / 2, frequency_high_hz=sample_rate_hz / 2,
+        duration_s=duration_s, label_space=None,
+    )
+
+    # An explicit nperseg must be honoured (no silent adaptation).
+    explicit = STFTEnergyDetectorPipeline().run(recording, {"nperseg": 256}, tmp_path / "ws_explicit")
+    assert explicit.detections

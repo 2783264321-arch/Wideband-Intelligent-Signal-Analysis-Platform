@@ -20,6 +20,10 @@ from app.recordings.reader import read_segment_from_path
 CHUNK_SECONDS = 1.0
 CHUNK_OVERLAP_SECONDS = 0.02
 
+# Time hop used when adapting to wideband captures (see detect_stft_energy). 1 ms is
+# fine enough to separate real bursts yet coarse enough that a signal stays one region.
+_AUTO_TIME_RESOLUTION_S = 0.001
+
 
 def _chunk_bounds(num_samples: int, chunk_samples: int, overlap_samples: int) -> list[tuple[int, int]]:
     """Half-open (start, end) sample ranges covering [0, num_samples) with overlap."""
@@ -84,6 +88,7 @@ def _definition() -> PipelineDefinition:
                 "min_area": {"type": "integer", "default": 100},
                 "min_duration_s": {"type": "number", "default": 0.0},
                 "min_bandwidth_hz": {"type": "number", "default": 0.0},
+                "time_resolution_s": {"type": "number", "default": 0.0},
             },
         },
     )
@@ -101,6 +106,15 @@ class STFTEnergyDetectorPipeline(Pipeline):
         overlap_samples = max(int(round(CHUNK_OVERLAP_SECONDS * recording.sample_rate_hz)), 0)
         bounds = _chunk_bounds(num_samples, chunk_samples, overlap_samples)
 
+        # Wideband captures need a coarser time grid or one signal shatters into
+        # thousands of slivers. Apply it automatically unless the caller tuned it,
+        # so short samples keep the exact legacy behaviour.
+        effective_parameters = dict(parameters)
+        if not effective_parameters.get("time_resolution_s"):
+            default_nperseg = _definition().parameter_schema["properties"]["nperseg"]["default"]
+            if effective_parameters.get("nperseg", default_nperseg) == default_nperseg:
+                effective_parameters["time_resolution_s"] = _AUTO_TIME_RESOLUTION_S
+
         collected: list[EnergyRegion] = []
         for start, end in bounds:
             iq = read_segment_from_path(
@@ -112,7 +126,7 @@ class STFTEnergyDetectorPipeline(Pipeline):
                     sample_rate_hz=recording.sample_rate_hz,
                     center_frequency_hz=recording.center_frequency_hz,
                     time_offset_s=start / recording.sample_rate_hz,
-                    **parameters,
+                    **effective_parameters,
                 )
             )
 

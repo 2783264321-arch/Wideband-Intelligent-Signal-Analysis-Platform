@@ -171,6 +171,7 @@ _STFT_SUPPORTED_PARAMETERS = {
     "min_area": 50,
     "min_duration_s": 0.01,
     "min_bandwidth_hz": 1000.0,
+    "time_resolution_s": 0.001,
 }
 
 
