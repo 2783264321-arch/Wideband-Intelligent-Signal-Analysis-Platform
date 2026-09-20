@@ -268,7 +268,10 @@ export function SpectrogramViewer({
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") onSelectDetection?.(detection.id);
                   }}
-                  style={{ cursor: "pointer" }}
+                  // No focus ring: clicking a box in the plot must look exactly like
+                  // selecting it in the results list (red box + tint), not like a
+                  // browser-default black/white outline. Selection is the indicator.
+                  style={{ cursor: "pointer", outline: "none" }}
                 >
                   {selected ? (
                     <rect
@@ -363,20 +366,24 @@ export function SpectrogramViewer({
           </svg>
           {t("spectrum.legendSelected")}
         </span>
-        {detectionsCapped ? (
-          <span data-testid="spectrogram-legend-density-note" style={{ color: token.colorWarning }}>
-            {t("spectrum.legendDensityNote", {
-              shown: String(drawnDetections.length),
-              total: String(detections.length),
-            })}
-          </span>
-        ) : null}
-        {!groundTruthNumbered && drawnGroundTruth.length > 0 ? (
-          <span data-testid="spectrogram-legend-gt-numbering-note">
-            {t("spectrum.legendNumberingHidden")}
-          </span>
-        ) : null}
       </div>
+      ) : null}
+      {detectionsCapped || (!groundTruthNumbered && drawnGroundTruth.length > 0) ? (
+        <div
+          data-testid="spectrogram-overlay-notes"
+          style={{ marginTop: 6, color: token.colorTextSecondary, fontSize: 12 }}
+        >
+          {detectionsCapped
+            ? t("spectrum.legendDensityNote", {
+                shown: String(drawnDetections.length),
+                total: String(detections.length),
+              })
+            : null}
+          {detectionsCapped && !groundTruthNumbered && drawnGroundTruth.length > 0 ? " · " : null}
+          {!groundTruthNumbered && drawnGroundTruth.length > 0
+            ? t("spectrum.legendNumberingHidden")
+            : null}
+        </div>
       ) : null}
       <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>
         <span style={{ color: token.colorTextSecondary }}>{meta.tStartS.toFixed(6)} s</span>

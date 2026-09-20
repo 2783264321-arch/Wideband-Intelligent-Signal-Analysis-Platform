@@ -243,7 +243,7 @@ test("a dense prediction set keeps only the strongest boxes and says so", () => 
 
   const drawn = screen.getAllByTestId(/^overlay-det-det_/);
   expect(drawn.length).toBeLessThanOrEqual(200);
-  const note = screen.getByTestId("spectrogram-legend-density-note");
+  const note = screen.getByTestId("spectrogram-overlay-notes");
   expect(note).toHaveTextContent("top");
   expect(note).toHaveTextContent("420");
 });
@@ -267,7 +267,7 @@ test("ground-truth numbering is hidden for very dense ground truth", () => {
   render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} groundTruth={many} />));
 
   expect(screen.queryByTestId("ground-truth-index-layer")).toBeNull();
-  expect(screen.getByTestId("spectrogram-legend-gt-numbering-note")).toBeInTheDocument();
+  expect(screen.getByTestId("spectrogram-overlay-notes")).toBeInTheDocument();
   expect(screen.getAllByTestId(/^overlay-gt-gt_/).length).toBe(40);
 });
 
@@ -278,5 +278,5 @@ test("ordinary ground truth still gets numbers", () => {
     ),
   );
   expect(screen.getByTestId("overlay-gt-index-gt_1")).toHaveTextContent("1");
-  expect(screen.queryByTestId("spectrogram-legend-gt-numbering-note")).toBeNull();
+  expect(screen.queryByTestId("spectrogram-overlay-notes")).toBeNull();
 });
