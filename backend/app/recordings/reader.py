@@ -71,6 +71,23 @@ def read_segment_from_path(
         pairs = segment.reshape(-1, 2)
         return (pairs[:, 0] + 1j * pairs[:, 1]).astype(np.complex64, copy=False)
 
+    if data_format == "int16_interleaved_le":
+        # Same interleaved layout as float16, wider integer samples: this is what
+        # synthetic/emulated captures and many SDR front-ends write. int16 ->
+        # float32 is exact, so no precision is lost.
+        byte_size = path.stat().st_size
+        if byte_size % 4:
+            raise PlatformError("INVALID_RECORDING", "int16 interleaved IQ byte length is not divisible by 4.")
+        available = byte_size // 4
+        count = _validate_segment(available, start_sample, sample_count)
+        data = np.memmap(path, mode="r", dtype="<i2", shape=(available * 2,))
+        try:
+            segment = np.asarray(data[start_sample * 2:(start_sample + count) * 2], dtype=np.float32).copy()
+        finally:
+            del data
+        pairs = segment.reshape(-1, 2)
+        return (pairs[:, 0] + 1j * pairs[:, 1]).astype(np.complex64, copy=False)
+
     raise PlatformError("INVALID_RECORDING", f"Unsupported IQ format: {data_format}")
 
 

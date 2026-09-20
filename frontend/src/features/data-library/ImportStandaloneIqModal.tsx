@@ -18,6 +18,7 @@ interface ImportFormValues {
 const PATH_FORMATS = [
   { value: "complex64_le", label: "complex64_le" },
   { value: "float16_interleaved_le", label: "float16_interleaved_le" },
+  { value: "int16_interleaved_le", label: "int16_interleaved_le" },
 ];
 
 /**

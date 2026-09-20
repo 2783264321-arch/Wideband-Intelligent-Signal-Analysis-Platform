@@ -19,6 +19,13 @@ def _float16_file(path: Path) -> None:
     values.tofile(path)
 
 
+def _int16_file(path: Path) -> None:
+    # Interleaved [I0, Q0, I1, Q1, ...] little-endian int16.
+    values = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype='<i2')
+    values.tofile(path)
+
+
+
 def _recording(path: Path, data_format: str, num_samples: int, *, external: bool = True) -> RecordingModel:
     return RecordingModel(
         id="rec_reader",
@@ -110,3 +117,33 @@ def test_read_segment_rejects_unsupported_format(tmp_path: Path):
     _complex64_file(path)
     with pytest.raises(PlatformError):
         read_segment_from_path(path, "sigmf_cf32")
+
+
+def test_int16_interleaved_segment_read_returns_exact_complex64(tmp_path: Path):
+    path = tmp_path / "scene.iq"
+    _int16_file(path)
+    iq = read_segment_from_path(path, "int16_interleaved_le", start_sample=1, sample_count=3)
+    assert iq.dtype == np.complex64
+    # int16 -> float32 is exact: no scaling, no precision loss.
+    np.testing.assert_array_equal(iq, np.array([3 + 4j, 5 + 6j, 7 + 8j], dtype=np.complex64))
+
+
+def test_int16_offset_read_matches_sample_offsets(tmp_path: Path):
+    path = tmp_path / "scene.iq"
+    _int16_file(path)
+    iq = read_segment_from_path(path, "int16_interleaved_le", start_sample=4, sample_count=1)
+    np.testing.assert_array_equal(iq, np.array([9 + 10j], dtype=np.complex64))
+
+
+def test_int16_read_preserves_full_scale_values(tmp_path: Path):
+    path = tmp_path / "fullscale.iq"
+    np.array([-32768, 32767], dtype="<i2").tofile(path)
+    iq = read_segment_from_path(path, "int16_interleaved_le")
+    np.testing.assert_array_equal(iq, np.array([-32768 + 32767j], dtype=np.complex64))
+
+
+def test_read_segment_rejects_truncated_int16_length(tmp_path: Path):
+    path = tmp_path / "truncated.iq"
+    np.array([1, 2, 3], dtype="<i2").tofile(path)  # 3 ints -> not a full I/Q pair
+    with pytest.raises(PlatformError):
+        read_segment_from_path(path, "int16_interleaved_le")

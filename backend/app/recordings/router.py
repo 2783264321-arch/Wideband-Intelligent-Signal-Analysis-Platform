@@ -90,7 +90,7 @@ def import_recording(
         if resolved_format not in PATH_FORMAT_BYTES:
             raise PlatformError(
                 "INVALID_RECORDING",
-                "Unsupported data format. Use complex64_le or float16_interleaved_le.",
+                "Unsupported data format. Use one of: complex64_le, float16_interleaved_le, int16_interleaved_le.",
                 422,
             )
 

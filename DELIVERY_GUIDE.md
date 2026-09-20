@@ -200,6 +200,10 @@ wisa certificate install --from <上一步输出里的 evidence_dir>
 | 导出的包很大 | Analysis Bundle **只含计算结果**（detections），不含原始 IQ；若很大请确认没有把 IQ 打进去 |
 | 端口被占用 | 后端 `8000`、前端 `5173`；本说明假设这两个端口 |
 | 想接入完整 SpaceNet（2500 条） | 数据管理 → 添加数据 → 注册数据集 → 填 SpaceNet `test` 目录路径（仅登记元数据，不复制 IQ） |
+| 有一套自己的 IQ（int16/float16/complex64 交错）想单独看 | 数据管理 → 添加数据 → 添加独立 IQ → 注册本地路径，选对 **数据格式**：
+`complex64_le`(8B/采样) / `float16_interleaved_le`(4B) / `int16_interleaved_le`(4B)，填 Fs/Fc 即可。<br>
+若是 `server_dataset_generator` 生成的场景，用 `scripts/import_generated_iq_sample.py`（直接读原始 int16，无需转码）：<br>
+`python scripts/import_generated_iq_sample.py --iq scene_000000.iq --label scene_000000.json --out <临时路径> --name pioneer-scene0` |
 
 ---
 

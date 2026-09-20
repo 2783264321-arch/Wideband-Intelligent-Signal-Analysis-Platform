@@ -19,7 +19,10 @@ from app.storage.service import StorageService
 PATH_FORMAT_BYTES: dict[str, int] = {
     "complex64_le": 8,
     "float16_interleaved_le": 4,
+    "int16_interleaved_le": 4,
 }
+
+SUPPORTED_PATH_FORMATS = ", ".join(sorted(PATH_FORMAT_BYTES))
 
 
 class RecordingService:
@@ -64,7 +67,7 @@ class RecordingService:
         if data_format not in PATH_FORMAT_BYTES:
             raise PlatformError(
                 "INVALID_RECORDING",
-                "Unsupported path data format. Use complex64_le or float16_interleaved_le.",
+                "Unsupported path data format. Use one of: complex64_le, float16_interleaved_le, int16_interleaved_le.",
             )
         candidate = Path(path)
         if not candidate.is_absolute():
@@ -161,7 +164,7 @@ class RecordingService:
         if bytes_per_sample is None:
             raise PlatformError(
                 "INVALID_RECORDING",
-                "Unsupported data format. Use complex64_le or float16_interleaved_le.",
+                "Unsupported data format. Use one of: complex64_le, float16_interleaved_le, int16_interleaved_le.",
             )
 
         token = f"upload_{uuid4().hex}"
