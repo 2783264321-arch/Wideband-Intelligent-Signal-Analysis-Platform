@@ -37,7 +37,7 @@ class DatasetReadService:
         rows = list(
             self.session.scalars(
                 select(DatasetModel)
-                .order_by(DatasetModel.name, DatasetModel.split, DatasetModel.id)
+                .order_by(DatasetModel.created_at.desc(), DatasetModel.id.desc())
                 .limit(limit)
                 .offset(offset)
             ).all()

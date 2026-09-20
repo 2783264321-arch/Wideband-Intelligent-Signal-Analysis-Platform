@@ -90,6 +90,28 @@ def test_standalone_samples_exclude_dataset_members(client, session, tmp_path):
     assert names == {"standalone_1"}
 
 
+def test_standalone_samples_are_newest_first(client, session, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, name in enumerate(["older", "middle", "newest"]):
+        recording = RecordingModel(
+            id=f"rec_standalone_{name}", name=name,
+            data_path=f"recordings/rec_standalone_{name}/raw.iq",
+            data_format="complex64_le", source="custom", external_path=None,
+            sample_rate_hz=1.0, center_frequency_hz=0.0, frequency_low_hz=-0.5,
+            frequency_high_hz=0.5, num_samples=1, duration_s=1.0, dataset_name=None,
+            dataset_split=None, label_space=None, has_ground_truth=False,
+            created_at=base + timedelta(minutes=index),
+        )
+        session.add(recording)
+    session.commit()
+
+    body = client.get("/api/data-library/standalone-samples").json()
+    names = [item["name"] for item in body["items"]]
+    assert names == ["newest", "middle", "older"]
+
+
 def test_analysis_history_includes_imported_batch_before_evaluation(client, session, tmp_path):
     root = tmp_path / "SpaceNet-H"
     members = [_add_member(session, root, "h1"), _add_member(session, root, "h2")]

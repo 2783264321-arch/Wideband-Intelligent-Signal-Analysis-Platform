@@ -135,7 +135,7 @@ class DataLibraryService:
         total = self.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
         rows = list(
             self.session.scalars(
-                statement.order_by(RecordingModel.created_at, RecordingModel.id)
+                statement.order_by(RecordingModel.created_at.desc(), RecordingModel.id.desc())
                 .limit(limit)
                 .offset(offset)
             ).all()

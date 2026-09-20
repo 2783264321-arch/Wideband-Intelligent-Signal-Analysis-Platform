@@ -36,6 +36,20 @@ def test_list_datasets_paginates(client, session):
     assert rest["total"] == 3 and len(rest["items"]) == 1
 
 
+def test_list_datasets_are_newest_first(client, session):
+    from datetime import datetime, timedelta, timezone
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, name in enumerate(["Alpha", "Beta", "Gamma"]):
+        dataset = _add_dataset(session, name=name, root=f"D:/SpaceNet{name}")
+        dataset.created_at = base + timedelta(minutes=index)
+    session.commit()
+
+    page = client.get("/api/datasets?limit=10&offset=0").json()
+    # Insertion order is Alpha, Beta, Gamma; newest first reverses it.
+    assert [item["name"] for item in page["items"]] == ["Gamma", "Beta", "Alpha"]
+
+
 def test_get_dataset_and_unknown_404(client, session):
     dataset = _add_dataset(session, count=2)
     session.commit()
