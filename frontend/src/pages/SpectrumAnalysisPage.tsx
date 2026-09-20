@@ -127,8 +127,8 @@ export function SpectrumAnalysisPage() {
     return () => { active = false; };
   }, [recordingId, runId]);
 
-  // The overview is fetched with the initial load; switching the time window
-  // refetches just the spectrogram for that slice (higher resolution per column).
+  // The initial load fetches the full-duration overview; any window change
+  // (including switching back to the overview) refetches just the spectrogram.
   const windowOptions = useMemo(
     () => (recording ? timeWindowOptions(recording.durationS) : []),
     [recording],
@@ -144,7 +144,16 @@ export function SpectrumAnalysisPage() {
     return t("spectrum.resolutionHint", { ms: (secondsPerColumn * 1000).toFixed(2) });
   }, [spectrogram, t]);
   useEffect(() => {
-    if (!recording || !activeWindow || activeWindow.value === OVERVIEW_VALUE) return undefined;
+    if (!recording || !activeWindow) return undefined;
+    // The initial load already fetched the overview, so skip the first redundant
+    // request only when the shown spectrogram already covers the whole recording.
+    const shown = spectrogram;
+    const alreadyOverview =
+      activeWindow.value === OVERVIEW_VALUE &&
+      shown != null &&
+      shown.tStartS <= 0 &&
+      shown.tEndS >= recording.durationS;
+    if (alreadyOverview) return undefined;
     let active = true;
     getSpectrogram(recordingId, { tStartS: activeWindow.tStartS, tEndS: activeWindow.tEndS })
       .then((next) => {
@@ -154,6 +163,8 @@ export function SpectrumAnalysisPage() {
         if (active) setError(toErrorText(reason, t("spectrum.loadRecordingError")));
       });
     return () => { active = false; };
+    // Deliberately not keyed on `spectrogram`: that would refetch right after we set it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordingId, recording, activeWindow, t]);
 
   // Execution environment selection for the SELECTED pipeline/recording only.

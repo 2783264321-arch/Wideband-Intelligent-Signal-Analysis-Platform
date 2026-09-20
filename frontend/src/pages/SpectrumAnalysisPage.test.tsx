@@ -155,6 +155,8 @@ interface SetupOptions {
   readbackFixture?: Record<string, unknown>;
   initialPath?: string;
   locale?: "zh-CN" | "en-US";
+  recordingFixture?: Record<string, unknown>;
+  spectrogramHandler?: (url: string) => Response;
 }
 
 function setup(options: SetupOptions = {}) {
