@@ -10,8 +10,53 @@ from app.pipelines.base import (
     RecordingInput,
 )
 from app.pipelines.plugin import PipelineRuntimeAdapter, PluginDeclaration
-from app.pipelines.stft_energy.detector import detect_stft_energy
+from app.pipelines.stft_energy.detector import EnergyRegion, detect_stft_energy
 from app.recordings.reader import read_segment_from_path
+
+# One 20 s, 100 MHz recording is 2e9 complex samples; reading it whole expands to
+# ~15 GiB and the STFT matrix to tens of GB. The detector therefore processes the
+# recording in bounded blocks. CHUNK_SECONDS caps the samples held at once and
+# CHUNK_OVERLAP_SECONDS keeps a signal that straddles a boundary from being split.
+CHUNK_SECONDS = 1.0
+CHUNK_OVERLAP_SECONDS = 0.02
+
+
+def _chunk_bounds(num_samples: int, chunk_samples: int, overlap_samples: int) -> list[tuple[int, int]]:
+    """Half-open (start, end) sample ranges covering [0, num_samples) with overlap."""
+    if num_samples <= 0:
+        return []
+    if num_samples <= chunk_samples:
+        return [(0, num_samples)]
+    step = max(chunk_samples - overlap_samples, 1)
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    while start < num_samples:
+        end = min(start + chunk_samples, num_samples)
+        bounds.append((start, end))
+        if end >= num_samples:
+            break
+        start += step
+    return bounds
+
+
+def _merge_regions(regions: list[EnergyRegion]) -> list[EnergyRegion]:
+    """Fold regions duplicated by chunk overlap, keeping the strongest of each pair."""
+    merged: list[EnergyRegion] = []
+    for region in sorted(regions, key=lambda item: (item.t_start_s, item.f_low_hz)):
+        duplicate_index = None
+        for index, kept in enumerate(merged):
+            time_overlaps = region.t_start_s <= kept.t_end_s and kept.t_start_s <= region.t_end_s
+            freq_overlaps = region.f_low_hz <= kept.f_high_hz and kept.f_low_hz <= region.f_high_hz
+            if time_overlaps and freq_overlaps:
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            merged.append(region)
+            continue
+        kept = merged[duplicate_index]
+        if region.confidence > kept.confidence:
+            merged[duplicate_index] = region
+    return merged
 
 
 def _definition() -> PipelineDefinition:
@@ -51,13 +96,27 @@ class STFTEnergyDetectorPipeline(Pipeline):
 
     def run(self, recording: RecordingInput, parameters: dict[str, Any], workspace: Path) -> PipelineOutput:
         workspace.mkdir(parents=True, exist_ok=True)
-        iq = read_segment_from_path(recording.data_path, recording.data_format)
-        regions = detect_stft_energy(
-            iq,
-            sample_rate_hz=recording.sample_rate_hz,
-            center_frequency_hz=recording.center_frequency_hz,
-            **parameters,
-        )
+        num_samples = max(int(round(recording.duration_s * recording.sample_rate_hz)), 0)
+        chunk_samples = max(int(round(CHUNK_SECONDS * recording.sample_rate_hz)), 1)
+        overlap_samples = max(int(round(CHUNK_OVERLAP_SECONDS * recording.sample_rate_hz)), 0)
+        bounds = _chunk_bounds(num_samples, chunk_samples, overlap_samples)
+
+        collected: list[EnergyRegion] = []
+        for start, end in bounds:
+            iq = read_segment_from_path(
+                recording.data_path, recording.data_format, start, end - start
+            )
+            collected.extend(
+                detect_stft_energy(
+                    iq,
+                    sample_rate_hz=recording.sample_rate_hz,
+                    center_frequency_hz=recording.center_frequency_hz,
+                    time_offset_s=start / recording.sample_rate_hz,
+                    **parameters,
+                )
+            )
+
+        regions = _merge_regions(collected)
         detections = [
             DetectionPayload(
                 t_start_s=region.t_start_s,
@@ -78,6 +137,9 @@ class STFTEnergyDetectorPipeline(Pipeline):
                 "kind": "stft_energy_detector",
                 "task_capability": "detection_localization",
                 "region_count": len(regions),
+                "chunk_count": len(bounds),
+                "chunk_seconds": CHUNK_SECONDS,
+                "chunk_overlap_seconds": CHUNK_OVERLAP_SECONDS,
             },
         )
 

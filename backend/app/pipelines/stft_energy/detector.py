@@ -36,7 +36,14 @@ def detect_stft_energy(
     min_area: int = 100,
     min_duration_s: float = 0.0,
     min_bandwidth_hz: float = 0.0,
+    time_offset_s: float = 0.0,
 ) -> list[EnergyRegion]:
+    """Detect energy regions in one contiguous IQ block.
+
+    ``time_offset_s`` is the block's start time on the recording clock; it is added
+    to every region so a chunked caller (which feeds the recording in blocks) still
+    reports absolute times.
+    """
     if iq.ndim != 1 or iq.size == 0:
         raise ValueError("IQ input must be a non-empty 1D array.")
     if sample_rate_hz <= 0:
@@ -86,8 +93,8 @@ def detect_stft_energy(
             continue
         frequency_indices = frequency_slice.start + rows
         time_indices = time_slice.start + cols
-        t_low_s = time_axis_s[time_indices.min()] - time_hop_s / 2.0
-        t_high_s = time_axis_s[time_indices.max()] + time_hop_s / 2.0
+        t_low_s = time_axis_s[time_indices.min()] - time_hop_s / 2.0 + time_offset_s
+        t_high_s = time_axis_s[time_indices.max()] + time_hop_s / 2.0 + time_offset_s
         f_low_hz = frequency_axis_hz[frequency_indices.min()] - time_bin_hz / 2.0
         f_high_hz = frequency_axis_hz[frequency_indices.max()] + time_bin_hz / 2.0
         if t_high_s - t_low_s < min_duration_s:

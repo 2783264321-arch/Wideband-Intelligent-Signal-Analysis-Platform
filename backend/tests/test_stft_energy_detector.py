@@ -172,3 +172,73 @@ def test_signal_presence_label_space_is_a_single_generic_class(settings):
     assert len(labels.classes) == 1
     assert labels.classes[0].id == 0
     assert labels.classes[0].name == "Signal"
+
+
+def test_chunk_bounds_cover_the_recording_with_overlap():
+    from app.pipelines.stft_energy.pipeline import _chunk_bounds
+
+    # 10 samples, 4-sample chunks, 1-sample overlap -> step 3.
+    bounds = _chunk_bounds(num_samples=10, chunk_samples=4, overlap_samples=1)
+    assert bounds[0] == (0, 4)
+    assert bounds[-1][1] == 10
+    # Every adjacent pair overlaps, and there are no gaps.
+    for (start, end), (next_start, next_end) in zip(bounds, bounds[1:]):
+        assert next_start < end
+        assert next_end > end
+    # A short recording stays a single chunk.
+    assert _chunk_bounds(num_samples=3, chunk_samples=4, overlap_samples=1) == [(0, 3)]
+
+
+def test_pipeline_detects_burst_in_a_later_chunk_with_absolute_time(tmp_path: Path):
+    """A long recording is processed in bounded chunks; times stay absolute.
+
+    This is the regression guard for the 20 s OOM: the pipeline must not read the
+    whole file (which expands to ~15 GiB at 100 MHz) and must add each chunk's
+    offset so detections past the first chunk land at the right time.
+    """
+    from app.pipelines.base import RecordingInput
+    from app.pipelines.stft_energy.pipeline import CHUNK_SECONDS, STFTEnergyDetectorPipeline
+
+    sample_rate_hz = 1_000_000.0
+    duration_s = 3.5  # spans 4 one-second chunks
+    num_samples = int(duration_s * sample_rate_hz)
+    # Burst deliberately placed in the 4th chunk, away from the start.
+    burst_start_s, burst_end_s = 3.05, 3.25
+    iq = _burst_tone_iq(num_samples, sample_rate_hz, 100_000.0, burst_start_s, burst_end_s, amplitude=2.0)
+    iq_path = tmp_path / "long_burst.iq"
+    iq.astype("<c8").tofile(iq_path)
+
+    recording = RecordingInput(
+        id="rec_chunked",
+        data_path=iq_path,
+        data_format="complex64_le",
+        sample_rate_hz=sample_rate_hz,
+        center_frequency_hz=0.0,
+        frequency_low_hz=-sample_rate_hz / 2,
+        frequency_high_hz=sample_rate_hz / 2,
+        duration_s=duration_s,
+        label_space=None,
+    )
+    output = STFTEnergyDetectorPipeline().run(recording, {}, tmp_path / "ws")
+
+    assert output.run_metadata["chunk_count"] > 1
+    assert output.run_metadata["chunk_seconds"] == CHUNK_SECONDS
+    assert output.detections, "expected the burst to be detected"
+    # The detected region must be reported on the recording clock, not chunk-local.
+    best = max(output.detections, key=lambda d: d.confidence)
+    assert best.t_start_s >= 2.9
+    assert best.t_end_s <= 3.4
+
+
+def test_merge_regions_deduplicates_chunk_overlap():
+    from app.pipelines.stft_energy.detector import EnergyRegion
+    from app.pipelines.stft_energy.pipeline import _merge_regions
+
+    left = EnergyRegion(1.00, 1.20, 100.0, 200.0, confidence=0.3, energy_margin_db=1.0)
+    # Same region seen again at the chunk boundary, but stronger.
+    right = EnergyRegion(1.02, 1.22, 100.0, 200.0, confidence=0.9, energy_margin_db=2.0)
+    separate = EnergyRegion(2.00, 2.20, 100.0, 200.0, confidence=0.5, energy_margin_db=1.5)
+
+    merged = _merge_regions([left, right, separate])
+    assert len(merged) == 2
+    assert max(region.confidence for region in merged) == 0.9
