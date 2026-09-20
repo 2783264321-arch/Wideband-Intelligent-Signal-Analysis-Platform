@@ -99,3 +99,62 @@ def read_segment(
 ) -> np.ndarray:
     path = resolve_recording_path(recording, data_root)
     return read_segment_from_path(path, recording.data_format, start_sample, sample_count)
+
+
+def read_samples_at_from_path(
+    path: Path,
+    data_format: str,
+    indices: np.ndarray,
+) -> np.ndarray:
+    """Read arbitrary complex samples by index, with memory bounded by ``indices``.
+
+    Bounded previews (e.g. decimating a multi-GB recording down to a few thousand
+    waveform points) must never load the whole file. Only the requested samples are
+    materialised, so cost scales with ``len(indices)`` and not with the file size.
+    """
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise PlatformError("INVALID_RECORDING", "Recording IQ file is missing.")
+    wanted = np.asarray(indices, dtype=np.int64)
+    if wanted.ndim != 1:
+        raise PlatformError("INVALID_RECORDING", "Sample indices must be one-dimensional.")
+
+    if data_format == "complex64_le":
+        byte_size = path.stat().st_size
+        if byte_size % 8:
+            raise PlatformError("INVALID_RECORDING", "complex64_le IQ byte length is not divisible by 8.")
+        available = byte_size // 8
+        if wanted.size and int(wanted.max()) >= available:
+            raise PlatformError("INVALID_RECORDING", "Requested IQ samples are outside the recording.")
+        if wanted.size == 0:
+            return np.empty(0, dtype=np.complex64)
+        data = np.memmap(path, dtype="<c8", mode="r", shape=(available,))
+        try:
+            return np.asarray(data[wanted], dtype=np.complex64).copy()
+        finally:
+            del data
+
+    if data_format in ("float16_interleaved_le", "int16_interleaved_le"):
+        byte_size = path.stat().st_size
+        if byte_size % 4:
+            raise PlatformError(
+                "INVALID_RECORDING", f"{data_format} byte length is not divisible by 4."
+            )
+        available = byte_size // 4
+        if wanted.size and int(wanted.max()) >= available:
+            raise PlatformError("INVALID_RECORDING", "Requested IQ samples are outside the recording.")
+        if wanted.size == 0:
+            return np.empty(0, dtype=np.complex64)
+        numpy_dtype = "<f2" if data_format == "float16_interleaved_le" else "<i2"
+        data = np.memmap(path, dtype=numpy_dtype, mode="r", shape=(available * 2,))
+        try:
+            pair_indices = np.empty(wanted.size * 2, dtype=np.int64)
+            pair_indices[0::2] = wanted * 2
+            pair_indices[1::2] = wanted * 2 + 1
+            interleaved = np.asarray(data[pair_indices], dtype=np.float32)
+        finally:
+            del data
+        pairs = interleaved.reshape(-1, 2)
+        return (pairs[:, 0] + 1j * pairs[:, 1]).astype(np.complex64, copy=False)
+
+    raise PlatformError("INVALID_RECORDING", f"Unsupported IQ format: {data_format}")

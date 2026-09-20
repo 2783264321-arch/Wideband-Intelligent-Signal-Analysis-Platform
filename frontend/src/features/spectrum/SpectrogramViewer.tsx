@@ -1,5 +1,5 @@
 import { Button, Space, theme } from "antd";
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
 import type { DetectionResult, GroundTruthResult, SpectrogramMeta } from "../../api/types";
 import { frequencyToPercentFromTop, timeToPercent } from "./coordinates";
@@ -46,6 +46,34 @@ const baseFrameStyle: CSSProperties = {
 
 const clamp = (value: number, low: number, high: number) => Math.min(Math.max(value, low), high);
 
+/**
+ * Density guards. A wideband scene can legitimately carry hundreds of signals
+ * (and a permissive detector thousands of boxes): drawing every one of them, with
+ * per-box numbering, produces an unreadable mush. Above these limits the overlay
+ * keeps the strongest detections and drops GT numbering, and the legend says so.
+ */
+const DENSE_DETECTION_LIMIT = 300;
+const DENSE_DETECTION_KEEP = 200;
+const MAX_GROUND_TRUTH_NUMBERS = 30;
+/** Extra fraction of the visible span kept when culling to the viewport. */
+const VIEWPORT_MARGIN = 0.05;
+
+interface VisibleWindow {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+function intersects(window: VisibleWindow, box: { x: number; y: number; width: number; height: number }): boolean {
+  return (
+    box.x + box.width >= window.x0 &&
+    box.x <= window.x1 &&
+    box.y + box.height >= window.y0 &&
+    box.y <= window.y1
+  );
+}
+
 function boxGeometry(box: { tStartS: number; tEndS: number; fLowHz: number; fHighHz: number }, meta: SpectrogramMeta) {
   const x = timeToPercent(box.tStartS, meta.tStartS, meta.tEndS);
   const x2 = timeToPercent(box.tEndS, meta.tStartS, meta.tEndS);
@@ -70,6 +98,23 @@ export function SpectrogramViewer({
   const [dragOrigin, setDragOrigin] = useState<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const [cursor, setCursor] = useState<{ timeS: number; frequencyHz: number } | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
+  // Measured frame size; a plain ref read would not re-run the culling memos.
+  const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const measure = () => {
+      const frame = frameRef.current;
+      if (!frame) return;
+      setFrameSize((current) =>
+        current.width === frame.clientWidth && current.height === frame.clientHeight
+          ? current
+          : { width: frame.clientWidth, height: frame.clientHeight },
+      );
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [zoom, pan.x, pan.y]);
 
   const frameStyle: CSSProperties = {
     ...baseFrameStyle,
@@ -80,6 +125,54 @@ export function SpectrogramViewer({
     setZoom(FIT_ZOOM);
     setPan({ x: 0, y: 0 });
   };
+
+  /**
+   * Percent-space window currently visible in the viewport (or null when the whole
+   * image is visible / the frame has no measurable size, e.g. in tests). Used to
+   * cull overlays so a dense scene only pays for what is on screen.
+   */
+  const visibleWindow = useMemo<VisibleWindow | null>(() => {
+    if (zoom <= FIT_ZOOM) return null;
+    const { width, height } = frameSize;
+    if (width <= 0 || height <= 0) return null;
+    const x0 = ((-pan.x) / (width * zoom)) * 100;
+    const x1 = ((width - pan.x) / (width * zoom)) * 100;
+    const y0 = ((-pan.y) / (height * zoom)) * 100;
+    const y1 = ((height - pan.y) / (height * zoom)) * 100;
+    const spanX = (x1 - x0) * VIEWPORT_MARGIN;
+    const spanY = (y1 - y0) * VIEWPORT_MARGIN;
+    return { x0: x0 - spanX, x1: x1 + spanX, y0: y0 - spanY, y1: y1 + spanY };
+  }, [zoom, pan.x, pan.y, frameSize]);
+
+  const { drawnGroundTruth, groundTruthNumbered } = useMemo(() => {
+    const culled = visibleWindow === null
+      ? groundTruth
+      : groundTruth.filter((item) => intersects(visibleWindow, boxGeometry(item, meta)));
+    return { drawnGroundTruth: culled, groundTruthNumbered: culled.length <= MAX_GROUND_TRUTH_NUMBERS };
+  }, [groundTruth, meta, visibleWindow]);
+
+  const { drawnDetections, detectionsCapped } = useMemo(() => {
+    const culled = visibleWindow === null
+      ? detections
+      : detections.filter(
+          (detection) =>
+            detection.id === selectedDetectionId ||
+            intersects(visibleWindow, boxGeometry(detection, meta)),
+        );
+    if (culled.length <= DENSE_DETECTION_LIMIT) {
+      return { drawnDetections: culled, detectionsCapped: false };
+    }
+    // Too many boxes to read anyway: keep the strongest ones (the selected box
+    // always survives, so the user's current pick never disappears).
+    const strongest = [...culled]
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, DENSE_DETECTION_KEEP);
+    if (selectedDetectionId && !strongest.some((item) => item.id === selectedDetectionId)) {
+      const selected = culled.find((item) => item.id === selectedDetectionId);
+      if (selected) strongest.push(selected);
+    }
+    return { drawnDetections: strongest, detectionsCapped: true };
+  }, [detections, meta, selectedDetectionId, visibleWindow]);
 
   const updateCursor = (event: MouseEvent<HTMLDivElement>) => {
     const frame = frameRef.current;
@@ -141,7 +234,7 @@ export function SpectrogramViewer({
             aria-label={t("spectrum.detectionOverlays")}
             style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
           >
-            {groundTruth.map((item) => {
+            {drawnGroundTruth.map((item) => {
               const geometry = boxGeometry(item, meta);
               return (
                 <rect
@@ -158,7 +251,7 @@ export function SpectrogramViewer({
                 />
               );
             })}
-            {detections.map((detection) => {
+            {drawnDetections.map((detection) => {
               const geometry = boxGeometry(detection, meta);
               const selected = detection.id === selectedDetectionId;
               if (!selected && !showDetections) return null;
@@ -207,12 +300,12 @@ export function SpectrogramViewer({
             labelled signals a sample actually contains. Rendered as HTML (not SVG
             text) because the overlay SVG is non-uniformly scaled.
           */}
-          {groundTruth.length > 0 ? (
+          {drawnGroundTruth.length > 0 && groundTruthNumbered ? (
             <div
               data-testid="ground-truth-index-layer"
               style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
             >
-              {groundTruth.map((item, index) => {
+              {drawnGroundTruth.map((item, index) => {
                 const geometry = boxGeometry(item, meta);
                 return (
                   <span
@@ -270,6 +363,19 @@ export function SpectrogramViewer({
           </svg>
           {t("spectrum.legendSelected")}
         </span>
+        {detectionsCapped ? (
+          <span data-testid="spectrogram-legend-density-note" style={{ color: token.colorWarning }}>
+            {t("spectrum.legendDensityNote", {
+              shown: String(drawnDetections.length),
+              total: String(detections.length),
+            })}
+          </span>
+        ) : null}
+        {!groundTruthNumbered && drawnGroundTruth.length > 0 ? (
+          <span data-testid="spectrogram-legend-gt-numbering-note">
+            {t("spectrum.legendNumberingHidden")}
+          </span>
+        ) : null}
       </div>
       ) : null}
       <Space style={{ width: "100%", justifyContent: "space-between", marginTop: 8 }}>

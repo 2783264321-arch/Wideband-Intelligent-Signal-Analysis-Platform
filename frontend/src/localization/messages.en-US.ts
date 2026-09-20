@@ -216,6 +216,8 @@ export const enUS = {
   "spectrum.legend": "Legend",
   "spectrum.legendGroundTruth": "Ground Truth overlay",
   "spectrum.legendPrediction": "Prediction overlay",
+  "spectrum.legendDensityNote": "Dense scene: showing the top {shown} of {total} detections by confidence.",
+  "spectrum.legendNumberingHidden": "Too many ground-truth boxes to number individually; zoom in to read them.",
   "spectrum.legendSelected": "Selected prediction overlay",
   "spectrum.cursorHint": "Move pointer to inspect time / frequency",
   "spectrum.detectionOverlays": "Detection overlays",

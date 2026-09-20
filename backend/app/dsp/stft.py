@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 from pathlib import Path
 
 import matplotlib
@@ -11,8 +12,12 @@ import numpy as np
 from scipy.signal import stft as scipy_stft
 
 from app.recordings.model import RecordingModel
+from app.recordings.reader import read_samples_at_from_path, resolve_recording_path
 from app.storage.service import StorageService
-from app.dsp.iq import read_iq
+
+# The display cannot resolve more columns than this; keeping the preview bounded
+# keeps both the render and the cache independent of recording length.
+MAX_PREVIEW_FRAMES = 2048
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,54 @@ def _cache_key(recording_id: str, nperseg: int, noverlap: int, nfft: int) -> str
     return hashlib.sha256(payload).hexdigest()[:24]
 
 
+def compute_decimated_stft(
+    path: Path,
+    data_format: str,
+    *,
+    sample_rate_hz: float,
+    center_frequency_hz: float,
+    num_samples: int,
+    nperseg: int = 512,
+    noverlap: int = 256,
+    nfft: int = 512,
+    target_frames: int = MAX_PREVIEW_FRAMES,
+) -> SpectrogramResult:
+    """STFT preview that never loads the whole recording.
+
+    A 20 s, 100 MHz recording has ~7.8M frames: computing (and caching) all of them
+    needs tens of GB. The display cannot show them anyway, so the preview keeps at
+    most ``target_frames`` columns, evenly spaced over the FULL duration, and reads
+    only those windows (``target_frames * nperseg`` samples). The time axis therefore
+    still spans the whole recording, which keeps the overlay mapping exact.
+    """
+    if num_samples <= 0:
+        raise ValueError("Recording has no samples.")
+    hop = max(nperseg - noverlap, 1)
+    total_frames = max(1, 1 + (num_samples - nperseg) // hop) if num_samples >= nperseg else 1
+    frame_stride = max(1, math.ceil(total_frames / max(target_frames, 1)))
+    frame_positions = np.arange(0, total_frames, frame_stride, dtype=np.int64)[:target_frames]
+    starts = frame_positions * hop
+    starts = np.minimum(starts, max(num_samples - nperseg, 0))
+
+    # One bounded gather: frames x nperseg samples (never the whole file).
+    window_indices = (starts[:, None] + np.arange(nperseg, dtype=np.int64)[None, :]).ravel()
+    window_indices = np.clip(window_indices, 0, max(num_samples - 1, 0))
+    block = read_samples_at_from_path(path, data_format, window_indices)
+    frames = block.reshape(starts.size, nperseg)
+
+    window = np.hanning(nperseg).astype(np.float32)
+    spectra = np.fft.fftshift(np.fft.fft(frames * window, n=nfft, axis=1), axes=1)
+    magnitude_db = 20.0 * np.log10(np.maximum(np.abs(spectra), np.finfo(np.float32).eps))
+
+    time_axis_s = (starts + nperseg / 2.0) / sample_rate_hz
+    baseband_hz = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / sample_rate_hz))
+    return SpectrogramResult(
+        magnitude_db=np.asarray(magnitude_db.T, dtype=np.float32),
+        time_axis_s=np.asarray(time_axis_s, dtype=np.float64),
+        frequency_axis_hz=np.asarray(baseband_hz + center_frequency_hz, dtype=np.float64),
+    )
+
+
 def _write_preview_png(path: Path, magnitude_db: np.ndarray) -> None:
     plt.imsave(path, magnitude_db, origin="lower", cmap="viridis", format="png")
 
@@ -91,25 +144,21 @@ def get_or_create_stft_preview(
 ) -> SpectrogramPreview:
     cache_dir = storage.spectrogram_cache_dir()
     key = _cache_key(recording.id, nperseg, noverlap, nfft)
-    npz_path = cache_dir / f"{key}.npz"
     png_path = cache_dir / f"{key}.png"
 
-    if not npz_path.exists() or not png_path.exists():
-        iq = read_iq(recording, data_root)
-        result = compute_stft(
-            iq,
+    if not png_path.exists():
+        path = resolve_recording_path(recording, data_root)
+        result = compute_decimated_stft(
+            path,
+            recording.data_format,
             sample_rate_hz=recording.sample_rate_hz,
             center_frequency_hz=recording.center_frequency_hz,
+            num_samples=int(recording.num_samples),
             nperseg=nperseg,
             noverlap=noverlap,
             nfft=nfft,
         )
-        np.savez_compressed(
-            npz_path,
-            magnitude_db=result.magnitude_db,
-            time_axis_s=result.time_axis_s,
-            frequency_axis_hz=result.frequency_axis_hz,
-        )
+        cache_dir.mkdir(parents=True, exist_ok=True)
         _write_preview_png(png_path, result.magnitude_db)
 
     return SpectrogramPreview(

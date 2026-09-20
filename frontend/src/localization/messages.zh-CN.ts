@@ -222,6 +222,8 @@ export const zhCN: Record<MessageKey, string> = {
   "spectrum.legend": "图例",
   "spectrum.legendGroundTruth": "真值标注（GT）叠加层",
   "spectrum.legendPrediction": "检测结果叠加层",
+  "spectrum.legendDensityNote": "信号过密：按置信度仅显示前 {shown} / {total} 个检测框。",
+  "spectrum.legendNumberingHidden": "真值框过多，已隐藏编号；放大后可逐个查看。",
   "spectrum.legendSelected": "已选检测结果叠加层",
   "spectrum.cursorHint": "移动指针查看时间 / 频率",
   "spectrum.detectionOverlays": "检测结果叠加层",

@@ -7,9 +7,9 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
 from app.core.errors import PlatformError
-from app.dsp.iq import read_iq
 from app.dsp.spectrum import compute_spectrum_preview
 from app.dsp.stft import get_or_create_stft_preview
+from app.recordings.reader import read_samples_at_from_path, resolve_recording_path
 from app.recordings.service import RecordingService
 
 router = APIRouter(prefix="/api/recordings", tags=["dsp"])
@@ -104,12 +104,22 @@ def get_waveform(
             raise PlatformError("INVALID_RECORDING", "Waveform time range must lie inside the recording.")
         start_sample = max(0, int(math.floor(t_start_s * recording.sample_rate_hz)))
         end_sample = min(recording.num_samples, int(math.ceil(t_end_s * recording.sample_rate_hz)))
-        iq = read_iq(recording, request.app.state.settings.data_root, start_sample, max(end_sample - start_sample, 1))
+        span = max(end_sample - start_sample, 1)
+        # Decimate FIRST and read only the samples that will be drawn. Reading the
+        # whole requested span (a 20 s, 100 MHz recording is 16 GB as complex64)
+        # would exhaust memory for a waveform preview.
+        if span <= max_points:
+            relative = np.arange(span, dtype=np.int64)
+        else:
+            stride = max(1, math.ceil(span / max_points))
+            relative = np.arange(0, span, stride, dtype=np.int64)[:max_points]
+        path = resolve_recording_path(recording, request.app.state.settings.data_root)
+        sampled = read_samples_at_from_path(
+            path, recording.data_format, start_sample + relative
+        )
 
-    stride = max(1, math.ceil(iq.size / max_points))
-    indices = np.arange(iq.size, dtype=np.int64)[::stride]
-    sampled = iq[::stride]
-    times = (start_sample + indices) / recording.sample_rate_hz
+    indices = start_sample + relative
+    times = indices / recording.sample_rate_hz
     return WaveformRead(
         time_s=np.asarray(times, dtype=float).tolist(),
         i=np.asarray(sampled.real, dtype=float).tolist(),

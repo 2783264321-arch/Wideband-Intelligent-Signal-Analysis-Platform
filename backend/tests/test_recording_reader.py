@@ -5,7 +5,7 @@ import pytest
 
 from app.core.errors import PlatformError
 from app.recordings.model import RecordingModel
-from app.recordings.reader import read_segment, read_segment_from_path
+from app.recordings.reader import read_samples_at_from_path, read_segment, read_segment_from_path
 
 
 def _complex64_file(path: Path) -> None:
@@ -147,3 +147,29 @@ def test_read_segment_rejects_truncated_int16_length(tmp_path: Path):
     np.array([1, 2, 3], dtype="<i2").tofile(path)  # 3 ints -> not a full I/Q pair
     with pytest.raises(PlatformError):
         read_segment_from_path(path, "int16_interleaved_le")
+
+
+def test_read_samples_at_reads_only_requested_indices(tmp_path: Path):
+    path = tmp_path / "raw.iq"
+    _complex64_file(path)
+    iq = read_samples_at_from_path(path, "complex64_le", np.array([0, 2, 4], dtype=np.int64))
+    np.testing.assert_array_equal(iq, np.array([1 + 2j, 5 + 6j, 9 + 10j], dtype=np.complex64))
+
+
+def test_read_samples_at_handles_interleaved_int16_and_float16(tmp_path: Path):
+    int16_path = tmp_path / "scene.iq"
+    _int16_file(int16_path)
+    int16_iq = read_samples_at_from_path(int16_path, "int16_interleaved_le", np.array([3, 1], dtype=np.int64))
+    np.testing.assert_array_equal(int16_iq, np.array([7 + 8j, 3 + 4j], dtype=np.complex64))
+
+    float16_path = tmp_path / "sample.bin"
+    _float16_file(float16_path)
+    float16_iq = read_samples_at_from_path(float16_path, "float16_interleaved_le", np.array([4], dtype=np.int64))
+    np.testing.assert_array_equal(float16_iq, np.array([9 + 10j], dtype=np.complex64))
+
+
+def test_read_samples_at_rejects_out_of_range_indices(tmp_path: Path):
+    path = tmp_path / "raw.iq"
+    _complex64_file(path)
+    with pytest.raises(PlatformError):
+        read_samples_at_from_path(path, "complex64_le", np.array([5], dtype=np.int64))

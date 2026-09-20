@@ -232,3 +232,51 @@ test("localizes ordinary controls and hints in zh-CN without changing physical v
   expect(screen.queryByRole("button", { name: "Reset View" })).toBeNull();
   expect(screen.getByText("0.000000 s")).toBeInTheDocument();
 });
+
+test("a dense prediction set keeps only the strongest boxes and says so", () => {
+  const many = Array.from({ length: 420 }, (_value, index) => ({
+    ...detections[0],
+    id: `det_${index}`,
+    confidence: (index % 100) / 100,
+  }));
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={many} groundTruth={[]} />));
+
+  const drawn = screen.getAllByTestId(/^overlay-det-det_/);
+  expect(drawn.length).toBeLessThanOrEqual(200);
+  const note = screen.getByTestId("spectrogram-legend-density-note");
+  expect(note).toHaveTextContent("top");
+  expect(note).toHaveTextContent("420");
+});
+
+test("the selected detection always survives the density cap", () => {
+  const many = Array.from({ length: 420 }, (_value, index) => ({
+    ...detections[0],
+    id: `det_${index}`,
+    confidence: 0.01,
+  }));
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer meta={meta} detections={many} groundTruth={[]} selectedDetectionId="det_419" />,
+    ),
+  );
+  expect(screen.getByTestId("overlay-det-det_419")).toHaveAttribute("data-selected", "true");
+});
+
+test("ground-truth numbering is hidden for very dense ground truth", () => {
+  const many = Array.from({ length: 40 }, (_value, index) => groundTruth(`gt_${index}`));
+  render(renderWithLocalization(<SpectrogramViewer meta={meta} detections={[]} groundTruth={many} />));
+
+  expect(screen.queryByTestId("ground-truth-index-layer")).toBeNull();
+  expect(screen.getByTestId("spectrogram-legend-gt-numbering-note")).toBeInTheDocument();
+  expect(screen.getAllByTestId(/^overlay-gt-gt_/).length).toBe(40);
+});
+
+test("ordinary ground truth still gets numbers", () => {
+  render(
+    renderWithLocalization(
+      <SpectrogramViewer meta={meta} detections={[]} groundTruth={[groundTruth("gt_1"), groundTruth("gt_2")]} />,
+    ),
+  );
+  expect(screen.getByTestId("overlay-gt-index-gt_1")).toHaveTextContent("1");
+  expect(screen.queryByTestId("spectrogram-legend-gt-numbering-note")).toBeNull();
+});

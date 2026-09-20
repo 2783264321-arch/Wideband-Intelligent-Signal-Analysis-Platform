@@ -5,7 +5,7 @@ import numpy as np
 from iq_fixture import write_tiny_iq
 
 from app.dsp.iq import read_iq
-from app.dsp.stft import compute_stft
+from app.dsp.stft import MAX_PREVIEW_FRAMES, compute_decimated_stft, compute_stft
 from app.recordings.model import RecordingModel
 
 
@@ -81,5 +81,56 @@ def test_spectrogram_api_returns_cached_preview_and_physical_bounds(client):
     assert image.headers["content-type"] == "image/png"
 
     cache_files = list((client.app.state.settings.data_root / "cache" / "spectrograms").glob("*"))
-    assert any(path.suffix == ".npz" for path in cache_files)
+    # Only the rendered PNG is cached: the preview is bounded, so the giant
+    # per-recording magnitude array must not be persisted.
     assert any(path.suffix == ".png" for path in cache_files)
+    assert not any(path.suffix == ".npz" for path in cache_files)
+
+
+def test_spectrogram_preview_bounds_frames_for_long_recordings(tmp_path: Path):
+    path = tmp_path / "long.iq"
+    samples = 2_000_000
+    np.zeros(samples, dtype="<c8").tofile(path)
+
+    result = compute_decimated_stft(
+        path,
+        "complex64_le",
+        sample_rate_hz=1_000_000.0,
+        center_frequency_hz=2_441_000_000.0,
+        num_samples=samples,
+        nperseg=512,
+        noverlap=256,
+        nfft=512,
+    )
+
+    # 2,000,000 samples would be ~7,800 frames; the preview is capped instead.
+    assert result.magnitude_db.shape[1] <= MAX_PREVIEW_FRAMES
+    assert result.magnitude_db.shape[0] == 512
+    # ...while still spanning the whole recording (so overlay mapping stays exact).
+    duration_s = samples / 1_000_000.0
+    assert result.time_axis_s[0] < 0.001
+    assert result.time_axis_s[-1] > duration_s * 0.9
+
+
+def test_waveform_preview_decimates_instead_of_reading_everything(client, tmp_path: Path):
+    path = tmp_path / "long.iq"
+    samples = 2_000_000
+    np.zeros(samples, dtype="<c8").tofile(path)
+    registered = client.post(
+        "/api/recordings/register-path",
+        json={
+            "path": str(path),
+            "name": "long-waveform",
+            "data_format": "complex64_le",
+            "sample_rate_hz": 1_000_000.0,
+            "center_frequency_hz": 2_441_000_000.0,
+        },
+    ).json()
+
+    payload = client.get(
+        f"/api/recordings/{registered['id']}/waveform?t_start_s=0&t_end_s=2.0&max_points=1000"
+    ).json()
+
+    assert len(payload["time_s"]) == 1000
+    assert payload["time_s"][0] == 0.0
+    assert payload["time_s"][-1] >= 1.99
