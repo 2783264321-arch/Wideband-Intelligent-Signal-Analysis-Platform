@@ -158,6 +158,18 @@ def _write_preview_png(path: Path, magnitude_db: np.ndarray) -> None:
     plt.imsave(path, magnitude_db, origin="lower", cmap="viridis", format="png")
 
 
+def _png_width(path: Path) -> int:
+    """Read the width from a PNG IHDR chunk (bytes 16-20), no image decode."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(24)
+    except OSError:
+        return 0
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        return 0
+    return int.from_bytes(header[16:20], "big")
+
+
 def get_or_create_stft_preview(
     recording: RecordingModel,
     *,
@@ -216,7 +228,9 @@ def get_or_create_stft_preview(
         _write_preview_png(png_path, result.magnitude_db)
         num_frames = int(result.time_axis_s.size)
     else:
-        num_frames = 0
+        # Cache hit: the column count is the PNG width, so the resolution hint
+        # stays correct without recomputing the STFT.
+        num_frames = _png_width(png_path) or 0
 
     actual_start_s = (start_sample / recording.sample_rate_hz) if not is_overview else 0.0
     actual_end_s = (

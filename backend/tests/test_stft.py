@@ -207,6 +207,30 @@ def test_spectrogram_window_rejects_out_of_range(client, tmp_path: Path):
     )
 
 
+def test_spectrogram_window_reports_frames_on_cache_hit(client, tmp_path: Path):
+    path = tmp_path / "long.iq"
+    np.zeros(2_000_000, dtype="<c8").tofile(path)
+    recording_id = client.post(
+        "/api/recordings/register-path",
+        json={
+            "path": str(path),
+            "name": "cache-hit-frames",
+            "data_format": "complex64_le",
+            "sample_rate_hz": 1_000_000.0,
+            "center_frequency_hz": 2_441_000_000.0,
+        },
+    ).json()["id"]
+
+    url = f"/api/recordings/{recording_id}/spectrogram?t_start_s=0.5&t_end_s=0.7"
+    first = client.get(url).json()
+    second = client.get(url).json()
+    assert first["num_frames"] > 0
+    # The resolved PNG is cached, but the column count (and thus the UI hint)
+    # must survive a cache hit instead of collapsing to zero.
+    assert second["image_url"] == first["image_url"]
+    assert second["num_frames"] == first["num_frames"]
+
+
 def test_waveform_preview_decimates_instead_of_reading_everything(client, tmp_path: Path):
     path = tmp_path / "long.iq"
     samples = 2_000_000
