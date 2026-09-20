@@ -188,6 +188,9 @@ export const zhCN: Record<MessageKey, string> = {
   "spectrum.subtitle": "查看单条信号记录的时频表示。",
   "spectrum.detectedSignals": "信号检测结果",
   "spectrum.selected": "已选",
+  "spectrum.timeWindowLabel": "时间窗",
+  "spectrum.timeWindowOverview": "全程概览",
+  "spectrum.resolutionHint": "每列 {ms} ms",
 
   "signals.title": "信号检测结果",
   "signals.empty": "该分析任务暂无检测结果。",

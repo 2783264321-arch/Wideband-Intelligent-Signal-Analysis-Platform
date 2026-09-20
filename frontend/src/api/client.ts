@@ -138,6 +138,7 @@ interface SpectrogramWire {
   t_end_s: number;
   f_low_hz: number;
   f_high_hz: number;
+  num_frames?: number;
 }
 
 interface DetectionWire {
@@ -286,8 +287,16 @@ export async function getRecording(recordingId: string): Promise<RecordingDetail
   return mapRecording(await apiGet<RecordingWire>(`/api/recordings/${recordingId}`));
 }
 
-export async function getSpectrogram(recordingId: string): Promise<SpectrogramMeta> {
-  const item = await apiGet<SpectrogramWire>(`/api/recordings/${recordingId}/spectrogram?representation=stft`);
+export async function getSpectrogram(
+  recordingId: string,
+  window?: { tStartS: number; tEndS: number },
+): Promise<SpectrogramMeta> {
+  const query = new URLSearchParams({ representation: "stft" });
+  if (window) {
+    query.set("t_start_s", String(window.tStartS));
+    query.set("t_end_s", String(window.tEndS));
+  }
+  const item = await apiGet<SpectrogramWire>(`/api/recordings/${recordingId}/spectrogram?${query}`);
   return {
     representation: item.representation,
     imageUrl: apiUrl(item.image_url),
@@ -295,6 +304,7 @@ export async function getSpectrogram(recordingId: string): Promise<SpectrogramMe
     tEndS: item.t_end_s,
     fLowHz: item.f_low_hz,
     fHighHz: item.f_high_hz,
+    numFrames: item.num_frames ?? 0,
   };
 }
 

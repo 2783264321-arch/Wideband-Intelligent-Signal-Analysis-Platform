@@ -170,12 +170,16 @@ function setup(options: SetupOptions = {}) {
     readbackFixture = runWire({ status: "completed" }),
     initialPath = "/spectrum/rec_1",
     locale = "en-US",
+    recordingFixture = recording,
+    spectrogramHandler,
   } = options;
 
   vi.stubGlobal("fetch", vi.fn(async (url: string, fetchOptions?: RequestInit) => {
     if (url.endsWith("/api/pipelines")) return new Response(JSON.stringify(pipelines));
-    if (url.endsWith("/api/recordings/rec_1")) return new Response(JSON.stringify(recording));
-    if (url.includes("/spectrogram")) return new Response(JSON.stringify(spectrogram));
+    if (url.endsWith("/api/recordings/rec_1")) return new Response(JSON.stringify(recordingFixture));
+    if (url.includes("/spectrogram")) {
+      return spectrogramHandler ? spectrogramHandler(url) : new Response(JSON.stringify(spectrogram));
+    }
     if (url.includes("/api/executor-selection")) {
       const pipelineId = new URL(url, "http://x").searchParams.get("pipeline_id") ?? "";
       selectionCalls.push(pipelineId);
@@ -691,4 +695,41 @@ test("defaults to STFT Energy Detector instead of a placeholder pipeline", async
   fireEvent.click(runButton);
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ pipeline_id: "stft_energy_detector", execution_mode: "auto" });
+});
+
+test("long recordings offer a time window that refetches a higher-resolution slice", async () => {
+  const longRecording = { ...recording, duration_s: 6.0, num_samples: 6000000 };
+  const requested: string[] = [];
+  setup({
+    pipelines: [localPipeline, detectorPipeline],
+    selection: selectionLocalAvailable,
+    recordingFixture: longRecording,
+    spectrogramHandler: (url) => {
+      requested.push(url);
+      const params = new URL(url, "http://x").searchParams;
+      const tStart = Number(params.get("t_start_s") ?? 0);
+      const tEnd = Number(params.get("t_end_s") ?? 6);
+      return new Response(
+        JSON.stringify({
+          ...spectrogram,
+          t_start_s: tStart,
+          t_end_s: tEnd,
+          image_url: `/media/spectrograms/key_${tStart}_${tEnd}.png`,
+          num_frames: 2048,
+        }),
+      );
+    },
+  });
+  await screen.findByText("Burst Demo");
+
+  // Full-duration overview is fetched first, so the selector is offered.
+  const selector = await screen.findByTestId("spectrum-time-window");
+  expect(selector).toBeInTheDocument();
+  expect(requested.some((url) => !url.includes("t_start_s"))).toBe(true);
+
+  // Picking the 2.0-4.0 s slice must refetch that window (higher resolution per column).
+  fireEvent.mouseDown(selector);
+  const option = await screen.findByTitle("2.0-4.0 s");
+  fireEvent.click(option);
+  await waitFor(() => expect(requested.some((url) => url.includes("t_start_s=2") && url.includes("t_end_s=4"))).toBe(true));
 });

@@ -18,6 +18,31 @@ import { SignalResultsPanel } from "../features/signals/SignalResultsPanel";
 
 const activeStatuses = new Set(["pending", "running"]);
 
+// Long recordings cannot show both "everything" and "fine detail" in one image, so
+// the preview is either the full-duration overview or a shorter, higher-resolution
+// slice. Slices are a fixed size so the selector stays predictable.
+const OVERVIEW_VALUE = "overview";
+const WINDOW_SLICE_S = 2;
+
+interface TimeWindowOption {
+  value: string;
+  tStartS: number;
+  tEndS: number;
+}
+
+function timeWindowOptions(durationS: number): TimeWindowOption[] {
+  const options: TimeWindowOption[] = [{ value: OVERVIEW_VALUE, tStartS: 0, tEndS: durationS }];
+  if (durationS <= WINDOW_SLICE_S * 1.5) return options;
+  const count = Math.ceil(durationS / WINDOW_SLICE_S);
+  for (let index = 0; index < count; index += 1) {
+    const start = index * WINDOW_SLICE_S;
+    const end = Math.min(start + WINDOW_SLICE_S, durationS);
+    if (end - start < 0.05) continue;
+    options.push({ value: `w${index}`, tStartS: start, tEndS: end });
+  }
+  return options;
+}
+
 function pipelineOptionLabel(item: PipelineDefinition, t: (key: MessageKey) => string): string {
   const base = `${item.name} · ${item.recommendedDevice}`;
   if (item.taskCapability === "detection_localization") {
@@ -49,6 +74,7 @@ export function SpectrumAnalysisPage() {
   const [selectedId, setSelectedId] = useState<string | undefined>(initial);
   const [recording, setRecording] = useState<RecordingDetail | null>(null);
   const [spectrogram, setSpectrogram] = useState<SpectrogramMeta | null>(null);
+  const [timeWindow, setTimeWindow] = useState<string>(OVERVIEW_VALUE);
   const [detections, setDetections] = useState<DetectionResult[]>([]);
   const [groundTruth, setGroundTruth] = useState<GroundTruthResult[]>([]);
   const [pipelines, setPipelines] = useState<PipelineDefinition[]>([]);
@@ -100,6 +126,35 @@ export function SpectrumAnalysisPage() {
       });
     return () => { active = false; };
   }, [recordingId, runId]);
+
+  // The overview is fetched with the initial load; switching the time window
+  // refetches just the spectrogram for that slice (higher resolution per column).
+  const windowOptions = useMemo(
+    () => (recording ? timeWindowOptions(recording.durationS) : []),
+    [recording],
+  );
+  const activeWindow = useMemo(
+    () => windowOptions.find((option) => option.value === timeWindow) ?? null,
+    [windowOptions, timeWindow],
+  );
+  const resolutionHint = useMemo(() => {
+    const frames = spectrogram?.numFrames ?? 0;
+    if (!spectrogram || frames <= 0) return null;
+    const secondsPerColumn = (spectrogram.tEndS - spectrogram.tStartS) / frames;
+    return t("spectrum.resolutionHint", { ms: (secondsPerColumn * 1000).toFixed(2) });
+  }, [spectrogram, t]);
+  useEffect(() => {
+    if (!recording || !activeWindow || activeWindow.value === OVERVIEW_VALUE) return undefined;
+    let active = true;
+    getSpectrogram(recordingId, { tStartS: activeWindow.tStartS, tEndS: activeWindow.tEndS })
+      .then((next) => {
+        if (active) setSpectrogram(next);
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(toErrorText(reason, t("spectrum.loadRecordingError")));
+      });
+    return () => { active = false; };
+  }, [recordingId, recording, activeWindow, t]);
 
   // Execution environment selection for the SELECTED pipeline/recording only.
   // On change the stale selection is cleared immediately and an in-flight response
@@ -245,6 +300,29 @@ export function SpectrumAnalysisPage() {
       <Space wrap>
         <Checkbox checked={showPredictions} onChange={(event) => setShowPredictions(event.target.checked)}>{t("common.prediction")}</Checkbox>
         <Checkbox checked={showGroundTruth} disabled={!groundTruth.length} onChange={(event) => setShowGroundTruth(event.target.checked)}>{t("common.groundTruth")}</Checkbox>
+        {windowOptions.length > 1 ? (
+          <Space size={6} align="center">
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t("spectrum.timeWindowLabel")}</Typography.Text>
+            <Select
+              data-testid="spectrum-time-window"
+              size="small"
+              value={timeWindow}
+              style={{ width: 150 }}
+              onChange={setTimeWindow}
+              options={windowOptions.map((option) =>
+                option.value === OVERVIEW_VALUE
+                  ? { value: option.value, label: t("spectrum.timeWindowOverview") }
+                  : {
+                      value: option.value,
+                      label: `${option.tStartS.toFixed(1)}-${option.tEndS.toFixed(1)} s`,
+                    },
+              )}
+            />
+            {resolutionHint ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{resolutionHint}</Typography.Text>
+            ) : null}
+          </Space>
+        ) : null}
         {currentRun ? (
           <RunStatusBadge status={currentRun.status} errorType={currentRun.errorType} errorMessage={currentRun.errorMessage} />
         ) : <Typography.Text type="secondary">{t("common.noRunSelected")}</Typography.Text>}

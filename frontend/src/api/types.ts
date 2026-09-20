@@ -30,6 +30,7 @@ export interface SpectrogramMeta {
   fLowHz: number;
   fHighHz: number;
   representation: "stft" | "ls-stft";
+  numFrames?: number;
 }
 
 export interface RecordingSummary {

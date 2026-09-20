@@ -182,6 +182,9 @@ export const enUS = {
   "spectrum.subtitle": "Inspect the time-frequency representation of one recording.",
   "spectrum.detectedSignals": "Detected Signals",
   "spectrum.selected": "Selected",
+  "spectrum.timeWindowLabel": "Time window",
+  "spectrum.timeWindowOverview": "Full overview",
+  "spectrum.resolutionHint": "{ms} ms / column",
 
   "signals.title": "Signals",
   "signals.empty": "No detection results for this run.",
